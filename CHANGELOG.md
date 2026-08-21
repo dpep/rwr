@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-08-21
 
 **`--diff` scopes a run to the lines a change touched**, so `check` can gate a pull request
 on a codebase that has never run it — three new sites fail, two thousand pre-existing ones do
