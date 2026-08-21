@@ -1,23 +1,23 @@
 # Open questions
 
-Unresolved design risk, roughly by severity. Q3, Q4, and Q5 are **closed** by the prior-art
-survey and recorded as decisions; kept here with their resolutions for continuity.
+**None are open.** Every question raised during design has been answered, and each is kept
+here with its resolution — the reasoning is worth more than the verdict, and several were
+answered *against* the assumption that raised them.
+
+Four were answered by measurement rather than argument, and all four moved:
+
+| | assumed | measured |
+|---|---|---|
+| Q1 residue | reviewable | 7/7 recall, but only reviewable for a distinctive name |
+| Q2 receivers without Sorbet | mostly recoverable | yes for named receivers, never for chained |
+| Q8 isomorphisms | a known trap, per Semgrep | Semgrep's deprecation was a batch sweep; the real signal is subtler |
+| Q11 templates | a templates problem | half of it was Ruby rwr refused to open |
+
+A question that gets closed by its own evidence is worth more than one that gets closed by
+being forgotten, so this file records the route as well as the answer. New questions go at
+the bottom, open, until something measures them.
 
 ---
-
-## Q8 — Are Coccinelle-style isomorphisms viable, or a known trap? *(new)*
-
-Named, individually disableable, position-typed equivalence rules — treating syntactically
-different but semantically equivalent code as one pattern. Ruby arguably needs them more
-than C does (`unless`/`if !`, `&&`/`and`, block vs `do…end`, safe navigation).
-
-**But Semgrep shipped exactly this** (`equivalences:`, e.g. `$X + $Y <==> $Y + $X`) and
-**deprecated it in v0.61.0 with no stated reason**, keeping only a fixed built-in set. That
-is strong negative evidence from the closest comparable, and the missing rationale is the
-interesting part — combinatorial blowup? unpredictable matches? nobody used it?
-
-Treat as a Phase 0 hypothesis, not a free win. Worth 30 minutes finding out why Semgrep
-pulled it before designing anything.
 
 ## Q12 - RuboCop positioning: resolved as complementary, personal-corpus-first
 
@@ -316,3 +316,43 @@ not.
 rather than repository size: discourse is 3.4× rails by file count and 2.7× by `find` time,
 while the pack, which cannot prefilter as sharply because ten rules contribute ten literal
 sets, scales closer to linear. That is the literal prefilter working as intended.
+
+## Q8 — Are Coccinelle-style isomorphisms viable, or a known trap? — **closed: no user-defined layer**
+
+The question asked for 30 minutes finding out why Semgrep pulled equivalences before
+designing anything. Done, and it changes the answer twice over.
+
+**The deprecation was a batch sweep, not a verdict.** Semgrep
+[v0.61.0](https://github.com/semgrep/semgrep/releases/tag/v0.61.0) (2021-08-04) deprecated
+four experimental features in a single bullet with no reason given:
+
+> Deprecated the following experimental features: `pattern-where-python`, `taint-mode`,
+> `equivalences`, step-by-step evaluation output
+
+**`taint-mode` was in that list and is now one of Semgrep's headline features** — 727 code
+hits in the repository today. So "Semgrep deprecated it" is much weaker evidence than this
+question assumed: the batch was a sweep of experimental surface, and membership in it says
+almost nothing about the individual feature.
+
+**The real signal is what happened next, and it is sharper.** Five years on, taint came back
+and equivalences did not. `equivalence` appears 42 times in the codebase, and every one is a
+*built-in* the matcher applies itself — name resolution, constant propagation,
+`(-) E vs -n`, matching through casts, `!=` normalised to `!(..=)`. Users still cannot define
+one. Given a decade and a large team, **the curated closed set survived and the open-ended
+user-facing form did not.**
+
+**rwr already has the half that survived.** Layout, block spelling and integer spelling do
+not affect equality; `{foo: 1}` and `{:foo => 1}` reach the same node so one pattern covers
+both; locations never compare (D36). Those are built-in, curated, and closed — the same
+shape as what Semgrep kept.
+
+**So the answer is: keep adding built-ins on evidence, and do not build a user-definable
+layer.** Each equivalence rwr has was added because a corpus entry needed it, which is a
+different process from offering `$X + $Y <==> $Y + $X` and discovering what it does to match
+counts. The failure mode a user-defined layer invites is precisely the one rwr cannot afford:
+a match that is confident, clean, and not what the author meant.
+
+*Reverses if:* a rule in the corpus genuinely needs an equivalence that cannot be expressed
+as a built-in — and the test is that it must arrive as a *rule someone wanted*, not as a
+capability someone imagined. That is the same bar `docs/rule-corpus.md` was created to
+enforce.
