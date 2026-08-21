@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**`T::Struct` field declarations feed receiver narrowing.** `const :name, String` states a
+type with no `sig` anywhere, and rwr was not reading it — 45,068 sites on a Sorbet monolith,
+a third again as many as its `sig` blocks. The signature prefilter now looks for `T::` as
+well, since a struct of pure field declarations contains no `sig` at all; it costs about
+10 ms on a codebase with no Sorbet. graph_weaver went from 79 signatures to 122.
+
 ## 0.4.0 — 2026-08-21
 
 **The shipped pack runs 42% faster** — 970 ms to 565 ms over discourse's 11,006 files — from
