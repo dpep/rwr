@@ -16,6 +16,7 @@ use rayon::prelude::*;
 use ruby_prism::Node;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Superclass links, keyed by class name.
 #[derive(Debug, Default, Clone)]
@@ -70,11 +71,99 @@ impl Hierarchy {
         Self::from_files(&files)
     }
 
-    pub(crate) fn from_files(files: &[PathBuf]) -> Self {
+    /// Build only the part of the hierarchy reachable from `roots`.
+    ///
+    /// A rename names one class, and only its descendants matter -- so rather
+    /// than parsing every file that declares any superclass, parse only those
+    /// mentioning a class already known to be in the tree, and iterate to a
+    /// fixpoint. `Gold < Premium < Account` is reached in two rounds: the first
+    /// finds Premium, which puts "Premium" into the search set for the second.
+    ///
+    /// The full build parses ~8,700 files on the local Ruby corpus; this
+    /// typically parses a handful, and is exact rather than approximate --
+    /// nothing is guessed, only deferred until a name is known to matter.
+    pub(crate) fn reachable_from(sources: &[Vec<u8>], roots: &[String]) -> (Self, usize) {
+        let class = memchr::memmem::Finder::new(b"class").into_owned();
+        let inherits = memchr::memmem::Finder::new(b"<").into_owned();
+
+        // Sources are read once by the caller and shared with the scan. Reading
+        // them here as well made the two phases each pay full I/O, which was
+        // most of the run -- parsing 72 files instead of 8,700 changed nothing
+        // until the reads stopped repeating.
+        let candidates: Vec<&Vec<u8>> = sources
+            .par_iter()
+            .filter(|src| class.find(src).is_some() && inherits.find(src).is_some())
+            .collect();
+
+        let mut known: HashSet<String> = roots.iter().cloned().collect();
+        let mut superclass: HashMap<String, String> = HashMap::new();
+        let mut done = vec![false; candidates.len()];
+        let mut parsed_total = 0usize;
+
+        loop {
+            let finders: Vec<memchr::memmem::Finder<'static>> = known
+                .iter()
+                .map(|n| memchr::memmem::Finder::new(n.as_bytes()).into_owned())
+                .collect();
+
+            let round: Vec<(usize, Vec<(String, String)>)> = candidates
+                .par_iter()
+                .enumerate()
+                .filter(|(i, _)| !done[*i])
+                .filter_map(|(i, src)| {
+                    let src: &[u8] = src;
+                    // Only a file naming a class already known to be in the
+                    // tree can extend it.
+                    if !finders.iter().any(|f| f.find(src).is_some()) {
+                        return None;
+                    }
+                    let parsed = ruby_prism::parse(src);
+                    if parsed.errors().count() > 0 {
+                        return None;
+                    }
+                    let mut found = Vec::new();
+                    links(&parsed.node(), &mut found);
+                    Some((i, found))
+                })
+                .collect();
+
+            parsed_total += round.len();
+            let mut grew = false;
+            for (i, found) in round {
+                done[i] = true;
+                for (child, parent) in found {
+                    if known.contains(&parent) && known.insert(child.clone()) {
+                        grew = true;
+                    }
+                    superclass.insert(child, parent);
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+
+        (Hierarchy { superclass }, parsed_total)
+    }
+
+    /// Build, also reporting how many files survived the prefilter.
+    pub(crate) fn from_files_counted(files: &[PathBuf]) -> (Self, usize) {
+        // Only a file containing `class` *and* `<` can declare a superclass, and
+        // the pattern prefilter cannot help here -- `class X < Y` has no rule
+        // literal to filter on. On the local Ruby corpus this skips about two
+        // thirds of files before any parse.
+        let class = memchr::memmem::Finder::new(b"class").into_owned();
+        let inherits = memchr::memmem::Finder::new(b"<").into_owned();
+        let parsed_count = AtomicUsize::new(0);
+
         let pairs: Vec<(String, String)> = files
             .par_iter()
             .filter_map(|path| {
                 let src = std::fs::read(path).ok()?;
+                if class.find(&src).is_none() || inherits.find(&src).is_none() {
+                    return None;
+                }
+                parsed_count.fetch_add(1, Ordering::Relaxed);
                 let parsed = ruby_prism::parse(&src);
                 if parsed.errors().count() > 0 {
                     return None;
@@ -86,9 +175,15 @@ impl Hierarchy {
             .flatten()
             .collect();
 
-        Hierarchy {
+        let hierarchy = Hierarchy {
             superclass: pairs.into_iter().collect(),
-        }
+        };
+        let parsed = parsed_count.load(Ordering::Relaxed);
+        (hierarchy, parsed)
+    }
+
+    pub(crate) fn from_files(files: &[PathBuf]) -> Self {
+        Self::from_files_counted(files).0
     }
 
     /// Whether `class` is `ancestor` or descends from it.

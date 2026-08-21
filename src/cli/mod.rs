@@ -569,6 +569,23 @@ fn cmd_apply(
         |f| format!("{} files", f.len()),
     );
 
+    // Read once and shared between the hierarchy and the scan. Each phase
+    // reading independently doubled the I/O, which profiling showed was most of
+    // the run -- the files are the cost, not the parsing.
+    let reading = profile::now();
+    let sources: Vec<Vec<u8>> = files
+        .par_iter()
+        .map(|p| std::fs::read(p).unwrap_or_default())
+        .collect();
+    profile::mark("read", reading, || {
+        let bytes: usize = sources.iter().map(Vec::len).sum();
+        format!(
+            "{} files, {:.1} MB",
+            sources.len(),
+            bytes as f64 / 1_048_576.0
+        )
+    });
+
     // Built per run rather than cached: a full rails parse is under 200ms
     // (Phase 0 measurement (d)), so there is no staleness to manage.
     let hierarchy = if rules.iter().any(|r| {
@@ -577,9 +594,26 @@ fn cmd_apply(
                 .values()
                 .any(|c| c.subclasses.unwrap_or(false))
     }) {
-        profile::span("hierarchy", || {
-            crate::hierarchy::Hierarchy::from_files(&files)
-        })
+        {
+            let started = profile::now();
+            // Only the part of the hierarchy reachable from the classes the
+            // rules name is needed, which is a handful rather than all of them.
+            let roots: Vec<String> = rules
+                .iter()
+                .filter_map(|r| {
+                    r.scope
+                        .inside
+                        .clone()
+                        .or_else(|| r.constraints.values().find_map(|c| c.receiver_type.clone()))
+                })
+                .collect();
+            let (h, parsed) = crate::hierarchy::Hierarchy::reachable_from(&sources, &roots);
+            let total = files.len();
+            profile::mark("hierarchy", started, || {
+                format!("{parsed} parsed, {} skipped", total.saturating_sub(parsed))
+            });
+            h
+        }
     } else {
         crate::hierarchy::Hierarchy::default()
     };
@@ -614,8 +648,9 @@ fn cmd_apply(
     let scanning = profile::now();
     let outcomes: Vec<Outcome> = files
         .par_iter()
-        .filter_map(|path| {
-            let original = std::fs::read(path).ok()?;
+        .zip(&sources)
+        .filter_map(|(path, original)| {
+            let original = original.clone();
             // A rule set's literals are checked disjunctively -- any one rule
             // matching is enough to need this file.
             if !filters.iter().any(|f| f.may_contribute(&original)) {

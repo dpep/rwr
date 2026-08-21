@@ -81,6 +81,41 @@ Their **outputs** are a different matter. Sorbet's RBI files are a public, stabl
 format, and ingesting them for type information is already recorded in DESIGN.md's vision
 section. That is the right seam: depend on what a tool publishes, never on what it caches.
 
+## The hierarchy phase, and what profiling kept revealing
+
+D52's hierarchy was the next bottleneck once the prefilter landed -- 64% of a run on the
+local Ruby corpus. Fixing it took three attempts, and each one was wrong in an instructive
+way:
+
+| attempt | result | why |
+|---|---|---|
+| Filter files by `class` + `<` | 8,762 parsed instead of 18,535, **no faster** | parsing was not the cost |
+| Only build the part reachable from the rule's class, via a worklist | **72** parsed, still no faster | the worklist re-read every file each round |
+| Read once, share those bytes with the scan | **482 ms -> 12 ms** | reading was the cost, and two phases were each paying it |
+
+The lesson generalises: every time the profiler was consulted, the bottleneck was **I/O, not
+computation**, and every optimisation aimed at computation bought nothing. Parsing 72 files
+instead of 8,762 changed the runtime by zero.
+
+The worklist is worth keeping regardless of speed, because it is *exact*: a rename names one
+class, only its descendants matter, and `Gold < Premium < Account` is reached in two rounds
+because finding `Premium` puts that name into the next round's search set. Nothing is guessed
+-- work is only deferred until a name is known to matter.
+
+### Where the time goes now
+
+```
+  walk              72.9    27%  18535 files
+  read             179.2    66%  18535 files, 81.0 MB
+  hierarchy         12.3     5%  72 parsed, 18463 skipped
+  scan               6.9     3%  0 files changed
+  total            271.4
+```
+
+Total fell from 753 ms to 271 ms. Structural work -- the part that is actually rwr's job --
+is now **8% of the run**. The rest is discovering and reading files, which is the floor for
+anything without an index.
+
 ## What is already done
 
 | technique | status |
@@ -91,4 +126,6 @@ section. That is the right seam: depend on what a tool publishes, never on what 
 | SIMD substring search | shipped — `memchr::memmem`, finders built once per run |
 | Parallel parse and match | shipped since Phase 1 (rayon) |
 | Hierarchy built only on demand | shipped — an ad-hoc query pays nothing for D52 |
+| Targeted hierarchy | shipped -- worklist parses only classes reachable from the rule's, 72 instead of 8,762 |
+| One shared read pass | shipped -- hierarchy and scan no longer each pay full I/O |
 | Persistent index | **deferred**, with a measured threshold above |
