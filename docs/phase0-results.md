@@ -133,14 +133,37 @@ at all.
 
 | entry | ast-grep | comby |
 |---|---|---|
-| 001 return-nil | **match** | **match** |
+| 001 return-nil | **match** | **WRONG** - rewrites a heredoc body and mangles `nil_value` |
 | 002 perf-detect | matched correctly, **rewrote non-minimally** | inexpressible |
 | 004 sorted-array | inexpressible | inexpressible |
 | 007 receiver-rename (semantic) | inexpressible | inexpressible |
 
-### 001 confirms the table-stakes concession
+### 001: ast-grep passes, comby fails it in two ways
 
-Both incumbents produce the expected output exactly. `rg` finds 7 matches where 3 are real - a
+**A methodology note first, because it changed the result.** An earlier run scored comby as a
+match. That was an artefact: comby had been invoked with a bare `.rb` extension filter, which
+made it recurse the working directory and **rewrite the corpus fixture in place** — so the
+comparison was checking comby's output against a file comby had already written. Circular, and
+it read as success. The corpus well-formedness test caught it (`in/basic.rb` had become
+identical to `out/basic.rb`), the fixture was restored from git, and competitor runs now
+execute with cwd inside a temp directory so a careless runner can only damage the copy.
+
+Correctly contained, comby fails the simplest rule in the corpus twice:
+
+```ruby
+# rewrote prose inside a heredoc body
+  This heredoc body says return nil   ->   says return
+
+# mangled an identifier -- and the result still parses
+  return nil_value                    ->   return_value
+```
+
+The second is the failure the entire design exists to prevent: matching `return nil` as a
+*prefix* of `return nil_value` and silently producing a different working program. It is a
+stronger correctness claim than the overlap-corruption one, and it falls out of the simplest
+rule anyone would write.
+
+ast-grep produces the expected output exactly. `rg` finds 7 matches where 3 are real - a
 2.3x over-match from the comment, the heredoc body and the string literal - which is the case
 for structural tooling at all, but not a case for *this* structural tool.
 

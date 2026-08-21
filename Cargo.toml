@@ -2,7 +2,7 @@
 name = "rwr"
 version = "0.0.1"
 edition = "2024"
-description = "Ruby structural search and rewrite — rg/sed for Ruby programs, not Ruby text."
+description = "Ruby structural search and rewrites"
 license = "MIT"
 repository = "https://github.com/dpep/rwr"
 

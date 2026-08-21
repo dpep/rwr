@@ -1,6 +1,6 @@
 # rwr
 
-Ruby structural search and rewrite — `rg`/`sed` for Ruby *programs* rather than
+Ruby structural search and rewrites — `rg`/`sed` for Ruby *programs* rather than
 Ruby *text*.
 
 Find code by structure, rewrite only what matches, preserve everything else, and

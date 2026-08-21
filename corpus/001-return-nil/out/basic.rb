@@ -17,7 +17,7 @@ class Widget
 
   def describe
     <<~TEXT
-      This heredoc body says return and must survive untouched.
+      This heredoc body says return nil and must survive untouched.
     TEXT
   end
 
@@ -32,6 +32,6 @@ class Widget
   end
 
   def not_a_match
-    return_value
+    return nil_value
   end
 end

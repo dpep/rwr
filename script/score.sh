@@ -21,6 +21,7 @@ for entry in corpus/[0-9]*/; do
 
     for tool in "${TOOLS[@]}"; do
       runner="$entry/competitors/$tool.sh"
+      OLDPWD_ABS=$(pwd)
       if [ ! -x "$runner" ]; then
         printf '%-22s %-16s %-12s %s\n' "$name" "$fixture" "$tool" "inexpressible"
         continue
@@ -31,7 +32,11 @@ for entry in corpus/[0-9]*/; do
       fi
       tmp=$(mktemp -d)
       cp "$input" "$tmp/$fixture"
-      "$runner" "$tmp/$fixture" >/dev/null 2>&1
+      # Run with cwd inside the temp dir: comby (and anything else that takes a
+      # file-extension filter) will happily recurse the working directory and
+      # rewrite the corpus in place. Containing it here means a careless runner
+      # can only damage the copy.
+      ( cd "$tmp" && "$OLDPWD_ABS/$runner" "$fixture" ) >/dev/null 2>&1
       if diff -q "$tmp/$fixture" "$expected" >/dev/null 2>&1; then
         result=match
       elif diff -q "$tmp/$fixture" "$input" >/dev/null 2>&1; then

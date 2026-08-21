@@ -2,7 +2,7 @@
 
 class Widget
   def find(id)
-    return if id.nil?
+    return nil if id.nil?
 
     store[id]
   end
@@ -10,14 +10,14 @@ class Widget
   # A comment mentioning `return nil` must not be rewritten.
   def fetch(id)
     value = store[id]
-    return unless value
+    return nil unless value
 
     value
   end
 
   def describe
     <<~TEXT
-      This heredoc body says return and must survive untouched.
+      This heredoc body says return nil and must survive untouched.
     TEXT
   end
 
@@ -27,11 +27,11 @@ class Widget
 
   def nested
     [1, 2].each do |i|
-      return if i.zero?
+      return nil if i.zero?
     end
   end
 
   def not_a_match
-    return_value
+    return nil_value
   end
 end
