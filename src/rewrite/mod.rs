@@ -323,15 +323,23 @@ fn structural_diff(
 
 /// The span of the identifier a node is named by, when it has one that can be
 /// edited in isolation.
+///
+/// Covers the shapes a rename touches: a call's message and a definition's
+/// name. Without the definition case, renaming `def foo` falls back to
+/// replacing the whole method and collapses its body onto one line.
 fn name_span(node: &Node<'_>) -> Option<(usize, usize)> {
-    let loc = node.as_call_node()?.message_loc()?;
+    let loc = match node {
+        Node::CallNode { .. } => node.as_call_node()?.message_loc()?,
+        Node::DefNode { .. } => node.as_def_node()?.name_loc(),
+        _ => return None,
+    };
     Some((loc.start_offset(), loc.end_offset()))
 }
 
 /// The identifier the template calls for.
 fn name_text(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    let loc = node.as_call_node()?.message_loc()?;
-    Some(String::from_utf8_lossy(&src[loc.start_offset()..loc.end_offset()]).into_owned())
+    let (start, end) = name_span(node)?;
+    Some(String::from_utf8_lossy(&src[start..end]).into_owned())
 }
 
 #[cfg(test)]

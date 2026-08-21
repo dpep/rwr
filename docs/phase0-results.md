@@ -320,6 +320,67 @@ entries, and tells the caller how to fix it — narrow the rule with a `where:` 
 constraint. A broad rule leaving thousands of occurrences is not a defect in residue; it is a
 rule that is not a rename.
 
+## (c) Receiver narrowing — **built; the semantic partition passes**
+
+The capability no other Ruby structural tool offers. `node_pattern` has no notion of a
+receiver, ast-grep's FAQ disclaims scope and type analysis outright, and Ruby LSP's
+`ReferenceFinder` matches methods by bare name.
+
+### Corpus 007 matches exactly
+
+```yaml
+- match: 'def display_name; $B; end'      # the definition
+  scope: { inside: Account }
+  rewrite: 'def full_name; $B; end'
+
+- match: $R.display_name                  # the call sites
+  where: { $R: { type: Account } }
+  rewrite: $R.full_name
+```
+
+```ruby
+account = Account.new
+account.display_name   ->  account.full_name    # local inference
+company.display_name   ->  unchanged            # Company, not Account
+thing.display_name     ->  unchanged            # unresolved
+```
+
+Two findings from building it:
+
+**A complete rename is a rule *set*, not a rule.** The definition and the call sites are
+different shapes, so a file may hold a list and the rules apply in order, each seeing the
+previous one's output. This was not in the design and the corpus forced it.
+
+**Resolution is conservative by construction.** A receiver rwr cannot resolve does *not*
+match, so a `type:` constraint can only ever narrow — never wrongly widen. Sites it misses
+surface as residue rather than being silently rewritten, which is the two features composing
+rather than competing.
+
+### What resolves, and what it cost
+
+| receiver shape | share of rails calls | resolved? |
+|---|---:|---|
+| implicit self | 43.5% | yes — `scope: { inside: X }`, pure lexical |
+| local from `X.new` | part of 17.9% | yes — reading the assignment |
+| constant | 14.3% | yes |
+| explicit self | 0.8% | yes |
+| ivar, chain, other | ~23% | no — needs inference not yet built |
+
+No cross-file index was needed for any of it. Measurement (b) predicted ~59% from lexical
+scope plus constants, and local inference adds to that.
+
+## Corpus scoreboard
+
+| entry | rwr | ast-grep | comby |
+|---|---|---|---|
+| 001 return-nil | **match** | match | **corrupts** (heredoc body, `nil_value`) |
+| 002 perf-detect | diff — shape-changing rewrite falls back | matched, rewrote non-minimally | inexpressible |
+| 004 sorted-array | diff — D33 sequence transforms unbuilt | inexpressible | inexpressible |
+| 007 receiver-rename | **match** | **inexpressible** | **inexpressible** |
+
+Two of four, and the two that fail need features that are decided but unbuilt (D33 sequence
+transforms, D35 comment attachment) rather than anything the design got wrong.
+
 ## Still outstanding
 
 | measurement | status | needs |

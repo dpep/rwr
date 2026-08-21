@@ -1,4 +1,17 @@
-match: $RECEIVER.display_name
-where:
-  $RECEIVER: { type: Account }
-rewrite: $RECEIVER.full_name
+# A complete rename needs a rule *set*: the definition and the call sites are
+# different shapes. Rules apply in order, each seeing the previous one's output.
+
+# The definition, scoped lexically so Company's same-named method is untouched.
+- match: 'def display_name; $B; end'
+  scope:
+    inside: Account
+  rewrite: 'def full_name; $B; end'
+
+# The call sites, narrowed by receiver -- the capability no other Ruby
+# structural tool offers. An unresolvable receiver does not match, so the rule
+# can only ever narrow; missed sites surface as residue.
+- match: $R.display_name
+  where:
+    $R:
+      type: Account
+  rewrite: $R.full_name

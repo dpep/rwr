@@ -473,30 +473,39 @@ fn cmd_apply(
     common: &Common,
     out: Output,
 ) -> ExitCode {
-    let rule = match rule::load(rule_arg, replace) {
+    let rules = match rule::load_all(rule_arg, replace) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("rwr: {e}");
             return Exit::PatternError.into();
         }
     };
-    let Some(template) = rule.rewrite.clone() else {
+    if rules.iter().any(|r| r.rewrite.is_none()) {
         eprintln!("rwr: {}", rule::RuleError::NoTemplate);
         return Exit::PatternError.into();
-    };
-
-    let prepared = match prepare::prepare(&rule.pattern) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("rwr: {e}");
-            return Exit::PatternError.into();
-        }
-    };
-    {
-        let parsed = ruby_prism::parse(prepared.source.as_bytes());
-        if matcher::pattern_root(&parsed.node()).is_none() {
-            eprintln!("rwr: a pattern must be a single expression");
-            return Exit::PatternError.into();
+    }
+    // Each rule is prepared once; they apply in order, each seeing the
+    // previous one's output. A rename genuinely needs a set, since the
+    // definition and the call sites are different shapes.
+    let mut prepareds = Vec::with_capacity(rules.len());
+    for r in &rules {
+        match prepare::prepare(&r.pattern) {
+            Ok(p) => {
+                // Scoped so the parse's borrow of `p` ends before it moves.
+                let single = {
+                    let parsed = ruby_prism::parse(p.source.as_bytes());
+                    matcher::pattern_root(&parsed.node()).is_some()
+                };
+                if !single {
+                    eprintln!("rwr: a pattern must be a single expression: {}", r.pattern);
+                    return Exit::PatternError.into();
+                }
+                prepareds.push(p);
+            }
+            Err(e) => {
+                eprintln!("rwr: {e}");
+                return Exit::PatternError.into();
+            }
         }
     }
 
@@ -516,48 +525,70 @@ fn cmd_apply(
     let outcomes: Vec<Outcome> = files
         .par_iter()
         .filter_map(|path| {
-            let src = std::fs::read(path).ok()?;
-            let parsed = ruby_prism::parse(&src);
-            if parsed.errors().count() > 0 {
-                return None;
-            }
-            let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
-            let p_node = p_parsed.node();
-            let p_root = matcher::pattern_root(&p_node)?;
-            let hits: Vec<_> = matcher::search(&p_root, &parsed.node(), &prepared)
-                .into_iter()
-                .filter(|m| matcher::satisfies(&m.env, &rule.constraints))
-                .collect();
-            if hits.is_empty() {
-                return None;
-            }
-
+            let original = std::fs::read(path).ok()?;
             let file = path.display().to_string();
-            match rewrite::plan(&hits, &p_root, &prepared, &template, &src) {
-                Err(refusal) => Some(Outcome {
-                    file,
-                    edits: 0,
-                    rewritten: None,
-                    refusal: Some(format!("{refusal:?}")),
-                }),
-                Ok(edits) => {
-                    let text = rewrite::apply(&src, &edits);
-                    match rewrite::verify(&text) {
-                        Err(refusal) => Some(Outcome {
+            let mut current = original.clone();
+            let mut total = 0usize;
+
+            for (rule, prepared) in rules.iter().zip(&prepareds) {
+                // Scoped so every borrow of `current` ends before it is
+                // replaced with this rule's output.
+                let step: Result<Option<(String, usize)>, String> = {
+                    let parsed = ruby_prism::parse(&current);
+                    if parsed.errors().count() > 0 {
+                        return None;
+                    }
+                    let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+                    let p_node = p_parsed.node();
+                    match matcher::pattern_root(&p_node) {
+                        None => Ok(None),
+                        Some(p_root) => {
+                            let hits: Vec<_> = matcher::search(&p_root, &parsed.node(), prepared)
+                                .into_iter()
+                                .filter(|m| matcher::satisfies(m, &rule.constraints, &rule.scope))
+                                .collect();
+                            if hits.is_empty() {
+                                Ok(None)
+                            } else {
+                                let template = rule.rewrite.as_deref().unwrap_or_default();
+                                match rewrite::plan(&hits, &p_root, prepared, template, &current) {
+                                    Err(r) => Err(format!("{r:?}")),
+                                    Ok(edits) => {
+                                        let text = rewrite::apply(&current, &edits);
+                                        match rewrite::verify(&text) {
+                                            Err(r) => Err(format!("{r:?}")),
+                                            Ok(()) => Ok(Some((text, edits.len()))),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+
+                match step {
+                    Err(refusal) => {
+                        return Some(Outcome {
                             file,
                             edits: 0,
                             rewritten: None,
-                            refusal: Some(format!("{refusal:?}")),
-                        }),
-                        Ok(()) => Some(Outcome {
-                            file,
-                            edits: edits.len(),
-                            rewritten: Some(text),
-                            refusal: None,
-                        }),
+                            refusal: Some(refusal),
+                        });
+                    }
+                    Ok(None) => {}
+                    Ok(Some((text, n))) => {
+                        total += n;
+                        current = text.into_bytes();
                     }
                 }
             }
+
+            (total > 0).then(|| Outcome {
+                file,
+                edits: total,
+                rewritten: Some(String::from_utf8_lossy(&current).into_owned()),
+                refusal: None,
+            })
         })
         .collect();
 
