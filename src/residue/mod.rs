@@ -39,6 +39,34 @@ pub(crate) struct Occurrence {
     pub context: Context,
     pub byte_start: usize,
     pub byte_end: usize,
+    /// Enclosing class and module names, outermost first.
+    #[serde(skip)]
+    pub scope: Vec<String>,
+}
+
+/// The class or module a node introduces, if any.
+fn scope_name(node: &Node<'_>) -> Option<String> {
+    let name = match node {
+        Node::ClassNode { .. } => node.as_class_node()?.name().as_slice().to_vec(),
+        Node::ModuleNode { .. } => node.as_module_node()?.name().as_slice().to_vec(),
+        _ => return None,
+    };
+    String::from_utf8(name).ok()
+}
+
+/// Narrow a report to what a class-anchored rule could plausibly be about.
+///
+/// This is the payoff of receiver narrowing: the reason an unscoped report
+/// reaches thousands of entries is that it counts every unrelated class that
+/// happens to share an identifier. Given the class the rule is about, two
+/// things remain interesting -- anything inside that class, and any call whose
+/// receiver could not be resolved, since those are exactly the sites narrowing
+/// silently declined to rewrite.
+pub(crate) fn scoped_to(occurrences: Vec<Occurrence>, class: &str) -> Vec<Occurrence> {
+    occurrences
+        .into_iter()
+        .filter(|o| o.scope.iter().any(|s| s == class) || o.context == Context::Call)
+        .collect()
 }
 
 /// Literal identifiers a pattern is anchored on.
@@ -76,8 +104,10 @@ pub(crate) fn find(
     let covered = |start: usize| matched.iter().any(|(s, e)| start >= *s && start < *e);
 
     let mut out = Vec::new();
-    let mut stack = vec![generated::dup(root)];
-    while let Some(node) = stack.pop() {
+    // Depth-paired stack so each occurrence carries the lexical scope it sits
+    // in, which is what lets a class-anchored rule scope its own report.
+    let mut stack: Vec<(Node<'_>, Vec<String>)> = vec![(generated::dup(root), Vec::new())];
+    while let Some((node, here)) = stack.pop() {
         let loc = node.location();
         let (start, end) = (loc.start_offset(), loc.end_offset());
 
@@ -113,9 +143,19 @@ pub(crate) fn find(
                 context,
                 byte_start: start,
                 byte_end: end.min(source.len()),
+                scope: here.clone(),
             });
         }
-        stack.extend(generated::children(&node));
+
+        let mut inner = here;
+        if let Some(name) = scope_name(&node) {
+            inner.push(name);
+        }
+        stack.extend(
+            generated::children(&node)
+                .into_iter()
+                .map(|c| (c, inner.clone())),
+        );
     }
     out.sort_by_key(|o| o.byte_start);
     out
@@ -169,6 +209,35 @@ mod tests {
         let src = "class A\n  def display_name\n    1\n  end\nend\na.display_name\n";
         let found = residue_of("$R.display_name", src);
         assert!(found.contains(&Context::Definition), "{found:?}");
+    }
+
+    /// The payoff of receiver narrowing: a class-anchored rule scopes its own
+    /// report, so the unrelated classes that make an unscoped report reach
+    /// thousands of entries fall away -- while unresolved calls, the sites
+    /// narrowing silently declined to rewrite, are kept.
+    #[test]
+    fn a_class_anchor_scopes_the_report() {
+        let src = "class Account\n  def display_name; 1; end\nend\nclass Widget\n  attr_reader :display_name\nend\nthing.display_name\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let anchors = vec![b"display_name".to_vec()];
+        let all = find(&parsed.node(), &anchors, &[], src.as_bytes());
+
+        let widget_symbol = all.iter().filter(|o| o.context == Context::Symbol).count();
+        assert_eq!(widget_symbol, 1, "unscoped report includes Widget's symbol");
+
+        let scoped = scoped_to(all, "Account");
+        assert!(
+            scoped.iter().all(|o| o.context != Context::Symbol),
+            "Widget's symbol should fall away"
+        );
+        assert!(
+            scoped.iter().any(|o| o.context == Context::Definition),
+            "Account's own definition must survive"
+        );
+        assert!(
+            scoped.iter().any(|o| o.context == Context::Call),
+            "an unresolved call is a blind spot and must survive"
+        );
     }
 
     /// A rule with no identifier to track reports nothing. That is the correct

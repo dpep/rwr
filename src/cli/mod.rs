@@ -349,6 +349,9 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
         }
     }
 
+    // `find` takes a bare pattern, so it has no rule to draw a class from.
+    let class_anchor: Option<&str> = None;
+
     let mut scoped: Vec<String> = paths.to_vec();
     scoped.extend(common.path.iter().cloned());
     let files = source::ruby_files(&scoped, common.include_vendored);
@@ -397,6 +400,13 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                     })
                     .collect();
                 let extra = residue::find(&parsed.node(), &anchors, &matched, &src);
+                // A class-anchored rule scopes its own report: the payoff of
+                // receiver narrowing, since an unscoped report's bulk is
+                // unrelated classes sharing an identifier.
+                let extra = match class_anchor {
+                    Some(class) => residue::scoped_to(extra, class),
+                    None => extra,
+                };
                 if let Ok(mut sink) = residues.lock() {
                     sink.extend(extra.into_iter().map(|o| {
                         let (line, col) = source::line_col(&src, o.byte_start);
