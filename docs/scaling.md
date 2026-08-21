@@ -143,6 +143,23 @@ which is precisely the massive-repository case this document is about.
 
 `RWR_NO_MMAP=1` forces the copying path, kept because it is what made the comparison possible.
 
+## Where the floor is
+
+Two further experiments, both measured, one worth keeping:
+
+| experiment | result |
+|---|---|
+| More rayon threads (16, 32, 64) for the I/O-bound phases | **no help** — 8 threads on 8 cores is already optimal, and more is slightly worse. The read is not latency-bound in a way extra threads fix |
+| `MADV_SEQUENTIAL` on each mapping | **~2-3%** — the prefilter scans a file end to end when the literal is absent, which is the common case, so readahead helps a little |
+
+That leaves walk at ~26% and read at ~65%, both pure I/O against 18,535 files. rwr does the
+whole job -- discover, read, search, parse survivors, match structurally -- in **~269 ms**,
+against **443 ms** for `rg -l` doing only the search.
+
+Beating a tool as tuned as ripgrep at its own job, while doing strictly more, is a good sign
+that the remaining cost is the filesystem rather than rwr. Going lower means not touching the
+files, which means an index -- deferred, with the threshold recorded above.
+
 ## What is already done
 
 | technique | status |
@@ -156,4 +173,6 @@ which is precisely the massive-repository case this document is about.
 | Targeted hierarchy | shipped -- worklist parses only classes reachable from the rule's, 72 instead of 8,762 |
 | One shared read pass | shipped -- hierarchy and scan no longer each pay full I/O |
 | Memory-mapped files | shipped -- 28% faster; `RWR_NO_MMAP=1` forces the copying path |
+| `MADV_SEQUENTIAL` readahead | shipped -- ~2-3% |
+| More threads than cores | **tried, no help** -- 8 on 8 cores is optimal |
 | Persistent index | **deferred**, with a measured threshold above |

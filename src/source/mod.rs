@@ -117,7 +117,12 @@ pub(crate) fn open(path: &Path) -> Source {
         return Source::Owned(std::fs::read(path).unwrap_or_default());
     }
     match unsafe { memmap2::Mmap::map(&file) } {
-        Ok(map) => Source::Mapped(map),
+        Ok(map) => {
+            // The prefilter scans a file end to end when the literal is absent,
+            // which is the common case, so tell the kernel to read ahead.
+            let _ = map.advise(memmap2::Advice::Sequential);
+            Source::Mapped(map)
+        }
         Err(_) => Source::Owned(std::fs::read(path).unwrap_or_default()),
     }
 }
