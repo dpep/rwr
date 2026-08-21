@@ -5,6 +5,8 @@
 //! agent which has learned one of these tools has learned the others.
 
 use crate::pattern::{matcher, prepare};
+use crate::rewrite;
+use crate::rule;
 use crate::source;
 use clap::{Args, Parser, Subcommand};
 use rayon::prelude::*;
@@ -226,8 +228,16 @@ pub fn run() -> ExitCode {
 
     match command {
         Command::Find { pattern, paths } => cmd_find(&pattern, &paths, &cli.common, out),
-        Command::Check { .. } => not_yet("check", out),
-        Command::Rewrite { .. } => not_yet("rewrite", out),
+        Command::Check {
+            rule,
+            paths,
+            replace,
+        } => cmd_apply(&rule, &paths, replace.as_deref(), false, &cli.common, out),
+        Command::Rewrite {
+            rule,
+            paths,
+            replace,
+        } => cmd_apply(&rule, &paths, replace.as_deref(), true, &cli.common, out),
     }
 }
 
@@ -351,9 +361,158 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
     }
 }
 
-fn not_yet(what: &str, _out: Output) -> ExitCode {
-    eprintln!("rwr: `{what}` is not implemented yet — see DESIGN.md for the plan");
-    Exit::Error.into()
+/// A file rwr would change, or did.
+#[derive(Debug, Serialize)]
+struct Changed {
+    file: String,
+    edits: usize,
+}
+
+/// `check` and `rewrite` differ only in whether they write and in how their
+/// exit codes read -- the verb carries the mode (D29) and the polarity (D22).
+#[allow(clippy::too_many_lines)]
+fn cmd_apply(
+    rule_arg: &str,
+    paths: &[String],
+    replace: Option<&str>,
+    write: bool,
+    common: &Common,
+    out: Output,
+) -> ExitCode {
+    let rule = match rule::load(rule_arg, replace) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("rwr: {e}");
+            return Exit::PatternError.into();
+        }
+    };
+    let Some(template) = rule.rewrite.clone() else {
+        eprintln!("rwr: {}", rule::RuleError::NoTemplate);
+        return Exit::PatternError.into();
+    };
+
+    let prepared = match prepare::prepare(&rule.pattern) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("rwr: {e}");
+            return Exit::PatternError.into();
+        }
+    };
+    {
+        let parsed = ruby_prism::parse(prepared.source.as_bytes());
+        if matcher::pattern_root(&parsed.node()).is_none() {
+            eprintln!("rwr: a pattern must be a single expression");
+            return Exit::PatternError.into();
+        }
+    }
+
+    let mut scoped: Vec<String> = paths.to_vec();
+    scoped.extend(common.path.iter().cloned());
+    let files = source::ruby_files(&scoped, common.include_vendored);
+
+    // Each file is independent: one refusal declines that file and is reported,
+    // rather than aborting work already proven safe elsewhere (DESIGN.md §4).
+    struct Outcome {
+        file: String,
+        edits: usize,
+        rewritten: Option<String>,
+        refusal: Option<String>,
+    }
+
+    let outcomes: Vec<Outcome> = files
+        .par_iter()
+        .filter_map(|path| {
+            let src = std::fs::read(path).ok()?;
+            let parsed = ruby_prism::parse(&src);
+            if parsed.errors().count() > 0 {
+                return None;
+            }
+            let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+            let p_node = p_parsed.node();
+            let p_root = matcher::pattern_root(&p_node)?;
+            let hits = matcher::search(&p_root, &parsed.node(), &prepared);
+            if hits.is_empty() {
+                return None;
+            }
+
+            let file = path.display().to_string();
+            match rewrite::plan(&hits, &template, &src) {
+                Err(refusal) => Some(Outcome {
+                    file,
+                    edits: 0,
+                    rewritten: None,
+                    refusal: Some(format!("{refusal:?}")),
+                }),
+                Ok(edits) => {
+                    let text = rewrite::apply(&src, &edits);
+                    match rewrite::verify(&text) {
+                        Err(refusal) => Some(Outcome {
+                            file,
+                            edits: 0,
+                            rewritten: None,
+                            refusal: Some(format!("{refusal:?}")),
+                        }),
+                        Ok(()) => Some(Outcome {
+                            file,
+                            edits: edits.len(),
+                            rewritten: Some(text),
+                            refusal: None,
+                        }),
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let mut refused = false;
+    let mut changed: Vec<Changed> = Vec::new();
+    for outcome in &outcomes {
+        if let Some(reason) = &outcome.refusal {
+            refused = true;
+            eprintln!("rwr: refused {}: {reason}", outcome.file);
+            continue;
+        }
+        if write {
+            if let Some(text) = &outcome.rewritten {
+                if let Err(e) = std::fs::write(&outcome.file, text) {
+                    eprintln!("rwr: cannot write {}: {e}", outcome.file);
+                    return Exit::Error.into();
+                }
+            }
+        }
+        changed.push(Changed {
+            file: outcome.file.clone(),
+            edits: outcome.edits,
+        });
+    }
+    changed.sort_by(|a, b| a.file.cmp(&b.file));
+
+    match out {
+        Output::Text => {
+            for c in &changed {
+                let verb = if write { "rewrote" } else { "would rewrite" };
+                println!("{}: {verb} {} site(s)", c.file, c.edits);
+            }
+        }
+        _ => {
+            if emit_rows(out, &changed).is_some() {
+                return Exit::Error.into();
+            }
+        }
+    }
+
+    if refused {
+        return Exit::Refused.into();
+    }
+    // `check` is enforcement polarity: a clean tree is success (D22). `rewrite`
+    // reports nothing-to-do the same way, which reads correctly for both.
+    if changed.is_empty() {
+        Exit::Ok.into()
+    } else if write {
+        Exit::Ok.into()
+    } else {
+        Exit::Negative.into()
+    }
 }
 
 #[cfg(test)]

@@ -9,4 +9,6 @@ pub mod cli;
 pub(crate) mod pattern;
 pub(crate) mod residue;
 pub(crate) mod rewrite;
+#[allow(dead_code)]
+pub(crate) mod rule;
 pub(crate) mod source;

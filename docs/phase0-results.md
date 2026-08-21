@@ -204,6 +204,60 @@ ast-grep has no method-name alternation in a bare pattern, so `select` and `find
 separate passes. Corpus 002's runner does two. That is a small ergonomic tax, and it is the
 first evidence for the `where:` predicate the backlog ranks first.
 
+## rwr scored against its own corpus — **first run**
+
+### 001: rwr matches exactly
+
+```
+corpus/001-return-nil: MATCH
+```
+
+The same fixture on which comby rewrites a heredoc body and turns `return nil_value` into
+`return_value`. rwr changes three sites and leaves the comment, the string literal and the
+heredoc body untouched.
+
+### 002: rwr has the same non-minimal-rewrite limitation it criticised ast-grep for
+
+This is the uncomfortable one and it should be recorded plainly.
+
+```ruby
+# expected -- minimal diff, only the changed tokens move
+    accounts
+      .detect { |account| account.name.include?(term) }
+    accounts.detect do |account|
+      account.active? && account.balance.positive?
+    end
+
+# rwr, today
+    accounts.detect { |account| account.name.include?(term) }
+    accounts.detect { |account| account.active? && account.balance.positive? }
+```
+
+The multiline chain collapses and the `do ... end` block becomes braces, because **the
+template governs layout**: a capture preserves its own internal formatting, but everything
+around it is re-rendered from the template. That is exactly what ast-grep does, and exactly
+what this document earlier called ast-grep's limitation.
+
+**So the claim that "rwr's edge at the syntax layer is rewriting, not matching" is a design
+intent, not a shipped property.** DESIGN.md section 3C requires minimal diffs; the current
+implementation does not deliver them.
+
+**What would deliver it: structural-diff editing.** Align the pattern and template trees and
+emit edits only where they differ. For `$R.select { ... }.first` -> `$R.detect { ... }` the
+differences are a name atom (`select` -> `detect`) and a removed outer call (`.first`) -- two
+small edits that never touch the block, so its layout and its brace-or-`do` spelling survive
+untouched. That also dissolves the heredoc refusal below, since a capture that does not move
+is never spliced.
+
+### Heredoc captures are refused, not corrupted
+
+A heredoc's content is discontiguous: the `<<~SQL` token sits inline while its body follows the
+enclosing line. Splicing a capture containing one would drag along text belonging to the
+enclosing expression, so rwr refuses (exit 5).
+
+`effective_range` (D14) stops an edit being *truncated*; it cannot make a heredoc *movable*.
+Refusing is the honest interim answer, and structural-diff editing removes the need for it.
+
 ---
 
 ## Still outstanding

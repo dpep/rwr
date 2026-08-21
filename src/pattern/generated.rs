@@ -910,6 +910,1142 @@ pub(crate) fn children<'pr>(node: &Node<'pr>) -> Vec<Node<'pr>> {
     out
 }
 
+/// Every location a node carries, including the trailing ones -- a heredoc's
+/// `closing_loc` sits past its body, which is what lets `effective_range`
+/// cover content the node's own location excludes (D14).
+#[allow(clippy::too_many_lines)]
+pub(crate) fn locations<'pr>(node: &Node<'pr>) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    match node {
+        Node::AliasGlobalVariableNode { .. } => {
+            let Some(n) = node.as_alias_global_variable_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+        }
+        Node::AliasMethodNode { .. } => {
+            let Some(n) = node.as_alias_method_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+        }
+        Node::AlternationPatternNode { .. } => {
+            let Some(n) = node.as_alternation_pattern_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::AndNode { .. } => {
+            let Some(n) = node.as_and_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ArrayNode { .. } => {
+            let Some(n) = node.as_array_node() else {
+                return out;
+            };
+            if let Some(l) = n.opening_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::ArrayPatternNode { .. } => {
+            let Some(n) = node.as_array_pattern_node() else {
+                return out;
+            };
+            if let Some(l) = n.opening_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::AssocNode { .. } => {
+            let Some(n) = node.as_assoc_node() else {
+                return out;
+            };
+            if let Some(l) = n.operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::AssocSplatNode { .. } => {
+            let Some(n) = node.as_assoc_splat_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::BeginNode { .. } => {
+            let Some(n) = node.as_begin_node() else {
+                return out;
+            };
+            if let Some(l) = n.begin_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.end_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::BlockArgumentNode { .. } => {
+            let Some(n) = node.as_block_argument_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::BlockNode { .. } => {
+            let Some(n) = node.as_block_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::BlockParameterNode { .. } => {
+            let Some(n) = node.as_block_parameter_node() else {
+                return out;
+            };
+            if let Some(l) = n.name_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::BlockParametersNode { .. } => {
+            let Some(n) = node.as_block_parameters_node() else {
+                return out;
+            };
+            if let Some(l) = n.opening_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::BreakNode { .. } => {
+            let Some(n) = node.as_break_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+        }
+        Node::CallAndWriteNode { .. } => {
+            let Some(n) = node.as_call_and_write_node() else {
+                return out;
+            };
+            if let Some(l) = n.call_operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.message_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::CallNode { .. } => {
+            let Some(n) = node.as_call_node() else {
+                return out;
+            };
+            if let Some(l) = n.call_operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.message_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.opening_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.equal_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::CallOperatorWriteNode { .. } => {
+            let Some(n) = node.as_call_operator_write_node() else {
+                return out;
+            };
+            if let Some(l) = n.call_operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.message_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((
+                n.binary_operator_loc().start_offset(),
+                n.binary_operator_loc().end_offset(),
+            ));
+        }
+        Node::CallOrWriteNode { .. } => {
+            let Some(n) = node.as_call_or_write_node() else {
+                return out;
+            };
+            if let Some(l) = n.call_operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.message_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::CallTargetNode { .. } => {
+            let Some(n) = node.as_call_target_node() else {
+                return out;
+            };
+            out.push((
+                n.call_operator_loc().start_offset(),
+                n.call_operator_loc().end_offset(),
+            ));
+            out.push((n.message_loc().start_offset(), n.message_loc().end_offset()));
+        }
+        Node::CapturePatternNode { .. } => {
+            let Some(n) = node.as_capture_pattern_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::CaseMatchNode { .. } => {
+            let Some(n) = node.as_case_match_node() else {
+                return out;
+            };
+            out.push((
+                n.case_keyword_loc().start_offset(),
+                n.case_keyword_loc().end_offset(),
+            ));
+            out.push((
+                n.end_keyword_loc().start_offset(),
+                n.end_keyword_loc().end_offset(),
+            ));
+        }
+        Node::CaseNode { .. } => {
+            let Some(n) = node.as_case_node() else {
+                return out;
+            };
+            out.push((
+                n.case_keyword_loc().start_offset(),
+                n.case_keyword_loc().end_offset(),
+            ));
+            out.push((
+                n.end_keyword_loc().start_offset(),
+                n.end_keyword_loc().end_offset(),
+            ));
+        }
+        Node::ClassNode { .. } => {
+            let Some(n) = node.as_class_node() else {
+                return out;
+            };
+            out.push((
+                n.class_keyword_loc().start_offset(),
+                n.class_keyword_loc().end_offset(),
+            ));
+            if let Some(l) = n.inheritance_operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((
+                n.end_keyword_loc().start_offset(),
+                n.end_keyword_loc().end_offset(),
+            ));
+        }
+        Node::ClassVariableAndWriteNode { .. } => {
+            let Some(n) = node.as_class_variable_and_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ClassVariableOperatorWriteNode { .. } => {
+            let Some(n) = node.as_class_variable_operator_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.binary_operator_loc().start_offset(),
+                n.binary_operator_loc().end_offset(),
+            ));
+        }
+        Node::ClassVariableOrWriteNode { .. } => {
+            let Some(n) = node.as_class_variable_or_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ClassVariableWriteNode { .. } => {
+            let Some(n) = node.as_class_variable_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ConstantAndWriteNode { .. } => {
+            let Some(n) = node.as_constant_and_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ConstantOperatorWriteNode { .. } => {
+            let Some(n) = node.as_constant_operator_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.binary_operator_loc().start_offset(),
+                n.binary_operator_loc().end_offset(),
+            ));
+        }
+        Node::ConstantOrWriteNode { .. } => {
+            let Some(n) = node.as_constant_or_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ConstantPathAndWriteNode { .. } => {
+            let Some(n) = node.as_constant_path_and_write_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ConstantPathNode { .. } => {
+            let Some(n) = node.as_constant_path_node() else {
+                return out;
+            };
+            out.push((
+                n.delimiter_loc().start_offset(),
+                n.delimiter_loc().end_offset(),
+            ));
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+        }
+        Node::ConstantPathOperatorWriteNode { .. } => {
+            let Some(n) = node.as_constant_path_operator_write_node() else {
+                return out;
+            };
+            out.push((
+                n.binary_operator_loc().start_offset(),
+                n.binary_operator_loc().end_offset(),
+            ));
+        }
+        Node::ConstantPathOrWriteNode { .. } => {
+            let Some(n) = node.as_constant_path_or_write_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ConstantPathTargetNode { .. } => {
+            let Some(n) = node.as_constant_path_target_node() else {
+                return out;
+            };
+            out.push((
+                n.delimiter_loc().start_offset(),
+                n.delimiter_loc().end_offset(),
+            ));
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+        }
+        Node::ConstantPathWriteNode { .. } => {
+            let Some(n) = node.as_constant_path_write_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ConstantWriteNode { .. } => {
+            let Some(n) = node.as_constant_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::DefNode { .. } => {
+            let Some(n) = node.as_def_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.def_keyword_loc().start_offset(),
+                n.def_keyword_loc().end_offset(),
+            ));
+            if let Some(l) = n.operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.lparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.rparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.equal_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.end_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::DefinedNode { .. } => {
+            let Some(n) = node.as_defined_node() else {
+                return out;
+            };
+            if let Some(l) = n.lparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.rparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+        }
+        Node::ElseNode { .. } => {
+            let Some(n) = node.as_else_node() else {
+                return out;
+            };
+            out.push((
+                n.else_keyword_loc().start_offset(),
+                n.else_keyword_loc().end_offset(),
+            ));
+            if let Some(l) = n.end_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::EmbeddedStatementsNode { .. } => {
+            let Some(n) = node.as_embedded_statements_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::EmbeddedVariableNode { .. } => {
+            let Some(n) = node.as_embedded_variable_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::EnsureNode { .. } => {
+            let Some(n) = node.as_ensure_node() else {
+                return out;
+            };
+            out.push((
+                n.ensure_keyword_loc().start_offset(),
+                n.ensure_keyword_loc().end_offset(),
+            ));
+            out.push((
+                n.end_keyword_loc().start_offset(),
+                n.end_keyword_loc().end_offset(),
+            ));
+        }
+        Node::FindPatternNode { .. } => {
+            let Some(n) = node.as_find_pattern_node() else {
+                return out;
+            };
+            if let Some(l) = n.opening_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::FlipFlopNode { .. } => {
+            let Some(n) = node.as_flip_flop_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ForNode { .. } => {
+            let Some(n) = node.as_for_node() else {
+                return out;
+            };
+            out.push((
+                n.for_keyword_loc().start_offset(),
+                n.for_keyword_loc().end_offset(),
+            ));
+            out.push((
+                n.in_keyword_loc().start_offset(),
+                n.in_keyword_loc().end_offset(),
+            ));
+            if let Some(l) = n.do_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((
+                n.end_keyword_loc().start_offset(),
+                n.end_keyword_loc().end_offset(),
+            ));
+        }
+        Node::GlobalVariableAndWriteNode { .. } => {
+            let Some(n) = node.as_global_variable_and_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::GlobalVariableOperatorWriteNode { .. } => {
+            let Some(n) = node.as_global_variable_operator_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.binary_operator_loc().start_offset(),
+                n.binary_operator_loc().end_offset(),
+            ));
+        }
+        Node::GlobalVariableOrWriteNode { .. } => {
+            let Some(n) = node.as_global_variable_or_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::GlobalVariableWriteNode { .. } => {
+            let Some(n) = node.as_global_variable_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::HashNode { .. } => {
+            let Some(n) = node.as_hash_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::HashPatternNode { .. } => {
+            let Some(n) = node.as_hash_pattern_node() else {
+                return out;
+            };
+            if let Some(l) = n.opening_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::IfNode { .. } => {
+            let Some(n) = node.as_if_node() else {
+                return out;
+            };
+            if let Some(l) = n.if_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.then_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.end_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::InNode { .. } => {
+            let Some(n) = node.as_in_node() else {
+                return out;
+            };
+            out.push((n.in_loc().start_offset(), n.in_loc().end_offset()));
+            if let Some(l) = n.then_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::IndexAndWriteNode { .. } => {
+            let Some(n) = node.as_index_and_write_node() else {
+                return out;
+            };
+            if let Some(l) = n.call_operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::IndexOperatorWriteNode { .. } => {
+            let Some(n) = node.as_index_operator_write_node() else {
+                return out;
+            };
+            if let Some(l) = n.call_operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+            out.push((
+                n.binary_operator_loc().start_offset(),
+                n.binary_operator_loc().end_offset(),
+            ));
+        }
+        Node::IndexOrWriteNode { .. } => {
+            let Some(n) = node.as_index_or_write_node() else {
+                return out;
+            };
+            if let Some(l) = n.call_operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::IndexTargetNode { .. } => {
+            let Some(n) = node.as_index_target_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::InstanceVariableAndWriteNode { .. } => {
+            let Some(n) = node.as_instance_variable_and_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::InstanceVariableOperatorWriteNode { .. } => {
+            let Some(n) = node.as_instance_variable_operator_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.binary_operator_loc().start_offset(),
+                n.binary_operator_loc().end_offset(),
+            ));
+        }
+        Node::InstanceVariableOrWriteNode { .. } => {
+            let Some(n) = node.as_instance_variable_or_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::InstanceVariableWriteNode { .. } => {
+            let Some(n) = node.as_instance_variable_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::InterpolatedMatchLastLineNode { .. } => {
+            let Some(n) = node.as_interpolated_match_last_line_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::InterpolatedRegularExpressionNode { .. } => {
+            let Some(n) = node.as_interpolated_regular_expression_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::InterpolatedStringNode { .. } => {
+            let Some(n) = node.as_interpolated_string_node() else {
+                return out;
+            };
+            if let Some(l) = n.opening_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::InterpolatedSymbolNode { .. } => {
+            let Some(n) = node.as_interpolated_symbol_node() else {
+                return out;
+            };
+            if let Some(l) = n.opening_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::InterpolatedXStringNode { .. } => {
+            let Some(n) = node.as_interpolated_x_string_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::KeywordRestParameterNode { .. } => {
+            let Some(n) = node.as_keyword_rest_parameter_node() else {
+                return out;
+            };
+            if let Some(l) = n.name_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::LambdaNode { .. } => {
+            let Some(n) = node.as_lambda_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::LocalVariableAndWriteNode { .. } => {
+            let Some(n) = node.as_local_variable_and_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::LocalVariableOperatorWriteNode { .. } => {
+            let Some(n) = node.as_local_variable_operator_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.binary_operator_loc().start_offset(),
+                n.binary_operator_loc().end_offset(),
+            ));
+        }
+        Node::LocalVariableOrWriteNode { .. } => {
+            let Some(n) = node.as_local_variable_or_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::LocalVariableWriteNode { .. } => {
+            let Some(n) = node.as_local_variable_write_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::MatchLastLineNode { .. } => {
+            let Some(n) = node.as_match_last_line_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.content_loc().start_offset(), n.content_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::MatchPredicateNode { .. } => {
+            let Some(n) = node.as_match_predicate_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::MatchRequiredNode { .. } => {
+            let Some(n) = node.as_match_required_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ModuleNode { .. } => {
+            let Some(n) = node.as_module_node() else {
+                return out;
+            };
+            out.push((
+                n.module_keyword_loc().start_offset(),
+                n.module_keyword_loc().end_offset(),
+            ));
+            out.push((
+                n.end_keyword_loc().start_offset(),
+                n.end_keyword_loc().end_offset(),
+            ));
+        }
+        Node::MultiTargetNode { .. } => {
+            let Some(n) = node.as_multi_target_node() else {
+                return out;
+            };
+            if let Some(l) = n.lparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.rparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::MultiWriteNode { .. } => {
+            let Some(n) = node.as_multi_write_node() else {
+                return out;
+            };
+            if let Some(l) = n.lparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.rparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::NextNode { .. } => {
+            let Some(n) = node.as_next_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+        }
+        Node::NoKeywordsParameterNode { .. } => {
+            let Some(n) = node.as_no_keywords_parameter_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+        }
+        Node::OptionalKeywordParameterNode { .. } => {
+            let Some(n) = node.as_optional_keyword_parameter_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+        }
+        Node::OptionalParameterNode { .. } => {
+            let Some(n) = node.as_optional_parameter_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::OrNode { .. } => {
+            let Some(n) = node.as_or_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ParenthesesNode { .. } => {
+            let Some(n) = node.as_parentheses_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::PinnedExpressionNode { .. } => {
+            let Some(n) = node.as_pinned_expression_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+            out.push((n.lparen_loc().start_offset(), n.lparen_loc().end_offset()));
+            out.push((n.rparen_loc().start_offset(), n.rparen_loc().end_offset()));
+        }
+        Node::PinnedVariableNode { .. } => {
+            let Some(n) = node.as_pinned_variable_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::PostExecutionNode { .. } => {
+            let Some(n) = node.as_post_execution_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::PreExecutionNode { .. } => {
+            let Some(n) = node.as_pre_execution_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::RangeNode { .. } => {
+            let Some(n) = node.as_range_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::RegularExpressionNode { .. } => {
+            let Some(n) = node.as_regular_expression_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.content_loc().start_offset(), n.content_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::RequiredKeywordParameterNode { .. } => {
+            let Some(n) = node.as_required_keyword_parameter_node() else {
+                return out;
+            };
+            out.push((n.name_loc().start_offset(), n.name_loc().end_offset()));
+        }
+        Node::RescueModifierNode { .. } => {
+            let Some(n) = node.as_rescue_modifier_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+        }
+        Node::RescueNode { .. } => {
+            let Some(n) = node.as_rescue_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+            if let Some(l) = n.operator_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.then_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::RestParameterNode { .. } => {
+            let Some(n) = node.as_rest_parameter_node() else {
+                return out;
+            };
+            if let Some(l) = n.name_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::ReturnNode { .. } => {
+            let Some(n) = node.as_return_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+        }
+        Node::SingletonClassNode { .. } => {
+            let Some(n) = node.as_singleton_class_node() else {
+                return out;
+            };
+            out.push((
+                n.class_keyword_loc().start_offset(),
+                n.class_keyword_loc().end_offset(),
+            ));
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+            out.push((
+                n.end_keyword_loc().start_offset(),
+                n.end_keyword_loc().end_offset(),
+            ));
+        }
+        Node::SplatNode { .. } => {
+            let Some(n) = node.as_splat_node() else {
+                return out;
+            };
+            out.push((
+                n.operator_loc().start_offset(),
+                n.operator_loc().end_offset(),
+            ));
+        }
+        Node::StringNode { .. } => {
+            let Some(n) = node.as_string_node() else {
+                return out;
+            };
+            if let Some(l) = n.opening_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            out.push((n.content_loc().start_offset(), n.content_loc().end_offset()));
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::SuperNode { .. } => {
+            let Some(n) = node.as_super_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+            if let Some(l) = n.lparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.rparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::SymbolNode { .. } => {
+            let Some(n) = node.as_symbol_node() else {
+                return out;
+            };
+            if let Some(l) = n.opening_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.value_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::UndefNode { .. } => {
+            let Some(n) = node.as_undef_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+        }
+        Node::UnlessNode { .. } => {
+            let Some(n) = node.as_unless_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+            if let Some(l) = n.then_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.end_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::UntilNode { .. } => {
+            let Some(n) = node.as_until_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+            if let Some(l) = n.do_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::WhenNode { .. } => {
+            let Some(n) = node.as_when_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+            if let Some(l) = n.then_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::WhileNode { .. } => {
+            let Some(n) = node.as_while_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+            if let Some(l) = n.do_keyword_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.closing_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        Node::XStringNode { .. } => {
+            let Some(n) = node.as_x_string_node() else {
+                return out;
+            };
+            out.push((n.opening_loc().start_offset(), n.opening_loc().end_offset()));
+            out.push((n.content_loc().start_offset(), n.content_loc().end_offset()));
+            out.push((n.closing_loc().start_offset(), n.closing_loc().end_offset()));
+        }
+        Node::YieldNode { .. } => {
+            let Some(n) = node.as_yield_node() else {
+                return out;
+            };
+            out.push((n.keyword_loc().start_offset(), n.keyword_loc().end_offset()));
+            if let Some(l) = n.lparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+            if let Some(l) = n.rparen_loc() {
+                out.push((l.start_offset(), l.end_offset()));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Duplicate a node handle.
 ///
 /// `Node` holds raw pointers and derives neither `Clone` nor `Copy`, but a

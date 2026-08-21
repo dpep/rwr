@@ -68,6 +68,33 @@ w("    }")
 w("    out")
 w("}")
 w("")
+w("/// Every location a node carries, including the trailing ones -- a heredoc's")
+w("/// `closing_loc` sits past its body, which is what lets `effective_range`")
+w("/// cover content the node's own location excludes (D14).")
+w("#[allow(clippy::too_many_lines)]")
+w("pub(crate) fn locations<'pr>(node: &Node<'pr>) -> Vec<(usize, usize)> {")
+w("    let mut out = Vec::new();")
+w("    match node {")
+for n in cfg["nodes"]:
+    nm = n["name"]
+    locs = [f for f in n.get("fields", []) if f["type"].startswith("location")]
+    if not locs:
+        continue
+    snake = ''.join('_'+c.lower() if c.isupper() else c for c in nm).lstrip('_')
+    w(f"        Node::{nm} {{ .. }} => {{")
+    w(f"            let Some(n) = node.as_{snake}() else {{ return out }};")
+    for f in locs:
+        acc = f["name"]
+        if f["type"] == "location":
+            w(f"            out.push((n.{acc}().start_offset(), n.{acc}().end_offset()));")
+        else:
+            w(f"            if let Some(l) = n.{acc}() {{ out.push((l.start_offset(), l.end_offset())); }}")
+    w("        }")
+w("        _ => {}")
+w("    }")
+w("    out")
+w("}")
+w("")
 w("/// Duplicate a node handle.")
 w("///")
 w("/// `Node` holds raw pointers and derives neither `Clone` nor `Copy`, but a")
