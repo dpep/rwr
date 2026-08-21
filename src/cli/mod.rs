@@ -704,16 +704,23 @@ fn cmd_apply(
         rules.into_iter().partition(|r| r.unsafe_because.is_none())
     };
     if !held.is_empty() {
+        // The count is unconditional -- a rule that did not run must never look
+        // like a rule that found nothing. The reasons are not: six lines of
+        // stderr on every pre-commit run is how a report trains people to stop
+        // reading it, which is the failure DESIGN.md names Semgrep for.
         eprintln!(
-            "rwr: {} rule(s) held back as unsafe; pass --unsafe to include them:",
-            held.len()
+            "rwr: {} rule(s) held back as unsafe; --unsafe to include them{}",
+            held.len(),
+            if common.explain { ":" } else { ", -e for why" }
         );
-        for r in &held {
-            eprintln!(
-                "  {}: {}",
-                r.id.as_deref().unwrap_or("(unnamed)"),
-                r.unsafe_because.as_deref().unwrap_or_default()
-            );
+        if common.explain {
+            for r in &held {
+                eprintln!(
+                    "  {}: {}",
+                    r.id.as_deref().unwrap_or("(unnamed)"),
+                    r.unsafe_because.as_deref().unwrap_or_default()
+                );
+            }
         }
     }
     // Some rewrites emit syntax an older Ruby cannot parse, and `verify` cannot
@@ -742,25 +749,32 @@ fn cmd_apply(
             },
         });
     if !too_new.is_empty() {
+        let more = if common.explain {
+            ":"
+        } else {
+            ", -e for which"
+        };
         match &target {
             Some(t) => eprintln!(
-                "rwr: {} rule(s) need a newer Ruby than {} (from {}):",
+                "rwr: {} rule(s) need a newer Ruby than {} (from {}){more}",
                 too_new.len(),
                 t.version,
                 t.source
             ),
             None => eprintln!(
                 "rwr: {} rule(s) declare a Ruby version and none was detected; \
-                 pass --ruby X.Y or add a .ruby-version:",
+                 pass --ruby X.Y or add a .ruby-version{more}",
                 too_new.len()
             ),
         }
-        for r in &too_new {
-            eprintln!(
-                "  {}: needs {}",
-                r.id.as_deref().unwrap_or("(unnamed)"),
-                r.ruby.as_deref().unwrap_or_default()
-            );
+        if common.explain {
+            for r in &too_new {
+                eprintln!(
+                    "  {}: needs {}",
+                    r.id.as_deref().unwrap_or("(unnamed)"),
+                    r.ruby.as_deref().unwrap_or_default()
+                );
+            }
         }
     }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**The hold-back notices are one line each.** The count of rules held back — unsafe, or
+needing a newer Ruby — is still unconditional, since a rule that did not run must never look
+like a rule that found nothing. The per-rule reasons moved behind `-e/--explain`: six lines
+of stderr on every pre-commit run is how a report trains people to stop reading it.
+
 ## 0.2.0 — 2026-08-21
 
 **`--diff` scopes a run to the lines a change touched**, so `check` can gate a pull request

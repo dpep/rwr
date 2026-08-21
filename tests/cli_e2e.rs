@@ -272,7 +272,9 @@ fn a_site_counts_once_however_many_edits_it_takes() {
 }
 
 /// A rule held back for being unsafe must not look like a rule that found
-/// nothing: the run says how many were skipped and why (D57).
+/// nothing: the run always says how many were skipped (D57). The reasons are
+/// one flag away rather than on every run -- six lines of stderr per
+/// pre-commit is how a report trains people to stop reading it.
 #[test]
 fn held_back_rules_are_reported_not_silent() {
     let dir = fixture("a = xs.inject(:+)\n");
@@ -281,9 +283,18 @@ fn held_back_rules_are_reported_not_silent() {
     let err = stderr(&quiet);
     assert!(err.contains("held back"), "{err}");
     assert!(err.contains("--unsafe"), "{err}");
+    assert!(!err.contains("empty collection"), "terse by default: {err}");
+
+    let why = rwr(&[
+        "check",
+        "performance/sum",
+        dir.path().to_str().unwrap(),
+        "-e",
+    ]);
     assert!(
-        err.contains("empty collection"),
-        "the reason, not just a count: {err}"
+        stderr(&why).contains("empty collection"),
+        "the reason is one flag away: {}",
+        stderr(&why)
     );
     assert_eq!(
         quiet.status.code(),
