@@ -125,6 +125,62 @@ This does not close Q2 — that needs the index built and measured — but it re
 worry that receiver narrowing is unworkable without Sorbet. The largest bucket needs no types
 at all.
 
+## Syntactic partition vs incumbents — **first scores**
+
+```sh
+./script/score.sh
+```
+
+| entry | ast-grep | comby |
+|---|---|---|
+| 001 return-nil | **match** | **match** |
+| 002 perf-detect | matched correctly, **rewrote non-minimally** | inexpressible |
+| 004 sorted-array | inexpressible | inexpressible |
+| 007 receiver-rename (semantic) | inexpressible | inexpressible |
+
+### 001 confirms the table-stakes concession
+
+Both incumbents produce the expected output exactly. `rg` finds 7 matches where 3 are real - a
+2.3x over-match from the comment, the heredoc body and the string literal - which is the case
+for structural tooling at all, but not a case for *this* structural tool.
+
+DESIGN.md section 2 already concedes Phase 1 is table stakes. This is that concession measured
+rather than asserted, and it is what the kill criteria are watching.
+
+### 002 relocates the differentiator from matching to rewriting
+
+ast-grep **found every correct site**. The output differs in layout:
+
+```ruby
+# expected (minimal diff - only the changed tokens move)
+    accounts
+      .detect { |account| account.name.include?(term) }
+
+# ast-grep
+    accounts.detect { |account| account.name.include?(term) }
+```
+
+and a multiline `do ... end` body came back as `... positive? end`, its trailing newline lost
+on splice.
+
+**Being fair about attribution:** the single-line collapse is the *invocation's* fault - the
+rewrite template was written on one line, so one line is what it emitted. The lost newline is
+ast-grep's splice.
+
+But the fair framing is more interesting than a scoreline: **a template-based rewriter cannot
+preserve layout it never captured.** ast-grep renders a template; rwr splices source ranges
+(D13's action tree over `effective_range`). That is exactly why section 3C made minimal diffs a
+requirement rather than a nicety.
+
+So the syntactic partition's real finding so far is that **rwr's edge at this layer is
+rewriting, not matching** - which sharpens section 2's positioning rather than contradicting it.
+
+### A second finding, from writing the invocation
+
+ast-grep has no method-name alternation in a bare pattern, so `select` and `find_all` need
+separate passes. Corpus 002's runner does two. That is a small ergonomic tax, and it is the
+first evidence for the `where:` predicate the backlog ranks first.
+
 ---
 
 ## Still outstanding
@@ -134,7 +190,7 @@ at all.
 | (a) residue-reporting spike | not started | a matcher, plus real renames with hand-verified ground truth |
 | (b) bare-name collateral | **done** — see above | — |
 | (c) receiver resolution for methods, no Sorbet | **preliminary, favourable** (~59% structurally resolvable) | symbol index to confirm |
-| syntactic-partition scoring vs incumbents | not started | competitor binaries installed |
+| syntactic-partition scoring vs incumbents | **started** - 4 entries scored | more entries; rwr itself |
 
 (b) was previously blocked on the author's private monolith. Rails is a legitimate public
 substitute, and being public it makes the result reproducible — which for an OSS tool
