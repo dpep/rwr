@@ -11,12 +11,9 @@
 //! invalidation, no staleness, and D5 still holds.
 
 use crate::pattern::generated;
-use ignore::WalkBuilder;
 use rayon::prelude::*;
 use ruby_prism::Node;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Superclass links, keyed by class name.
 #[derive(Debug, Default, Clone)]
@@ -51,26 +48,6 @@ fn links(root: &Node<'_>, out: &mut Vec<(String, String)>) {
 }
 
 impl Hierarchy {
-    /// Build from every Ruby file under `roots`.
-    pub(crate) fn build(roots: &[String]) -> Self {
-        let roots: Vec<&str> = if roots.is_empty() {
-            vec!["."]
-        } else {
-            roots.iter().map(String::as_str).collect()
-        };
-        let mut builder = WalkBuilder::new(roots[0]);
-        for extra in &roots[1..] {
-            builder.add(extra);
-        }
-        let files: Vec<PathBuf> = builder
-            .build()
-            .filter_map(Result::ok)
-            .map(ignore::DirEntry::into_path)
-            .filter(|p| p.extension().is_some_and(|x| x == "rb"))
-            .collect();
-        Self::from_files(&files)
-    }
-
     /// Build only the part of the hierarchy reachable from `roots`.
     ///
     /// A rename names one class, and only its descendants matter -- so rather
@@ -150,46 +127,6 @@ impl Hierarchy {
         (Hierarchy { superclass }, parsed_total)
     }
 
-    /// Build, also reporting how many files survived the prefilter.
-    pub(crate) fn from_files_counted(files: &[PathBuf]) -> (Self, usize) {
-        // Only a file containing `class` *and* `<` can declare a superclass, and
-        // the pattern prefilter cannot help here -- `class X < Y` has no rule
-        // literal to filter on. On the local Ruby corpus this skips about two
-        // thirds of files before any parse.
-        let class = memchr::memmem::Finder::new(b"class").into_owned();
-        let inherits = memchr::memmem::Finder::new(b"<").into_owned();
-        let parsed_count = AtomicUsize::new(0);
-
-        let pairs: Vec<(String, String)> = files
-            .par_iter()
-            .filter_map(|path| {
-                let src = std::fs::read(path).ok()?;
-                if class.find(&src).is_none() || inherits.find(&src).is_none() {
-                    return None;
-                }
-                parsed_count.fetch_add(1, Ordering::Relaxed);
-                let parsed = ruby_prism::parse(&src);
-                if parsed.errors().count() > 0 {
-                    return None;
-                }
-                let mut found = Vec::new();
-                links(&parsed.node(), &mut found);
-                Some(found)
-            })
-            .flatten()
-            .collect();
-
-        let hierarchy = Hierarchy {
-            superclass: pairs.into_iter().collect(),
-        };
-        let parsed = parsed_count.load(Ordering::Relaxed);
-        (hierarchy, parsed)
-    }
-
-    pub(crate) fn from_files(files: &[PathBuf]) -> Self {
-        Self::from_files_counted(files).0
-    }
-
     /// Whether `class` is `ancestor` or descends from it.
     ///
     /// Guards against a cycle, which valid Ruby cannot express but a
@@ -209,21 +146,6 @@ impl Hierarchy {
                 None => return false,
             }
         }
-    }
-
-    /// Every known class that is `ancestor` or descends from it.
-    pub(crate) fn descendants_of(&self, ancestor: &str) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .superclass
-            .keys()
-            .filter(|c| self.descends_from(c, ancestor))
-            .cloned()
-            .collect();
-        if !out.iter().any(|c| c == ancestor) {
-            out.push(ancestor.to_string());
-        }
-        out.sort();
-        out
     }
 
     /// Build from a single snippet. Test-only, and shared across modules so a
@@ -263,15 +185,6 @@ mod tests {
     fn namespaced_superclasses_resolve_by_name() {
         let h = Hierarchy::from_source("class Premium < Billing::Account; end");
         assert!(h.descends_from("Premium", "Account"));
-    }
-
-    #[test]
-    fn descendants_include_the_ancestor_itself() {
-        let h = Hierarchy::from_source("class A; end\nclass B < A; end");
-        assert_eq!(
-            h.descendants_of("A"),
-            vec!["A".to_string(), "B".to_string()]
-        );
     }
 
     /// Valid Ruby cannot express a cycle, but a half-written file can, and the

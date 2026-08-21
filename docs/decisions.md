@@ -1126,3 +1126,44 @@ uppercase and nothing else does. Pinned by
 *Reverses if:* the predicate set grows past what a closed enum can carry, at which point it
 wants a general value-matching language -- which should be resisted, since it is how a
 structural tool turns into a regex engine.
+
+## D59 - `--diff` scopes a run to the lines a change touched
+**Decided.**
+
+`rwr check` on a codebase that has never run it reports every pre-existing site, which is
+useless as a gate: a pull request adding three lines fails on two thousand it did not write.
+`--diff` restricts both matching and rewriting to lines the change touched, which is what
+makes the tool adoptable without a todo file to go stale — RuboCop needed
+`--auto-gen-config` for the same reason, and that file is a liability the moment it exists.
+
+**Bare `--diff` is the uncommitted work; `--diff REV` is three-dot.** `git diff main` compares
+against main's *tip*, so anything main gained meanwhile is reported as though this branch had
+written it. `main...HEAD` is the change this branch introduces. Verified against a diverged
+branch: two-dot picked up an unrelated file committed to main, three-dot did not
+(`cli_e2e::a_named_base_excludes_what_the_base_gained`).
+
+**Overlap, not containment.** A match spanning a changed line and some unchanged ones belongs
+to the change. Containment would let a one-line edit inside a multi-line expression escape the
+gate.
+
+**A git failure is an error, not an empty scope.** "No lines changed" and "git could not tell
+me" produce the same clean exit otherwise, and only one of them means the tree is clean — the
+same principle as D57's held-back rules.
+
+**The repository is the one being scanned, not the one you are standing in.** `rwr check
+~/other/repo --diff` asks git in `~/other/repo`. Using the process's own directory silently
+scoped a run to a diff from somewhere else entirely, which is a wrong answer that looks
+right.
+
+*Reverses if:* nothing plausible. The scope is opt-in and the unscoped run is unchanged.
+
+## D60 - The whole-repo hierarchy constructors are deleted
+**Decided**, as cleanup rather than design.
+
+`Hierarchy::build`, `from_files`, `from_files_counted` and `descendants_of` were superseded by
+`reachable_from` (D52) and had no caller outside a test. They are gone, with the test and the
+three imports that went with them.
+
+Worth recording only for how it surfaced: `clippy` had been reporting them as dead for some
+time, and a cached lint result hid it until an unrelated new module forced a full re-lint. A
+gate that passes from cache is not the same as a gate that passes.

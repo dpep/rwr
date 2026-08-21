@@ -356,6 +356,120 @@ fn an_undetected_ruby_version_holds_the_rule_back() {
     assert_eq!(forced.status.code(), Some(1), "{}", stderr(&forced));
 }
 
+/// Run a git command in `dir`, failing loudly.
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `--diff` is what makes `check` adoptable on a codebase that has never run
+/// it: a rule with three pre-existing sites must not fail a change that added
+/// one.
+#[test]
+fn diff_scoping_ignores_pre_existing_sites() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("app.rb"),
+        "def one\n  return nil\nend\n\ndef two\n  return nil\nend\n",
+    )
+    .expect("write");
+    git(path, &["init", "-q", "--initial-branch=main", "."]);
+    git(path, &["config", "user.email", "t@e.st"]);
+    git(path, &["config", "user.name", "t"]);
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-qm", "base"]);
+
+    // A third site arrives; the two already there are not this change's doing.
+    std::fs::write(
+        path.join("app.rb"),
+        "def one\n  return nil\nend\n\ndef two\n  return nil\nend\n\ndef three\n  return nil\nend\n",
+    )
+    .expect("write");
+
+    let all = rwr(&["check", "style/return-nil", path.to_str().unwrap()]);
+    assert_eq!(all.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&all.stdout).contains("3 site(s)"),
+        "{}",
+        String::from_utf8_lossy(&all.stdout)
+    );
+
+    let scoped = rwr(&[
+        "check",
+        "style/return-nil",
+        path.to_str().unwrap(),
+        "--diff",
+    ]);
+    assert!(
+        String::from_utf8_lossy(&scoped.stdout).contains("1 site(s)"),
+        "only the added site: {}",
+        String::from_utf8_lossy(&scoped.stdout)
+    );
+}
+
+/// `--diff main` is `main...HEAD`, not `main..HEAD`. Two-dot reports whatever
+/// the base gained meanwhile as though this branch had written it.
+#[test]
+fn a_named_base_excludes_what_the_base_gained() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(path.join("app.rb"), "def one\n  1\nend\n").expect("write");
+    git(path, &["init", "-q", "--initial-branch=main", "."]);
+    git(path, &["config", "user.email", "t@e.st"]);
+    git(path, &["config", "user.name", "t"]);
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-qm", "base"]);
+
+    git(path, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(path.join("mine.rb"), "def mine\n  return nil\nend\n").expect("write");
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-qm", "mine"]);
+
+    // Meanwhile main gains a violation of its own.
+    git(path, &["checkout", "-q", "main"]);
+    std::fs::write(path.join("theirs.rb"), "def theirs\n  return nil\nend\n").expect("write");
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-qm", "theirs"]);
+    git(path, &["checkout", "-q", "feature"]);
+
+    let out = rwr(&[
+        "check",
+        "style/return-nil",
+        path.to_str().unwrap(),
+        "--diff",
+        "main",
+    ]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("mine.rb"), "{text}");
+    assert!(
+        !text.contains("theirs.rb"),
+        "main's own work is not this branch's: {text}"
+    );
+}
+
+/// Outside a repository, `--diff` has no answer -- and "no lines changed" and
+/// "git could not tell me" must not produce the same clean exit.
+#[test]
+fn diff_outside_a_repository_is_an_error() {
+    let dir = fixture("def a\n  return nil\nend\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "style/return-nil", ".", "--diff"])
+        .current_dir(dir.path())
+        .env("GIT_CEILING_DIRECTORIES", dir.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
 /// No arguments is a usage error, not a silent no-op.
 #[test]
 fn bare_invocation_explains_itself() {

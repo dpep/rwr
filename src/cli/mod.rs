@@ -104,6 +104,15 @@ pub(crate) struct Common {
     #[arg(short = 'e', long, global = true)]
     explain: bool,
 
+    /// Restrict to lines a change touched. Bare, that is the uncommitted work;
+    /// with a revision, what this branch introduces (`main...HEAD`).
+    ///
+    /// What makes `check` adoptable on a codebase that has never run it: a rule
+    /// with two thousand pre-existing sites must not fail a pull request that
+    /// added three.
+    #[arg(long, global = true, value_name = "REV", num_args = 0..=1, default_missing_value = "")]
+    diff: Option<String>,
+
     /// The Ruby version to target, e.g. `3.1`.
     ///
     /// Detected from `.ruby-version`, a Gemfile `ruby` line, or a gemspec's
@@ -127,7 +136,47 @@ pub(crate) struct Common {
     profile: bool,
 }
 
+/// Where this run is pointed, for questions that are properties of the *repo*
+/// rather than of a file: which git repository, and which Ruby version.
+fn scope_start(paths: &[String], common: &Common) -> std::path::PathBuf {
+    paths
+        .first()
+        .or_else(|| common.path.first())
+        .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from)
+}
+
+/// Narrow a walked file list to the files a change touched.
+///
+/// Cheap and first: a diff-scoped run over a large repo should not read files
+/// the change never went near.
+fn only_changed(
+    files: Vec<std::path::PathBuf>,
+    changed: Option<&crate::diff::Changed>,
+) -> Vec<std::path::PathBuf> {
+    let Some(changed) = changed else { return files };
+    files
+        .into_iter()
+        .filter(|p| {
+            p.canonicalize()
+                .is_ok_and(|absolute| changed.covers(&absolute))
+        })
+        .collect()
+}
+
 impl Common {
+    /// The changed lines to restrict to, when `--diff` was given.
+    ///
+    /// `Err` is a hard failure rather than an empty scope: "no lines changed"
+    /// and "git could not tell me" produce the same clean exit otherwise, and
+    /// only one of them means the tree is clean.
+    fn changed(&self, start: &std::path::Path) -> Result<Option<crate::diff::Changed>, String> {
+        let Some(rev) = self.diff.as_deref() else {
+            return Ok(None);
+        };
+        let rev = (!rev.is_empty()).then_some(rev);
+        crate::diff::from_git(rev, start).map(Some)
+    }
+
     pub(crate) fn output(&self) -> Output {
         match (self.json, self.ndjson) {
             (_, true) => Output::Ndjson,
@@ -425,11 +474,24 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
     // `find` takes a bare pattern, so it has no rule to draw a class from.
     let class_anchor: Option<&str> = None;
 
+    let changed = match common.changed(&scope_start(paths, common)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rwr: {e}");
+            return Exit::Error.into();
+        }
+    };
+
     let mut scoped: Vec<String> = paths.to_vec();
     scoped.extend(common.path.iter().cloned());
     let files = profile::span_noted(
         "walk",
-        || source::ruby_files(&scoped, common.include_vendored),
+        || {
+            only_changed(
+                source::ruby_files(&scoped, common.include_vendored),
+                changed.as_ref(),
+            )
+        },
         |f| format!("{} files", f.len()),
     );
 
@@ -473,12 +535,21 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
             let Some(p_root) = matcher::pattern_root(&p_node) else {
                 return Vec::new().into_iter();
             };
-            let hits = matcher::search(
+            let mut hits = matcher::search(
                 &p_root,
                 &parsed.node(),
                 &prepared,
                 &matcher::Criteria::none(),
             );
+            if let Some(changed) = changed.as_ref() {
+                let absolute = path.canonicalize().unwrap_or_else(|_| path.clone());
+                hits.retain(|m| {
+                    let (start, end) = rewrite::effective_range(&m.node);
+                    let (first, _) = source::line_col(&src, start);
+                    let (last, _) = source::line_col(&src, end);
+                    changed.touches(&absolute, first, last)
+                });
+            }
 
             // The account of what the rule could not see (D7). Name-anchored
             // rules only: a pattern with no literal identifier has nothing to
@@ -608,6 +679,14 @@ fn cmd_apply(
     common: &Common,
     out: Output,
 ) -> ExitCode {
+    let changed = match common.changed(&scope_start(paths, common)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rwr: {e}");
+            return Exit::Error.into();
+        }
+    };
+
     let rules = match rule::load_all(rule_arg, replace) {
         Ok(r) => r,
         Err(e) => {
@@ -650,13 +729,7 @@ fn cmd_apply(
                 return Exit::Error.into();
             }
         },
-        None => {
-            let start = paths
-                .first()
-                .or_else(|| common.path.first())
-                .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
-            crate::ruby::detect(&start)
-        }
+        None => crate::ruby::detect(&scope_start(paths, common)),
     };
 
     let (rules, too_new): (Vec<rule::Rule>, Vec<rule::Rule>) =
@@ -727,7 +800,12 @@ fn cmd_apply(
     scoped.extend(common.path.iter().cloned());
     let files = profile::span_noted(
         "walk",
-        || source::ruby_files(&scoped, common.include_vendored),
+        || {
+            only_changed(
+                source::ruby_files(&scoped, common.include_vendored),
+                changed.as_ref(),
+            )
+        },
         |f| format!("{} files", f.len()),
     );
 
@@ -823,6 +901,9 @@ fn cmd_apply(
             // Materialised only now, for the few files that survive.
             let original = mapped.to_vec();
             let file = path.display().to_string();
+            // git reports paths from the repository root; the walk may have
+            // produced relative ones.
+            let absolute = path.canonicalize().unwrap_or_else(|_| path.clone());
             let mut current = original.clone();
             let mut total = 0usize;
             // Matches a wider edit covered. Non-zero means a rerun makes
@@ -853,8 +934,16 @@ fn cmd_apply(
                                 scope: &rule.scope,
                                 hierarchy: &hierarchy,
                             };
-                            let hits =
+                            let mut hits =
                                 matcher::search(&p_root, &parsed.node(), prepared, &criteria);
+                            if let Some(changed) = changed.as_ref() {
+                                hits.retain(|m| {
+                                    let (start, end) = rewrite::effective_range(&m.node);
+                                    let (first, _) = source::line_col(&current, start);
+                                    let (last, _) = source::line_col(&current, end);
+                                    changed.touches(&absolute, first, last)
+                                });
+                            }
                             if hits.is_empty() {
                                 Ok(None)
                             } else {
@@ -1080,6 +1169,7 @@ mod tests {
             ndjson: true,
             path: vec![],
             include_vendored: false,
+            diff: None,
             explain: false,
             ruby: None,
             unsafe_rules: false,

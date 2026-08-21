@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**`--diff` scopes a run to the lines a change touched**, so `check` can gate a pull request
+on a codebase that has never run it — three new sites fail, two thousand pre-existing ones do
+not. Bare `--diff` is the uncommitted work; `--diff main` is `main...HEAD`, the change this
+branch introduces rather than every way it differs from main's tip. Works with `find`,
+`check` and `rewrite`.
+
 **Rules declare the Ruby version their output needs, and are held back when the codebase is
 older.** `{foo:}` is a syntax error before 3.1 and `filter_map` does not exist before 2.7 —
 and `verify` cannot catch either, because Prism parses modern Ruby and the output is valid

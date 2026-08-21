@@ -7,6 +7,7 @@
 
 pub mod cli;
 #[allow(dead_code)]
+pub(crate) mod diff;
 pub(crate) mod hierarchy;
 pub(crate) mod pattern;
 #[allow(dead_code)]
