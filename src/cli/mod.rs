@@ -394,6 +394,38 @@ fn report_by_rule(changed: &[Changed]) {
     }
 }
 
+/// Report what a text search found in the files rwr cannot parse.
+///
+/// Grep-grade, and labelled as such. Templates embed Ruby that no parser here
+/// reads, so the choice is between saying nothing about them -- which makes a
+/// rename under-report, the dangerous direction -- and saying something weaker
+/// than usual and marking it weaker. The second is better, as long as the mark
+/// is honest.
+fn report_text_residue(found: &[Residue], templates: usize) {
+    if templates == 0 {
+        return;
+    }
+    if found.is_empty() {
+        eprintln!(
+            "\n{templates} template file(s) were searched by text and mention nothing. \
+             rwr cannot parse .erb/.haml, so this is weaker than the account above."
+        );
+        return;
+    }
+    eprintln!(
+        "\n{} occurrence(s) in {templates} template file(s), found by text search \
+         rather than parsed -- rwr does not read .erb/.haml, so these may be \
+         comments or unrelated text:",
+        found.len()
+    );
+    for r in found.iter().take(RESIDUE_DETAIL_CAP) {
+        eprintln!("  {}:{}:{}: {}", r.file, r.line, r.col, r.text.trim());
+    }
+    if found.len() > RESIDUE_DETAIL_CAP {
+        eprintln!("  ... and {} more", found.len() - RESIDUE_DETAIL_CAP);
+    }
+}
+
 /// Print what the finding rules flagged.
 ///
 /// Separate from the edit list because it is a different kind of answer: these
@@ -479,23 +511,11 @@ fn report_unsafe(changed: &[Changed], rules: &[rule::Rule]) {
 /// Symbols and strings are metaprogramming reaches -- genuine blind spots.
 /// Calls and definitions are usually a different method that happens to share
 /// the name, which only receiver resolution can rule out.
-fn report_residue(residues: &[Residue], templates: usize) {
+fn report_residue(residues: &[Residue]) {
     // Printed even when the residue list is empty: a rule that accounted for
     // everything in Ruby still did not look at ERB, and a blind spot that
     // appears and vanishes with unrelated results is not a report. The caller
     // passes zero when the run makes no completeness claim at all.
-    if templates > 0 {
-        // Stated as a *risk*, not a footnote. The refusal contract only covers
-        // what rwr can see, and here it cannot see embedded Ruby -- so a rename
-        // under-reports rather than over-reports, which is the dangerous
-        // direction and the opposite of what the rest of the tool promises.
-        eprintln!(
-            "\nwarning: {templates} template file(s) were not searched, and .erb/.haml \
-             embed Ruby.\n  This account is Ruby-only, so a call site in a view is \
-             missing from it rather than\n  listed -- check the templates by hand \
-             before trusting a rename as complete (Q11)."
-        );
-    }
     if residues.is_empty() {
         return;
     }
@@ -638,13 +658,13 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
 
     let mut scoped: Vec<String> = paths.to_vec();
     scoped.extend(common.path.iter().cloned());
-    let (files, templates) = profile::span_noted(
+    let (files, _templates) = profile::span_noted(
         "walk",
         || {
             let (found, templates) = source::walk(&scoped, common.include_vendored);
             (only_changed(found, changed.as_ref()), templates)
         },
-        |(f, t)| format!("{} files, {t} template(s) skipped", f.len()),
+        |(f, t)| format!("{} files, {} template(s)", f.len(), t.len()),
     );
 
     // Residue is collected across the parallel walk, so it needs a shared sink.
@@ -788,7 +808,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
             for f in &found {
                 println!("{}:{}:{}: {}", f.file, f.line, f.col, f.text);
             }
-            report_residue(&residues, templates);
+            report_residue(&residues);
         }
         _ => {
             // `-j` is one document, so it carries what produced it. `-J` is a
@@ -855,6 +875,10 @@ struct Report<'a> {
     changed: &'a [Changed],
     /// Matches of rules that propose no edit -- lints rather than rewrites.
     findings: &'a [Finding],
+    /// Occurrences found by text search in files rwr cannot parse. Kept apart
+    /// from `residue` because it is a weaker kind of evidence and saying so is
+    /// the point.
+    template_residue: &'a [Residue],
     /// Occurrences the rule could not account for. Present and empty when the
     /// rule is name-anchored and found none; absent means it made no claim.
     residue: &'a [Residue],
@@ -1056,7 +1080,7 @@ fn cmd_apply(
             let (found, templates) = source::walk(&scoped, common.include_vendored);
             (only_changed(found, changed.as_ref()), templates)
         },
-        |(f, t)| format!("{} files, {t} template(s) skipped", f.len()),
+        |(f, t)| format!("{} files, {} template(s)", f.len(), t.len()),
     );
 
     // Read once and shared between the hierarchy and the scan. Each phase
@@ -1458,6 +1482,53 @@ fn cmd_apply(
         });
     }
 
+    // Templates cannot be parsed, but they can be searched. This is what turns
+    // "356 files were not searched" into "here are the three views that mention
+    // the name you are renaming" -- the difference between naming a blind spot
+    // and doing something about it.
+    let mut left_over_text: Vec<Residue> = Vec::new();
+    if claims_completeness && !templates.is_empty() {
+        let anchors: Vec<(Option<String>, Vec<u8>)> = rules
+            .iter()
+            .zip(&prepareds)
+            .flat_map(|(rule, prepared)| {
+                let parsed = ruby_prism::parse(prepared.source.as_bytes());
+                let found = matcher::pattern_root(&parsed.node())
+                    .map(|root| residue::anchors(&root, prepared))
+                    .unwrap_or_default();
+                found
+                    .into_iter()
+                    .map(|a| (rule.id.clone(), a))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        left_over_text = templates
+            .par_iter()
+            .flat_map_iter(|path| {
+                let bytes = source::open(path);
+                let bytes = bytes.bytes().to_vec();
+                let mut here = Vec::new();
+                for (rule, anchor) in &anchors {
+                    for at in source::identifier_offsets(&bytes, anchor) {
+                        let (line, col) = source::line_col(&bytes, at);
+                        here.push(Residue {
+                            file: path.display().to_string(),
+                            line,
+                            col,
+                            context: residue::Context::Text,
+                            rule: rule.clone(),
+                            text: source::line_at(&bytes, at),
+                        });
+                    }
+                }
+                here.into_iter()
+            })
+            .collect();
+        left_over_text.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+        left_over_text.dedup_by_key(|r| (r.file.clone(), r.line, r.col));
+    }
+
     let mut findings: Vec<Finding> = outcomes
         .iter()
         .flat_map(|o| o.flagged.iter().cloned())
@@ -1486,7 +1557,8 @@ fn cmd_apply(
                     .collect::<Vec<_>>(),
             );
             report_unsafe(&changed, &rules);
-            report_residue(&left_over, if claims_completeness { templates } else { 0 });
+            report_residue(&left_over);
+            report_text_residue(&left_over_text, templates.len());
         }
         _ => {
             // Residue is the product, not a diagnostic, so it cannot be text-only:
@@ -1498,7 +1570,12 @@ fn cmd_apply(
                 changed: &changed,
                 findings: &findings,
                 residue: &left_over,
-                templates_skipped: if claims_completeness { templates } else { 0 },
+                template_residue: &left_over_text,
+                templates_skipped: if claims_completeness {
+                    templates.len()
+                } else {
+                    0
+                },
             };
             if emit_document(out, &report).is_some() {
                 return Exit::Error.into();

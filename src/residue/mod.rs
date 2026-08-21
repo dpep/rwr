@@ -31,6 +31,14 @@ pub(crate) enum Context {
     Call,
     /// A definition of that name.
     Definition,
+    /// Found by text search in a file rwr cannot parse -- a template, where
+    /// Ruby is embedded rather than written.
+    ///
+    /// Deliberately its own class rather than mixed in with the rest: every
+    /// other context is a fact about the parse tree, and this one is a string
+    /// that looked right. Labelling it keeps the difference visible to whoever
+    /// reads the report.
+    Text,
 }
 
 /// One occurrence the rule did not account for.

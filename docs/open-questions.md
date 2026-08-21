@@ -196,8 +196,24 @@ list: a rule that accounted for everything in Ruby still did not look at ERB, an
 spot that appears and vanishes with unrelated results is not a report.
 
 Option (b) — grep-grade residue inside templates — was judged "probably what users actually
-want", and may still be. It is a different feature from an honest claim, and shipping the
-honest claim first means it can be added without anyone having been misled meanwhile.
+want", and **that turned out to be right**: a user testing against a private monolith asked
+for exactly it, unprompted, having hit the under-reporting the honest claim only *described*.
+It now ships.
+
+Templates are searched for the anchored identifier at whole-identifier boundaries and
+reported as their own class, `Text`, apart from everything the parser found:
+
+```
+194 occurrence(s) in 356 template file(s), found by text search rather than parsed --
+rwr does not read .erb/.haml, so these may be comments or unrelated text:
+  app/views/accounts/show.html.haml:9:23: = account.name
+```
+
+On mastodon, a rename of `User#name` finds 145 parsed occurrences and 194 in templates —
+so more than half the account was previously invisible. Some of the 194 are HTML attribute
+names rather than Ruby, which is what grep-grade evidence costs and why it is labelled
+rather than merged. Shipping the honest claim first was still right: nobody was misled in
+the meantime, and the weaker class arrived already knowing it was weaker.
 
 ## Q10 — The refusal contract guards edit mechanics, not match semantics — **closed, partly**
 

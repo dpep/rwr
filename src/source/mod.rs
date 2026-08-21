@@ -116,7 +116,7 @@ pub(crate) fn is_ruby(path: &Path) -> bool {
 /// An empty `roots` means the current directory, matching rg. The templates are
 /// counted in the same pass, because a second walk to answer "what did you not
 /// look at" would cost as much as the first.
-pub(crate) fn walk(roots: &[String], include_vendored: bool) -> (Vec<PathBuf>, usize) {
+pub(crate) fn walk(roots: &[String], include_vendored: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let roots: Vec<&str> = if roots.is_empty() {
         vec!["."]
     } else {
@@ -131,7 +131,10 @@ pub(crate) fn walk(roots: &[String], include_vendored: bool) -> (Vec<PathBuf>, u
     // Parallel walk: with a literal prefilter making parsing cheap, file
     // discovery becomes the dominant cost on a large repository.
     let found = Arc::new(Mutex::new(Vec::new()));
-    let templates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Kept rather than counted: a template cannot be parsed, but it can still be
+    // *searched*, and "here are the three views that mention this name" beats
+    // "356 files were not searched" by a wide margin.
+    let templates = Arc::new(Mutex::new(Vec::new()));
     let owned_roots: Vec<String> = roots.iter().map(|r| (*r).to_string()).collect();
 
     builder.build_parallel().run(|| {
@@ -148,8 +151,10 @@ pub(crate) fn walk(roots: &[String], include_vendored: bool) -> (Vec<PathBuf>, u
                         if let Ok(mut sink) = found.lock() {
                             sink.push(path);
                         }
-                    } else if is_template(&path) {
-                        templates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    } else if is_template(&path)
+                        && let Ok(mut sink) = templates.lock()
+                    {
+                        sink.push(path);
                     }
                 }
             }
@@ -160,9 +165,29 @@ pub(crate) fn walk(roots: &[String], include_vendored: bool) -> (Vec<PathBuf>, u
     let mut files = Arc::try_unwrap(found)
         .map(|m| m.into_inner().unwrap_or_default())
         .unwrap_or_default();
+    let mut templates = Arc::try_unwrap(templates)
+        .map(|m| m.into_inner().unwrap_or_default())
+        .unwrap_or_default();
     // Sorted so output is deterministic regardless of walk order.
     files.sort();
-    (files, templates.load(std::sync::atomic::Ordering::Relaxed))
+    templates.sort();
+    (files, templates)
+}
+
+/// Whole-identifier occurrences of `needle` in `haystack`, as byte offsets.
+///
+/// The lexical fallback for files rwr cannot parse. A substring match would
+/// report `display_names` for `display_name`, which is the sloppiness that
+/// makes people stop reading a report.
+pub(crate) fn identifier_offsets(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    memchr::memmem::find_iter(haystack, needle)
+        .filter(|at| {
+            let before = at.checked_sub(1).is_none_or(|i| !is_word(haystack[i]));
+            let after = haystack.get(at + needle.len()).is_none_or(|b| !is_word(*b));
+            before && after
+        })
+        .collect()
 }
 
 /// A file's bytes, mapped where that avoids a copy.

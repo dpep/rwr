@@ -98,7 +98,11 @@ fn copy_tree(from: &Path, to: &Path) {
 /// A marker sits on its own comment line or on the site itself, so a report one
 /// line below the marker is the same site.
 fn reported(report: &serde_json::Value, file: &Path, line: usize) -> bool {
-    report["residue"].as_array().is_some_and(|rows| {
+    let rows = [
+        report["residue"].as_array(),
+        report["template_residue"].as_array(),
+    ];
+    rows.into_iter().flatten().any(|rows| {
         rows.iter().any(|r| {
             r["file"].as_str() == file.to_str()
                 && r["line"]

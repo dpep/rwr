@@ -528,12 +528,13 @@ fn templates_are_reported_as_unread() {
         dir.path().to_str().unwrap(),
     ]);
     let err = stderr(&out);
+    // Templates cannot be parsed, so they are *searched* -- grep-grade evidence,
+    // labelled as weaker. Saying nothing about them would make a rename
+    // under-report, which is the dangerous direction.
     assert!(err.contains("2 template file(s)"), "{err}");
-    assert!(err.contains("not searched"), "{err}");
-    // Stated as a risk: the gap makes a rename under-report, which is the
-    // dangerous direction and the opposite of what the tool promises.
-    assert!(err.contains("warning:"), "{err}");
-    assert!(err.contains("missing from it"), "{err}");
+    assert!(err.contains("found by text search"), "{err}");
+    assert!(err.contains("show.html.erb"), "the ERB call site: {err}");
+    assert!(err.contains("index.haml"), "the Haml call site: {err}");
 }
 
 /// A `.rake` file is Ruby, and was invisible until it was not.

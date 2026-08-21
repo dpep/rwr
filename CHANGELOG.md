@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**Templates are searched, not just counted.** rwr cannot parse `.erb`/`.haml`, so a rename
+used to say "356 template file(s) were not searched" and stop. It now searches them for the
+name at whole-identifier boundaries and reports what it finds as its own class — grep-grade
+evidence, labelled as weaker than anything parsed. On mastodon a rename of `User#name` finds
+145 parsed occurrences and 194 more in templates, so over half the account was invisible.
+
 **Rules can lint without rewriting.** A rule with no `rewrite:` is a *finding*: it reports
 its matches with its `description` and proposes no edit. Findings make `check` exit 1 like
 edits do, since a lint that exits 0 gates nothing. Ships as `performance/relation-size`,

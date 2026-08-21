@@ -1,3 +1,6 @@
-<%# GT:blind -- ERB embeds Ruby that rwr does not parse (Q11). It is counted,
-    not read, and the report says so. %>
+<%# ERB embeds Ruby that rwr does not parse, so the call below is found by
+    *text* search and reported as a weaker class than the rest. Better than the
+    silence it used to get: a rename that misses a view under-reports, which is
+    the dangerous direction. %>
+<%# GT:residue %>
 <h1><%= @account.display_name %></h1>
