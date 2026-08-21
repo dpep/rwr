@@ -430,7 +430,10 @@ fn cmd_apply(
             let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
             let p_node = p_parsed.node();
             let p_root = matcher::pattern_root(&p_node)?;
-            let hits = matcher::search(&p_root, &parsed.node(), &prepared);
+            let hits: Vec<_> = matcher::search(&p_root, &parsed.node(), &prepared)
+                .into_iter()
+                .filter(|m| matcher::satisfies(&m.env, &rule.constraints))
+                .collect();
             if hits.is_empty() {
                 return None;
             }

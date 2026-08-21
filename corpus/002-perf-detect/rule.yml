@@ -1,4 +1,8 @@
-# The ideal rule alternates select/find_all via a `where:` predicate, which is
-# not built yet (see docs/rule-corpus.md). This is the expressible subset.
-match: $R.select { |$P| $B }.first
+# `$SEL` sits in method-name position, which only lexes because D18 substitutes
+# metavariables before Prism parses the pattern. The alternation is what lets
+# one rule cover both synonyms -- ast-grep needs a separate pass per name.
+match: $R.$SEL { |$P| $B }.first
+where:
+  $SEL:
+    name: [select, find_all]
 rewrite: $R.detect { |$P| $B }

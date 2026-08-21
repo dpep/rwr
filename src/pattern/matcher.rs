@@ -12,6 +12,7 @@
 use super::compare::{self, Atom};
 use super::generated;
 use super::prepare::{Binding, Prepared};
+use crate::rule::Constraint;
 use ruby_prism::Node;
 use std::collections::HashMap;
 
@@ -265,6 +266,30 @@ pub(crate) fn pattern_root<'pr>(root: &Node<'pr>) -> Option<Node<'pr>> {
     (body.iter().count() == 1).then_some(first)
 }
 
+/// Whether an environment satisfies a rule's `where:` constraints.
+///
+/// Checked after a structural match rather than threaded through it: the
+/// bindings are already known by then, and keeping the two separate means a
+/// constraint can never change *what* matched, only whether it counts.
+pub(crate) fn satisfies(env: &Env<'_>, constraints: &HashMap<String, Constraint>) -> bool {
+    constraints.iter().all(|(key, constraint)| {
+        let Some(allowed) = &constraint.name else {
+            return true;
+        };
+        let Some(bound) = env.get(key.trim_start_matches('$')) else {
+            // A constraint naming a metavariable the pattern does not bind is a
+            // rule bug. Refuse the match rather than silently ignoring it.
+            return false;
+        };
+        let actual = match bound {
+            Bound::Name(bytes) => Some(bytes.clone()),
+            Bound::One(node) => bare_name(node),
+            Bound::Many(_) => None,
+        };
+        actual.is_some_and(|a| allowed.iter().any(|n| n.as_bytes() == a.as_slice()))
+    })
+}
+
 /// Every node in `target` matching `pattern`, outermost first.
 ///
 /// `find` is reentrant (D15): nested matches are reported, because find is
@@ -384,6 +409,54 @@ end
             matches("x.each { |$P| $B }", "x.each do |a|\n  go(a)\nend"),
             1
         );
+    }
+
+    /// Method-name alternation, the predicate ranked first in the backlog:
+    /// `select` and `find_all` are synonyms and one rule must match both.
+    #[test]
+    fn name_constraints_narrow_a_match() {
+        let prepared = prepare("$R.$SEL { |$P| $B }.first").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let p_root = pattern_root(&p_node).expect("single expression");
+
+        let src = "a.select { |x| x.b }.first\nc.find_all { |y| y.d }.first\ne.reject { |z| z.f }.first\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = search(&p_root, &parsed.node(), &prepared);
+        assert_eq!(hits.len(), 3, "structural match should find all three");
+
+        let mut constraints = HashMap::new();
+        constraints.insert(
+            "$SEL".to_string(),
+            Constraint {
+                name: Some(vec!["select".into(), "find_all".into()]),
+            },
+        );
+        let narrowed = hits
+            .iter()
+            .filter(|m| satisfies(&m.env, &constraints))
+            .count();
+        assert_eq!(narrowed, 2, "reject is not a synonym for select");
+    }
+
+    /// A constraint naming a metavariable the pattern never binds is a rule
+    /// bug, and refusing the match surfaces it rather than silently passing.
+    #[test]
+    fn a_constraint_on_an_unbound_metavariable_refuses() {
+        let prepared = prepare("foo($A)").expect("prepares");
+        let mut env = Env::new();
+        let parsed = ruby_prism::parse(b"1");
+        env.insert("A".to_string(), Bound::One(parsed.node()));
+        let _ = &prepared;
+
+        let mut constraints = HashMap::new();
+        constraints.insert(
+            "$NOPE".to_string(),
+            Constraint {
+                name: Some(vec!["x".into()]),
+            },
+        );
+        assert!(!satisfies(&env, &constraints));
     }
 
     /// Nested matches are reported: find is observation (D15).

@@ -183,8 +183,9 @@ non-anchored-insertion case that is genuinely out of reach.
 
 **Build order for `where:` predicates**, ranked by how many target rules each unblocks:
 
-1. **Method-name alternation** — unblocks `Performance/Detect` and `Performance/Count`, and was
-   independently flagged by the case studies. Clear first.
+1. ~~**Method-name alternation**~~ — **built.** `where: { $SEL: { name: [select, find_all] } }`.
+   One rule covers both synonyms; ast-grep needs a separate pass per name. Unblocks
+   `Performance/Detect` and `Performance/Count`.
 2. **Inter-node source inspection** — unblocks all three trailing-comma cops at once. Best
    ratio of rules-unblocked to predicate.
 3. **Multiline test** — trivial (compare start and end line), pairs with (2).

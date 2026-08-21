@@ -5,6 +5,7 @@
 //! rule file arrives exactly when precision is needed.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -15,6 +16,21 @@ pub(crate) struct Rule {
     /// The replacement template. Absent for a find-only rule.
     #[serde(default)]
     pub rewrite: Option<String>,
+    /// Constraints source syntax cannot express, keyed by metavariable.
+    #[serde(default, rename = "where")]
+    pub constraints: HashMap<String, Constraint>,
+}
+
+/// What a capture must satisfy beyond matching structurally.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct Constraint {
+    /// The capture must be one of these identifiers.
+    ///
+    /// Ranked first in the backlog because it unblocks `Performance/Detect` and
+    /// `Performance/Count` at once: `select` and `find_all` are synonyms and a
+    /// rule has to match both. ast-grep needs a separate pass per name.
+    #[serde(default)]
+    pub name: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -51,6 +67,7 @@ pub(crate) fn load(rule: &str, replace: Option<&str>) -> Result<Rule, RuleError>
         return Ok(Rule {
             pattern: rule.to_string(),
             rewrite: Some(template.to_string()),
+            constraints: HashMap::new(),
         });
     }
 
@@ -82,6 +99,21 @@ mod tests {
     #[test]
     fn a_bare_pattern_without_a_template_is_an_error() {
         assert!(matches!(load("foo($A)", None), Err(RuleError::NoTemplate)));
+    }
+
+    #[test]
+    fn constraints_are_parsed() {
+        let dir = std::env::temp_dir().join("rwr-rule-where");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("w.yml");
+        std::fs::write(
+            &path,
+            "match: $R.$SEL { |$P| $B }.first\nwhere:\n  $SEL:\n    name: [select, find_all]\nrewrite: $R.detect { |$P| $B }\n",
+        )
+        .expect("write");
+        let rule = load(path.to_str().expect("utf8"), None).expect("rule");
+        let names = rule.constraints["$SEL"].name.as_ref().expect("names");
+        assert_eq!(names, &["select", "find_all"]);
     }
 
     #[test]
