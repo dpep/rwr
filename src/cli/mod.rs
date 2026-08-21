@@ -436,7 +436,7 @@ fn cmd_apply(
             }
 
             let file = path.display().to_string();
-            match rewrite::plan(&hits, &template, &src) {
+            match rewrite::plan(&hits, &p_root, &prepared, &template, &src) {
                 Err(refusal) => Some(Outcome {
                     file,
                     edits: 0,

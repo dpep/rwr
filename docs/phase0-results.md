@@ -216,49 +216,35 @@ The same fixture on which comby rewrites a heredoc body and turns `return nil_va
 `return_value`. rwr changes three sites and leaves the comment, the string literal and the
 heredoc body untouched.
 
-### 002: rwr has the same non-minimal-rewrite limitation it criticised ast-grep for
+### 002: partially fixed by structural diffing; shape-changing rewrites still fall back
 
-This is the uncomfortable one and it should be recorded plainly.
+The first run of this corpus caught rwr doing exactly what this document had criticised
+ast-grep for -- a multiline chain collapsing and a `do ... end` block coming back as braces --
+because the template governed layout.
+
+**Structural diffing fixes the same-shape case.** Rather than rendering the whole template,
+pattern and template trees are aligned and edits emitted only where they *differ*. A subtree
+carried across unchanged is never spliced, so its bytes survive exactly:
 
 ```ruby
-# expected -- minimal diff, only the changed tokens move
-    accounts
-      .detect { |account| account.name.include?(term) }
-    accounts.detect do |account|
-      account.active? && account.balance.positive?
-    end
-
-# rwr, today
-    accounts.detect { |account| account.name.include?(term) }
-    accounts.detect { |account| account.active? && account.balance.positive? }
+foo(  x  +  1  )   ->   bar(  x  +  1  )     # was bar(x  +  1)
+foo(\n  a,\n  b,\n)  ->  bar(\n  a,\n  b,\n)   # layout untouched
 ```
 
-The multiline chain collapses and the `do ... end` block becomes braces, because **the
-template governs layout**: a capture preserves its own internal formatting, but everything
-around it is re-rendered from the template. That is exactly what ast-grep does, and exactly
-what this document earlier called ast-grep's limitation.
+Three consequences, two of them unplanned:
 
-**So the claim that "rwr's edge at the syntax layer is rewriting, not matching" is a design
-intent, not a shipped property.** DESIGN.md section 3C requires minimal diffs; the current
-implementation does not deliver them.
-
-**What would deliver it: structural-diff editing.** Align the pattern and template trees and
-emit edits only where they differ. For `$R.select { ... }.first` -> `$R.detect { ... }` the
-differences are a name atom (`select` -> `detect`) and a removed outer call (`.first`) -- two
-small edits that never touch the block, so its layout and its brace-or-`do` spelling survive
-untouched. That also dissolves the heredoc refusal below, since a capture that does not move
-is never spliced.
-
-### Heredoc captures are refused, not corrupted
-
-A heredoc's content is discontiguous: the `<<~SQL` token sits inline while its body follows the
-enclosing line. Splicing a capture containing one would drag along text belonging to the
-enclosing expression, so rwr refuses (exit 5).
-
-`effective_range` (D14) stops an edit being *truncated*; it cannot make a heredoc *movable*.
-Refusing is the honest interim answer, and structural-diff editing removes the need for it.
-
----
+- **The heredoc refusal dissolved itself.** A capture that does not move is never spliced, so
+  the discontiguity hazard never arises. `foo(<<~SQL) -> bar(<<~SQL)` now simply works, and the
+  `DiscontiguousCapture` refusal no longer fires for renames.
+- **Nested matches both apply in one pass.** Minimal edits over `foo(foo(1))` are two method
+  names in different places -- genuinely disjoint -- so the result is `bar(bar(1))` with no
+  rerun. This is D15 working as *written*: the conflict unit is the edit range, not the match
+  range.
+- **Shape-changing rewrites still fall back to full replacement.** `$R.select { .. }.first ->
+  $R.detect { .. }` drops an enclosing call, so the trees diverge and alignment gives up.
+  Corpus 002 therefore still differs from its expected output. Giving up is *correct*, merely
+  non-minimal, which is the right direction to be wrong in -- but the minimal-diff claim holds
+  today only for same-shape rules.
 
 ## Still outstanding
 

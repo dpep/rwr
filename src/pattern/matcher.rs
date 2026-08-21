@@ -73,6 +73,15 @@ fn bare_name<'a>(node: &Node<'a>) -> Option<Vec<u8>> {
     }
 }
 
+/// The *metavariable* a node stands for, if it is a placeholder reference.
+///
+/// Keyed on the metavariable rather than the placeholder, since one
+/// metavariable used twice substitutes to two distinct placeholders.
+pub(crate) fn placeholder_name(node: &Node<'_>, prepared: &Prepared) -> Option<String> {
+    let key = placeholder(node, &prepared.bindings)?;
+    prepared.bindings.get(key).and_then(|b| b.name.clone())
+}
+
 /// If `node` is a placeholder reference, the metavariable it stands for.
 fn placeholder<'a>(node: &Node<'_>, bindings: &'a HashMap<String, Binding>) -> Option<&'a str> {
     let name = bare_name(node)?;

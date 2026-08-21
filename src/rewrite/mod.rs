@@ -9,8 +9,9 @@
 //! downstream check would catch the mistake.
 
 use crate::pattern::generated;
-use crate::pattern::matcher::{Bound, Env, Match};
+use crate::pattern::matcher::{self, Bound, Env, Match};
 use crate::pattern::metavar::{self, Arity};
+use crate::pattern::prepare::{self, Prepared};
 use ruby_prism::Node;
 
 /// One replacement of a source span.
@@ -149,20 +150,52 @@ pub(crate) fn render(template: &str, env: &Env<'_>, source: &[u8]) -> Result<Str
 /// partial overlap (D15).
 pub(crate) fn plan(
     matches: &[Match<'_>],
+    pattern_root: &Node<'_>,
+    pattern_prepared: &Prepared,
     template: &str,
     source: &[u8],
 ) -> Result<Vec<Edit>, Refusal> {
-    let mut edits: Vec<Edit> = matches
-        .iter()
-        .map(|m| {
-            let (start, end) = effective_range(&m.node);
-            Ok(Edit {
-                start,
-                end,
-                text: render(template, &m.env, source)?,
-            })
-        })
-        .collect::<Result<Vec<_>, Refusal>>()?;
+    // The template is prepared and parsed once so its tree can be aligned
+    // against the pattern's. Placeholder ids differ between the two, but both
+    // resolve to the same metavariable names, which is what alignment keys on.
+    let t_prepared = prepare::prepare(template).ok();
+    let t_parsed = t_prepared
+        .as_ref()
+        .map(|p| ruby_prism::parse(p.source.as_bytes()));
+    let t_node = t_parsed.as_ref().map(ruby_prism::ParseResult::node);
+    let t_root = t_node.as_ref().and_then(matcher::pattern_root);
+
+    let mut edits: Vec<Edit> = Vec::new();
+    for m in matches {
+        // Minimal first: where pattern and template agree in shape, edit only
+        // what differs and leave every untouched subtree's bytes alone.
+        let minimal = match (&t_root, &t_prepared) {
+            (Some(root), Some(tp)) => structural_diff(
+                pattern_root,
+                root,
+                &m.node,
+                pattern_prepared,
+                tp.source.as_bytes(),
+            ),
+            _ => None,
+        };
+
+        match minimal {
+            Some(mut found) if !found.is_empty() => edits.append(&mut found),
+            // No difference at all: the rule is a no-op here.
+            Some(_) => {}
+            // Shapes diverge, so fall back to replacing the whole span. Correct,
+            // merely non-minimal.
+            None => {
+                let (start, end) = effective_range(&m.node);
+                edits.push(Edit {
+                    start,
+                    end,
+                    text: render(template, &m.env, source)?,
+                });
+            }
+        }
+    }
 
     // Outermost first: a wider edit that contains a narrower one wins, and the
     // contained match is dropped rather than applied against stale offsets.
@@ -173,7 +206,6 @@ pub(crate) fn plan(
         match kept.last() {
             Some(previous) if edit.start < previous.end => {
                 if edit.end <= previous.end {
-                    // Fully contained: the outer edit already covers it.
                     continue;
                 }
                 return Err(Refusal::Overlap {
@@ -218,6 +250,90 @@ pub(crate) fn verify(rewritten: &str) -> Result<(), Refusal> {
     }
 }
 
+/// Structural-diff editing: emit edits only where pattern and template differ.
+///
+/// Rendering a whole template re-imposes its layout on everything it covers,
+/// which is why a multiline chain collapses and a `do ... end` block comes back
+/// as braces. Aligning the two trees instead means an unchanged subtree is
+/// never spliced, so its formatting -- and any heredoc inside it -- survives.
+///
+/// Deliberately conservative: it descends only while the two trees agree in
+/// shape and gives up the moment they diverge, leaving the caller to replace the
+/// whole span. Giving up is always *correct*, merely non-minimal, which is the
+/// right direction to be wrong in.
+///
+/// **Scope today:** same-shape rewrites, where pattern and template differ only
+/// in atoms. That covers renames, the largest rule family. A shape-changing
+/// rewrite -- `$R.select { .. }.first` -> `$R.detect { .. }`, which drops an
+/// enclosing call -- still falls back to full replacement.
+fn structural_diff(
+    pattern: &Node<'_>,
+    template: &Node<'_>,
+    target: &Node<'_>,
+    prepared: &Prepared,
+    template_src: &[u8],
+) -> Option<Vec<Edit>> {
+    let p_meta = matcher::placeholder_name(pattern, prepared);
+    let t_meta = matcher::placeholder_name(template, prepared);
+
+    // The same metavariable on both sides: this subtree is carried across
+    // untouched, so emit nothing and let the original bytes stand.
+    if let (Some(p), Some(t)) = (&p_meta, &t_meta) {
+        return (p == t).then(Vec::new);
+    }
+    // A placeholder on one side only means the subtree is introduced or
+    // dropped; there is no correspondence to edit through.
+    if p_meta.is_some() || t_meta.is_some() {
+        return None;
+    }
+
+    if std::mem::discriminant(pattern) != std::mem::discriminant(template)
+        || std::mem::discriminant(pattern) != std::mem::discriminant(target)
+    {
+        return None;
+    }
+
+    let (p_kids, t_kids, x_kids) = (
+        generated::children(pattern),
+        generated::children(template),
+        generated::children(target),
+    );
+    if p_kids.len() != t_kids.len() || p_kids.len() != x_kids.len() {
+        return None;
+    }
+
+    let mut edits = Vec::new();
+
+    // Atoms differing between pattern and template are the interesting case: a
+    // method rename is exactly this, and it is one small edit over the name.
+    if generated::atoms(pattern) != generated::atoms(template) {
+        let (from, to) = (name_span(target)?, name_text(template, template_src)?);
+        edits.push(Edit {
+            start: from.0,
+            end: from.1,
+            text: to,
+        });
+    }
+
+    for ((p, t), x) in p_kids.iter().zip(&t_kids).zip(&x_kids) {
+        edits.extend(structural_diff(p, t, x, prepared, template_src)?);
+    }
+    Some(edits)
+}
+
+/// The span of the identifier a node is named by, when it has one that can be
+/// edited in isolation.
+fn name_span(node: &Node<'_>) -> Option<(usize, usize)> {
+    let loc = node.as_call_node()?.message_loc()?;
+    Some((loc.start_offset(), loc.end_offset()))
+}
+
+/// The identifier the template calls for.
+fn name_text(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    let loc = node.as_call_node()?.message_loc()?;
+    Some(String::from_utf8_lossy(&src[loc.start_offset()..loc.end_offset()]).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,7 +350,7 @@ mod tests {
         assert_eq!(parsed.errors().count(), 0, "source does not parse");
         let hits = matcher::search(&p_root, &parsed.node(), &prepared);
 
-        let edits = plan(&hits, template, source.as_bytes())?;
+        let edits = plan(&hits, &p_root, &prepared, template, source.as_bytes())?;
         let out = apply(source.as_bytes(), &edits);
         verify(&out)?;
         Ok(out)
@@ -262,28 +378,25 @@ mod tests {
     /// what surrounds them.
     #[test]
     fn captures_preserve_their_source() {
-        // The padding inside the parens belongs to the call, not the argument,
-        // so it is the template's to decide. What survives untouched is the
-        // capture's own internal spacing.
+        // Structural diffing edits only the method name, so every byte of the
+        // argument -- including the padding inside the parens -- is left alone.
         let out = rewrite("foo($A)", "bar($A)", "foo(  x  +  1  )\n").unwrap();
-        assert_eq!(out, "bar(x  +  1)\n");
+        assert_eq!(out, "bar(  x  +  1  )\n");
     }
 
     /// A heredoc's content is discontiguous -- the `<<~SQL` token sits inline
-    /// and the body follows the enclosing line -- so splicing a capture that
-    /// contains one would drag along text belonging to the enclosing call.
-    /// rwr refuses rather than producing a subtly wrong file (principle 2).
+    /// and the body follows the enclosing line -- so splicing a capture holding
+    /// one would drag along text belonging to the enclosing call.
     ///
-    /// The right long-term fix is computing edits as a structural diff, where
-    /// a capture that does not move is never spliced at all. Until then this
-    /// declines work rather than doing it wrongly.
+    /// Structural diffing removes the hazard rather than guarding it: the
+    /// capture does not move, so it is never spliced, and only the method name
+    /// is edited. The refusal this test once asserted no longer fires.
     #[test]
-    fn heredoc_captures_are_refused_not_corrupted() {
+    fn heredoc_captures_survive_a_rename() {
         let src = "foo(<<~SQL)\n  SELECT 1\nSQL\n";
-        assert!(matches!(
-            rewrite("foo($A)", "bar($A)", src),
-            Err(Refusal::DiscontiguousCapture { .. })
-        ));
+        let out = rewrite("foo($A)", "bar($A)", src).unwrap();
+        assert_eq!(out, "bar(<<~SQL)\n  SELECT 1\nSQL\n");
+        verify(&out).expect("rewritten source still parses");
     }
 
     /// A heredoc that is not captured is untouched, so rewriting around one
@@ -310,13 +423,23 @@ mod tests {
         assert_eq!(out, "bar(1)\n");
     }
 
-    /// Nested matches produce disjoint edits only when the inner one is not
-    /// contained; a contained match is dropped, not applied against stale
-    /// offsets (D15).
+    /// D15's conflict unit is the *edit* range, not the match range. Minimal
+    /// edits over nested matches are genuinely disjoint -- two method names in
+    /// different places -- so both apply in one pass rather than the inner one
+    /// needing a rerun.
     #[test]
-    fn contained_matches_are_dropped_not_misapplied() {
+    fn nested_matches_both_apply_when_their_edits_are_disjoint() {
         let out = rewrite("foo($A)", "bar($A)", "foo(foo(1))\n").unwrap();
-        assert_eq!(out, "bar(foo(1))\n");
+        assert_eq!(out, "bar(bar(1))\n");
         verify(&out).expect("still parses");
+    }
+
+    /// The whole point of structural diffing: layout the rule does not mention
+    /// is never re-rendered, so a multiline call keeps its shape.
+    #[test]
+    fn layout_outside_the_change_is_untouched() {
+        let src = "foo(\n  a,\n  b,\n)\n";
+        let out = rewrite("foo($A, $B)", "bar($A, $B)", src).unwrap();
+        assert_eq!(out, "bar(\n  a,\n  b,\n)\n");
     }
 }
