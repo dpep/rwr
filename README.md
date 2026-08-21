@@ -15,6 +15,19 @@ rwr rewrite add-context.yml app/       # apply it
 
 The shorthand never writes: mutation always requires typing `rewrite`.
 
+Renames use Ruby's own method notation, which carries the distinction that
+matters:
+
+```yaml
+method: Account#display_name    # the instance method
+rename: full_name
+```
+
+`Account#display_name` and `Account.display_name` are different methods, and rwr
+treats them that way — renaming one never touches the other. One line expands to
+the rule set a complete rename needs: the definition, the explicit-receiver
+calls, and the implicit-self calls.
+
 ## Status
 
 **Pre-implementation.** The design is written and the scaffold builds; no

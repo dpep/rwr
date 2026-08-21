@@ -845,3 +845,38 @@ corpus rather than needing to be complete on day one.
 
 *Reverses if:* a future `ruby-prism` adds a typed-node -> `Node` conversion, at which point
 full codegen becomes as clean as D36 assumed and should be adopted.
+
+## D49 - Class and instance methods are different methods
+**Decided**, after the author asked whether rwr distinguishes `Account#display_name` from
+`Account.display_name`. It did not, and that was a correctness bug: `type: Account` rewrote
+both, so renaming an instance method silently renamed the unrelated class method too - the
+silent wrong edit the whole design exists to prevent.
+
+Receiver resolution yields `Instance(C)` or `Class(C)` rather than a bare name:
+
+| receiver | resolves to |
+|---|---|
+| `Account` (a constant) | `Class(Account)` - a constant names the class *object* |
+| `Account.new` assigned to a local | `Instance(Account)` |
+| `self` in an ordinary method body | `Instance(enclosing)` |
+| `self` in `def self.x` or `class << self` | `Class(enclosing)` |
+
+Constraints take `kind: instance | class`, defaulting to **instance** - it matches Ruby's own
+`Account#foo` notation and is the commoner case.
+
+## D50 - Renames are written in Ruby's method notation
+**Decided.** `method: Account#display_name` / `rename: full_name` expands to the rule set a
+complete rename needs, rather than making the author write three rules by hand:
+
+1. the definition - `def display_name` (or `def self.display_name` for the dot form), scoped
+   `inside:` the class;
+2. explicit-receiver calls - `$R.display_name` narrowed by class *and* kind, which also covers
+   `self.display_name` since that resolves as an instance receiver;
+3. implicit-self calls - a bare `display_name` scoped `inside:` the class, reaching the
+   largest receiver bucket (43.5% of rails calls).
+
+The notation is not incidental sugar: `#` versus `.` *is* the instance-versus-class
+distinction D49 exists to respect, so the spelling a Ruby developer already uses carries
+exactly the information the rename needs. The dot form emits two rules rather than three -
+implicit self inside a class-method body is not yet reachable, since `inside:` does not track
+singleton context.

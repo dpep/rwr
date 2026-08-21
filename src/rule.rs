@@ -111,6 +111,94 @@ impl std::fmt::Display for RuleError {
     }
 }
 
+/// A rename written in Ruby's own method notation.
+///
+/// `Account#display_name` and `Account.display_name` are how Ruby developers
+/// name methods, and they carry the instance-versus-class distinction that a
+/// rename must respect. One line expands to the rule set a complete rename
+/// needs -- the definition, the explicit-receiver calls, and the implicit-self
+/// calls -- which is otherwise three hand-written rules.
+#[derive(Debug, Deserialize)]
+pub(crate) struct MethodRename {
+    /// `Account#display_name`, `Account.display_name`, or a bare `display_name`.
+    pub method: String,
+    /// The new name.
+    pub rename: String,
+}
+
+impl MethodRename {
+    /// Split `Account#foo` / `Account.foo` into its class, name, and kind.
+    fn parts(&self) -> (Option<&str>, &str, Kind) {
+        if let Some((class, name)) = self.method.split_once('#') {
+            (Some(class), name, Kind::Instance)
+        } else if let Some((class, name)) = self.method.split_once('.') {
+            (Some(class), name, Kind::Class)
+        } else {
+            (None, self.method.as_str(), Kind::Instance)
+        }
+    }
+
+    /// The rules this notation stands for.
+    pub(crate) fn expand(&self) -> Vec<Rule> {
+        let (class, name, kind) = self.parts();
+        let new = &self.rename;
+        let scope = || Scope {
+            inside: class.map(str::to_string),
+        };
+        let receiver = || {
+            let mut c = HashMap::new();
+            c.insert(
+                "$R".to_string(),
+                Constraint {
+                    name: None,
+                    receiver_type: class.map(str::to_string),
+                    kind: Some(kind),
+                },
+            );
+            c
+        };
+
+        let definition = match kind {
+            Kind::Instance => Rule {
+                pattern: format!("def {name}; $B; end"),
+                rewrite: Some(format!("def {new}; $B; end")),
+                constraints: HashMap::new(),
+                scope: scope(),
+            },
+            Kind::Class => Rule {
+                pattern: format!("def self.{name}; $B; end"),
+                rewrite: Some(format!("def self.{new}; $B; end")),
+                constraints: HashMap::new(),
+                scope: scope(),
+            },
+        };
+
+        // Explicit receivers, narrowed by class *and* kind. `self.foo` inside an
+        // ordinary method body resolves as an instance receiver, so this covers
+        // it too.
+        let calls = Rule {
+            pattern: format!("$R.{name}"),
+            rewrite: Some(format!("$R.{new}")),
+            constraints: receiver(),
+            scope: Scope::default(),
+        };
+
+        let mut rules = vec![definition, calls];
+
+        // Implicit self, the largest receiver bucket -- reachable only through
+        // lexical scope, so it needs a class to be anchored to.
+        if class.is_some() && kind == Kind::Instance {
+            rules.push(Rule {
+                pattern: name.to_string(),
+                rewrite: Some(new.to_string()),
+                constraints: HashMap::new(),
+                scope: scope(),
+            });
+        }
+        rules
+    }
+}
+
 /// Resolve the `RULE` argument into one or more rules.
 ///
 /// A rule file may hold a single rule or a list of them. A complete rename
@@ -134,6 +222,10 @@ pub(crate) fn load_all(rule: &str, replace: Option<&str>) -> Result<Vec<Rule>, R
         message: e.to_string(),
     })?;
 
+    // The method-notation shorthand expands to a rule set.
+    if let Ok(rename) = serde_yaml::from_str::<MethodRename>(&raw) {
+        return Ok(rename.expand());
+    }
     // A sequence is a rule set; a mapping is one rule. Trying the sequence
     // first keeps the single-rule spelling unchanged.
     if let Ok(rules) = serde_yaml::from_str::<Vec<Rule>>(&raw) {
@@ -188,6 +280,44 @@ mod tests {
     #[test]
     fn a_bare_pattern_without_a_template_is_an_error() {
         assert!(matches!(load("foo($A)", None), Err(RuleError::NoTemplate)));
+    }
+
+    /// Ruby's own notation, expanded.
+    #[test]
+    fn method_notation_expands_to_a_rule_set() {
+        let rename = MethodRename {
+            method: "Account#display_name".into(),
+            rename: "full_name".into(),
+        };
+        let rules = rename.expand();
+        assert_eq!(
+            rules.len(),
+            3,
+            "definition, explicit receiver, implicit self"
+        );
+        assert_eq!(rules[0].pattern, "def display_name; $B; end");
+        assert_eq!(rules[0].scope.inside.as_deref(), Some("Account"));
+        assert_eq!(rules[1].pattern, "$R.display_name");
+        assert_eq!(rules[1].constraints["$R"].kind, Some(Kind::Instance));
+        assert_eq!(rules[2].pattern, "display_name");
+    }
+
+    /// The dot form names a class method, and its definition is on the
+    /// singleton -- a different method from the `#` form entirely.
+    #[test]
+    fn the_dot_form_targets_class_methods() {
+        let rename = MethodRename {
+            method: "Account.display_name".into(),
+            rename: "full_name".into(),
+        };
+        let rules = rename.expand();
+        assert_eq!(rules[0].pattern, "def self.display_name; $B; end");
+        assert_eq!(rules[1].constraints["$R"].kind, Some(Kind::Class));
+        assert_eq!(
+            rules.len(),
+            2,
+            "implicit self needs no rule for class methods"
+        );
     }
 
     #[test]
