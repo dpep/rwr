@@ -246,6 +246,56 @@ Three consequences, two of them unplanned:
   non-minimal, which is the right direction to be wrong in -- but the minimal-diff claim holds
   today only for same-shape rules.
 
+## (a) Residue reporting — **built and measured; the answer is conditional**
+
+The differentiator, and Q1's actual question: is name-scoped residue *useful*, or noise?
+
+### It works, and catches exactly what a rename breaks
+
+`rwr '$R.autoload_paths' rails` — 21 matches, **8 residue occurrences**:
+
+```
+attr_accessor :autoload_paths                Symbol
+attr_reader   :autoload_paths                Symbol
+attr_writer   :..., :autoload_paths          Symbol
+def autoload_paths                           Definition
+autoload_paths.each do |autoload_path|       Call    (implicit self)
+autoload_paths << lib.to_s                   Call    (implicit self)
+%w(autoload_lib autoload_paths)              String
+```
+
+Every one is a site a rename would break and a syntactic match would miss. The
+`attr_accessor :autoload_paths` case is the whole argument: rename the method and that macro
+silently keeps defining the old name. Eight items is reviewable.
+
+### It degrades badly on common names, as D7 feared
+
+| anchor | matches | residue | verdict |
+|---|---:|---:|---|
+| `autoload_paths` | 21 | **8** | reviewable |
+| `perform` | 15 | 101 | borderline — mostly implicit-self calls, arguably signal |
+| `save` | 570 | 167 | borderline |
+| `name` | 1,750 | **4,547** | noise |
+
+**Q1's answer is therefore conditional: the reformulation is tractable and genuinely useful,
+but only above a distinctiveness threshold.** 4,547 items is not a report anyone reads.
+
+### What this settles, and what it does not
+
+It settles that residue is *implementable* without dataflow and does find real metaprogramming
+reaches — the doubt D7 recorded. It does not settle where the threshold sits.
+
+D20 as amended already prescribes the answer: degrade on **receiver-shape diversity**, not raw
+frequency. Measurement (b) supplies the input — `name` carries six receiver shapes with 2%
+constant receivers, while a distinctive name is pinned by its receiver almost everywhere. The
+threshold should be *derived* from that rather than picked.
+
+`perform` is the instructive middle: 101 residue items against 15 matches, almost all
+implicit-self calls. Those are not noise — they are real call sites a receiver-qualified
+pattern genuinely missed — which suggests the report should **separate** "reachable but
+unmatched calls" from "the name appearing in metaprogramming", since only the second is a
+blind spot.
+
 ## Still outstanding
 
 | measurement | status | needs |
