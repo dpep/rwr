@@ -573,12 +573,9 @@ fn cmd_apply(
     // reading independently doubled the I/O, which profiling showed was most of
     // the run -- the files are the cost, not the parsing.
     let reading = profile::now();
-    let sources: Vec<Vec<u8>> = files
-        .par_iter()
-        .map(|p| std::fs::read(p).unwrap_or_default())
-        .collect();
+    let sources: Vec<source::Source> = files.par_iter().map(|p| source::open(p)).collect();
     profile::mark("read", reading, || {
-        let bytes: usize = sources.iter().map(Vec::len).sum();
+        let bytes: usize = sources.iter().map(|s| s.bytes().len()).sum();
         format!(
             "{} files, {:.1} MB",
             sources.len(),
@@ -649,14 +646,16 @@ fn cmd_apply(
     let outcomes: Vec<Outcome> = files
         .par_iter()
         .zip(&sources)
-        .filter_map(|(path, original)| {
-            let original = original.clone();
+        .filter_map(|(path, mapped)| {
+            let mapped = mapped.bytes();
             // A rule set's literals are checked disjunctively -- any one rule
             // matching is enough to need this file.
-            if !filters.iter().any(|f| f.may_contribute(&original)) {
+            if !filters.iter().any(|f| f.may_contribute(mapped)) {
                 skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return None;
             }
+            // Materialised only now, for the few files that survive.
+            let original = mapped.to_vec();
             let file = path.display().to_string();
             let mut current = original.clone();
             let mut total = 0usize;

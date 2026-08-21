@@ -116,6 +116,33 @@ Total fell from 753 ms to 271 ms. Structural work -- the part that is actually r
 is now **8% of the run**. The rest is discovering and reading files, which is the floor for
 anything without an index.
 
+## Memory mapping: a 28% win, and a methodology lesson
+
+Files are mapped rather than read. The prefilter looks at every file and keeps almost none,
+so copying 81 MB in order to discard 99% of it is waste that mapping avoids.
+
+| | total (5 runs) | peak RSS |
+|---|---|---:|
+| `std::fs::read` | 377-397 ms | **113 MB** |
+| `memmap2` | **275-278 ms** | 355 MB |
+
+**The lesson is in how nearly this was got wrong.** The first attempt mapped each file and
+then called `to_vec()` on it -- paying the syscalls *and* the copy -- and measured *slower*,
+which looked like a clean negative result. The second attempt, mapping without copying,
+measured 274 ms against a remembered 271 ms for plain read and looked like no difference at
+all. Both readings were single runs against a shifting code state. Five runs each settled it:
+the win is real and consistent, and the earlier "no difference" was noise.
+
+That is the second time in this document a confident conclusion came from too few samples.
+`--profile` makes a run cheap to measure; there is no excuse for one sample.
+
+**The tradeoff is memory, and it is the good direction.** Mapped pages are file-backed and
+clean, so the kernel can drop them under pressure; a `Vec` is anonymous and must be swapped.
+Nominal RSS is 3x higher, but it degrades gracefully where the copying version does not --
+which is precisely the massive-repository case this document is about.
+
+`RWR_NO_MMAP=1` forces the copying path, kept because it is what made the comparison possible.
+
 ## What is already done
 
 | technique | status |
@@ -128,4 +155,5 @@ anything without an index.
 | Hierarchy built only on demand | shipped — an ad-hoc query pays nothing for D52 |
 | Targeted hierarchy | shipped -- worklist parses only classes reachable from the rule's, 72 instead of 8,762 |
 | One shared read pass | shipped -- hierarchy and scan no longer each pay full I/O |
+| Memory-mapped files | shipped -- 28% faster; `RWR_NO_MMAP=1` forces the copying path |
 | Persistent index | **deferred**, with a measured threshold above |

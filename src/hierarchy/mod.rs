@@ -82,7 +82,10 @@ impl Hierarchy {
     /// The full build parses ~8,700 files on the local Ruby corpus; this
     /// typically parses a handful, and is exact rather than approximate --
     /// nothing is guessed, only deferred until a name is known to matter.
-    pub(crate) fn reachable_from(sources: &[Vec<u8>], roots: &[String]) -> (Self, usize) {
+    pub(crate) fn reachable_from(
+        sources: &[crate::source::Source],
+        roots: &[String],
+    ) -> (Self, usize) {
         let class = memchr::memmem::Finder::new(b"class").into_owned();
         let inherits = memchr::memmem::Finder::new(b"<").into_owned();
 
@@ -90,8 +93,9 @@ impl Hierarchy {
         // them here as well made the two phases each pay full I/O, which was
         // most of the run -- parsing 72 files instead of 8,700 changed nothing
         // until the reads stopped repeating.
-        let candidates: Vec<&Vec<u8>> = sources
+        let candidates: Vec<&[u8]> = sources
             .par_iter()
+            .map(crate::source::Source::bytes)
             .filter(|src| class.find(src).is_some() && inherits.find(src).is_some())
             .collect();
 

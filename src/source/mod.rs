@@ -81,6 +81,47 @@ pub(crate) fn ruby_files(roots: &[String], include_vendored: bool) -> Vec<PathBu
     files
 }
 
+/// A file's bytes, mapped where that avoids a copy.
+///
+/// The prefilter reads every file and keeps almost none, so copying 81 MB to
+/// discard 99% of it is the dominant cost. A mapping is a view: searching it
+/// copies nothing, and only the files that survive are materialised.
+pub(crate) enum Source {
+    Mapped(memmap2::Mmap),
+    Owned(Vec<u8>),
+}
+
+impl Source {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        match self {
+            Source::Mapped(m) => m,
+            Source::Owned(v) => v,
+        }
+    }
+}
+
+/// Map a file, falling back to a read where mapping is unavailable.
+///
+/// An empty file cannot be mapped, and a mapping of a file that changes under
+/// us would be a correctness hazard -- but rwr writes only after the scan, and
+/// writes through the filesystem rather than the mapping.
+pub(crate) fn open(path: &Path) -> Source {
+    let Ok(file) = std::fs::File::open(path) else {
+        return Source::Owned(Vec::new());
+    };
+    if file.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+        return Source::Owned(Vec::new());
+    }
+    // SAFETY: read-only view, and rwr does not modify files during the scan.
+    if std::env::var_os("RWR_NO_MMAP").is_some() {
+        return Source::Owned(std::fs::read(path).unwrap_or_default());
+    }
+    match unsafe { memmap2::Mmap::map(&file) } {
+        Ok(map) => Source::Mapped(map),
+        Err(_) => Source::Owned(std::fs::read(path).unwrap_or_default()),
+    }
+}
+
 /// One-based line and column for a byte offset.
 pub(crate) fn line_col(source: &[u8], offset: usize) -> (usize, usize) {
     let upto = &source[..offset.min(source.len())];
