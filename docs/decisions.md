@@ -216,6 +216,17 @@ Novelty re-checked: the *shape* is standard (Semgrep's 17-variant `skip_reason`)
 process these bytes"), never semantic ones ("this file scanned fine and there is still a
 `send(name)` on line 47").
 
+**"Name-anchored" needed a test, and for a while did not have one.** `anchors()` collected
+every literal call name anywhere in a pattern, which makes a rule about a *shape* look
+name-anchored: `$R.select { |$P| $B }.first` anchored on `select` and `first`, and reported
+every `.first` in the repo — 3,752 occurrences on Discourse, burying the account the feature
+exists to give. A rule is name-anchored when the pattern **is that name applied to
+metavariables**: the root is a call with a literal message, and its receiver, arguments and
+block are metavariables or absent. `$R.display_name` and `$R.set_size($A)` qualify;
+`$R.select { }.first` does not, because a bare `.first` elsewhere is a different program,
+not a site the rule failed to convert. Pinned by
+`residue::tests::a_shape_rule_is_not_name_anchored`.
+
 ## D18 — Metavariables are substituted before parsing, not parsed as globals
 **Decided.** Resolves the largest hole the case studies found (`docs/use-cases.md`
 finding 1).

@@ -69,26 +69,52 @@ pub(crate) fn scoped_to(occurrences: Vec<Occurrence>, class: &str) -> Vec<Occurr
         .collect()
 }
 
-/// Literal identifiers a pattern is anchored on.
+/// The identifier a rule is anchored on, if it is anchored on one at all.
 ///
-/// A method name written out in the pattern is an anchor; a metavariable in
-/// name position is not, since it stands for whatever it matched.
+/// Residue applies to **name-anchored rules only** (D7 amended): a rename has a
+/// target identifier, and every occurrence of that identifier the rule did not
+/// convert is a site that will break. `return nil` -> `return` has no such
+/// target, and neither does a rule about a *shape*.
+///
+/// The distinction is whether the pattern is that name applied to
+/// metavariables, or an expression that merely contains it. `$R.display_name`
+/// is about `display_name`; `$R.select { |$P| $B }.first` is about a chain, and
+/// treating `first` as its anchor reported every `.first` in the repo -- 3,752
+/// of them on Discourse, which buries the account it exists to give.
 pub(crate) fn anchors(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
-    let mut found: Vec<Vec<u8>> = Vec::new();
-    let mut stack = vec![generated::dup(pattern)];
-    while let Some(node) = stack.pop() {
-        if matcher::placeholder_name(&node, prepared).is_none()
-            && let Some(call) = node.as_call_node()
-            && call.message_loc().is_some()
-        {
-            let name = call.name().as_slice().to_vec();
-            if !found.contains(&name) {
-                found.push(name);
-            }
-        }
-        stack.extend(generated::children(&node));
+    // Only the root: a literal name deeper in the pattern is part of a shape,
+    // not the thing the rule is about.
+    let Some(call) = pattern.as_call_node() else {
+        return Vec::new();
+    };
+    if call.message_loc().is_none() || matcher::placeholder_name(pattern, prepared).is_some() {
+        return Vec::new();
     }
-    found
+    // A real receiver or argument makes the rule about a shape. Blocks are
+    // structure too: `$R.each { |$P| $B }` is not a rule about `each`.
+    if call.block().is_some() {
+        return Vec::new();
+    }
+    if let Some(receiver) = call.receiver()
+        && !is_metavariable(&receiver, prepared)
+    {
+        return Vec::new();
+    }
+    if let Some(arguments) = call.arguments()
+        && !arguments
+            .arguments()
+            .iter()
+            .all(|a| is_metavariable(&a, prepared))
+    {
+        return Vec::new();
+    }
+    vec![call.name().as_slice().to_vec()]
+}
+
+/// Whether a node stands for whatever it matched, rather than for itself.
+fn is_metavariable(node: &Node<'_>, prepared: &Prepared) -> bool {
+    matcher::placeholder_name(node, prepared).is_some()
+        || matcher::is_splat_placeholder(node, prepared)
 }
 
 /// Occurrences of `anchors` that fall outside every matched range.
@@ -250,6 +276,26 @@ mod tests {
     #[test]
     fn rules_without_an_anchor_report_nothing() {
         assert!(residue_of("return nil", "return nil\n:return\n").is_empty());
+    }
+
+    /// A rule about a *shape* is not name-anchored either.
+    ///
+    /// `$R.select { |$P| $B }.first` rewrites a chain; a bare `.first` elsewhere
+    /// is a different program, not a site the rule failed to convert. Treating
+    /// the chain's method names as anchors reported 3,752 occurrences on
+    /// Discourse, burying the account residue exists to give.
+    #[test]
+    fn a_shape_rule_is_not_name_anchored() {
+        let src = "xs.select { |i| i.ok? }.first\nys.first\nzs.select { |i| i.ok? }\n";
+        assert!(residue_of("$R.select { |$P| $B }.first", src).is_empty());
+    }
+
+    /// The narrowing must not go so far that a rename stops reporting: the
+    /// pattern is the name applied to a metavariable, which is the anchored case.
+    #[test]
+    fn a_rename_with_arguments_is_still_name_anchored() {
+        let src = "a.set_size(1)\ndelegate :set_size, to: :account\n";
+        assert_eq!(residue_of("$R.set_size($A)", src), vec![Context::Symbol]);
     }
 
     /// Matched sites are accounted for and must not be reported back as

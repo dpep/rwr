@@ -452,3 +452,37 @@ every correct site and rewrites non-minimally; rwr finds them and edits only wha
 (b) was previously blocked on the author's private monolith. Rails is a legitimate public
 substitute, and being public it makes the result reproducible — which for an OSS tool
 positioned against an incumbent is worth more than a bigger private number.
+
+## The pack against a Rails application — **first run**
+
+The corpus gap noted at the end of Phase 0 was that every local repo is a library or a
+framework, so no measurement had touched a Rails *application*. Discourse (11,288 files,
+8 MB of Ruby) closes it, running the five shipped rules in one pass:
+
+| Rule | Sites |
+|---|---|
+| `style/hash-shorthand` | 1,759 |
+| `style/return-nil` | 539 |
+| `performance/detect` | 34 |
+| `performance/count` | 8 |
+| `performance/reverse-each` | 5 |
+
+**1.7 s wall, 7.2 s CPU**, five rules over the whole tree. Four matches sat inside a wider
+rewritten range and are reported as retryable rather than dropped (D15).
+
+Three things this measured that a fixture could not:
+
+**The distribution is nothing like the corpus suggests.** Hash shorthand is 74% of the total
+and the performance rules together are 2%. The rules that were hardest to build are the ones
+with the least to do, which is an argument for judging a rule by sites found rather than by
+how interesting it was.
+
+**`performance/count` found nothing until the rule was widened.** The first version matched
+only `.size`; Discourse writes `.length`. Alternating `$AGG` over `size`/`length`/`count`
+took it from 0 to 8. A rule that matches nothing looks identical to a codebase that is
+already clean, which is a reason to read a zero rather than accept it.
+
+**The residue report was 3,752 entries of noise**, because the perf rules anchored on `first`
+and `each`. That is what forced the name-anchoring test in D7's amendment — the failure only
+appears at a scale where common method names are everywhere, which is exactly the scale the
+feature was designed for.

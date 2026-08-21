@@ -106,6 +106,11 @@ fn placeholder<'a>(node: &Node<'_>, bindings: &'a HashMap<String, Binding>) -> O
 }
 
 /// A sequence placeholder, i.e. `*$NAME` — a splat wrapping a placeholder.
+pub(crate) fn is_splat_placeholder(node: &Node<'_>, prepared: &Prepared) -> bool {
+    splat_placeholder(node, &prepared.bindings).is_some()
+}
+
+/// A sequence placeholder, i.e. `*$NAME` — a splat wrapping a placeholder.
 fn splat_placeholder<'a>(
     node: &Node<'_>,
     bindings: &'a HashMap<String, Binding>,

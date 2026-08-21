@@ -11,6 +11,12 @@ was deliberately left out.
 `--help` had promised "a rule file or directory of them" since 0.1.0; only a
 file worked.
 
+**Residue is reported for name-anchored rules only, as D7 always said.** A rule about a
+*shape* — `select { }.first` -> `detect { }` — anchored on the chain's method names and
+reported every `.first` in the repo. On Discourse that was 3,752 occurrences, which buried
+the output. A rename still reports; the account of blind spots was never meant to be a
+concordance of common method names.
+
 **The `edits` field in JSON output is now `sites`, and counts differently.** It
 had reported edits, and a rewrite that changes shape emits several edits for one
 place a reader sees in the diff — `select { }.first` → `detect { }` counted as
