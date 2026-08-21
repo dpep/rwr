@@ -944,3 +944,28 @@ built only when a rule actually asks for subclasses, so an ad-hoc query pays not
 A superclass named through a path (`class Premium < Billing::Account`) resolves by its final
 name, matching what a `type:` constraint names. Cycles -- impossible in valid Ruby, possible
 in a half-written file the walk reads -- terminate rather than hang.
+
+## D53 - Trailing commas belong to the formatter, not to rwr
+**Decided**, and by evidence rather than by taste.
+
+A trailing comma is **invisible to rwr's equality**: `[a, b]` and `[a, b,]` compare equal, as
+do `foo(a, b)` / `foo(a, b,)` and `{a: 1}` / `{a: 1,}`. Pinned by
+`compare::tests::a_trailing_comma_is_not_structure`.
+
+By the tool's own definition of a program, adding one changes nothing. That places it in the
+same class as indentation -- presentation rather than structure -- and therefore with the
+formatter (principle 7, D34: rwr does not impose style, only avoids breaking it).
+
+**This corrects `docs/rule-corpus.md`**, which listed trailing commas as reachable pending an
+inter-node-source predicate. The predicate would have worked -- the comma is findable in the
+gap between the last element and the closing delimiter -- but building it would have made rwr
+a formatter through the back door.
+
+**The line is where it should be.** Sorting an array *is* structural, since the element order
+differs in the tree. Hash shorthand *is* structural, since `{foo:}` carries an implicit value
+node that `{foo: foo}` does not. Trailing commas and indentation are not. rwr does the first
+two and shells out for the last two, and the test above is what tells them apart rather than
+an opinion.
+
+*Reverses if:* rwr ever grows a concrete-syntax layer for its own reasons, at which point
+this becomes nearly free -- but it should not be the reason for growing one.

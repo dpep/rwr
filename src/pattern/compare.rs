@@ -88,6 +88,17 @@ mod tests {
         assert!(eq("foo(a, b)", "foo(\n  a,\n  b\n)"));
     }
 
+    /// A trailing comma is invisible to the AST: `[a, b]` and `[a, b,]` are the
+    /// same program by rwr's own equality. That places it in the same class as
+    /// indentation -- presentation, not structure -- and therefore with the
+    /// formatter rather than with rwr (principle 7, D34).
+    #[test]
+    fn a_trailing_comma_is_not_structure() {
+        assert!(eq("[a, b]", "[a, b,]"));
+        assert!(eq("foo(a, b)", "foo(a, b,)"));
+        assert!(eq("{a: 1}", "{a: 1,}"));
+    }
+
     /// The trap that motivated D36: the method name is an atom, not a child,
     /// so variant-plus-children would call these equal.
     #[test]
