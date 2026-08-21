@@ -162,10 +162,21 @@ converge if it did.
 - rwr does **not** format. Indentation, alignment and trailing commas are
   presentation; it only repairs layout it disturbed itself.
 
-## Installing
+## Installing / updating the binary
+
+If `rwr` isn't on PATH, install it, then retry:
 
 ```sh
-cargo install rwr
+cargo install rwr        # needs the Rust toolchain; no Homebrew formula yet
 ```
+
+Re-run the same line to update. Nothing else to do afterwards — there is no
+index, cache, or config to set up, and the rule pack is compiled into the
+binary.
+
+**If rwr rejects something this skill describes** — `check all`, `--unsafe`,
+an `is:`/`length:` constraint — the installed binary predates the skill rather
+than lacking the feature. Check `rwr --version`, update, and retry before
+concluding the tool can't do it.
 
 Source and issues: <https://github.com/dpep/rwr>.
