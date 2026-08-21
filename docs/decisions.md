@@ -710,3 +710,30 @@ obvious: put one element per line and rerun. `--explain` names the comment and t
 Author confirmed (this session) that both comment handling and indentation repair should ship,
 on the reasoning in D34: without them the minimal-diff promise is broken by damage rwr itself
 caused. Details may iterate; the commitment does not.
+
+## D20 amended - residue degradation keys on receiver-shape diversity, not frequency
+Phase 0 measurement (b) corrects the premise. D20 assumed the "identifier too common; N
+occurrences, not enumerated" fallback would fire on the commonest Rails names, and that this
+was where the differentiator would be weakest.
+
+Measured on rails (309,683 call sites), commonness and tractability turn out to be
+**different axes**:
+
+| name | sites | constant receiver | tractable? |
+|---|---:|---:|---|
+| `create` | 875 | **75%** | yes - mostly `Foo.create`, statically known |
+| `name` | 2,067 | 2% | no - six receiver shapes, nothing pinned |
+| `id` | 1,608 | 0% | no |
+| `value` | 335 | 0% | no |
+
+`create` is among the commonest names *and* among the most tractable, because three quarters
+of its call sites name their receiver outright. Keying the degradation on raw frequency would
+abandon it needlessly.
+
+**Amended rule:** degrade to "not enumerated" based on **receiver-shape diversity** at the
+call sites - how much of the name's usage the index can actually pin - rather than on how
+often the name appears. A name used 2,000 times with a known receiver is fine; a name used 300
+times across six unresolvable shapes is not.
+
+This also sharpens the Phase 0 (a) residue spike: it should pick targets by *shape diversity*,
+not by picking one rare and one common name.
