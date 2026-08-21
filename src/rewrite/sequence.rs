@@ -132,16 +132,18 @@ fn has_ambiguous_comment(source: &[u8], elements: &[Node<'_>]) -> bool {
 /// Apply `transform` to a captured sequence, returning the replacement text.
 ///
 /// Returns `None` when a comment cannot be unambiguously attached.
-/// `floor` is the offset just past the container's opening delimiter. Comments
-/// are claimed only above it, so a leading comment on the *first* element is
-/// still reachable -- using the first element's own line as the floor would
-/// silently drop it.
+/// `inner` is the container's span between its delimiters. Comments are claimed
+/// only above its start -- using the first element's own line would silently
+/// drop a leading comment on the first element -- and the whitespace at either
+/// end is reproduced, so a one-per-line array stays one-per-line rather than
+/// collapsing onto the template's brackets.
 pub(crate) fn render(
     source: &[u8],
     elements: &[Node<'_>],
     transform: Transform,
-    floor: usize,
+    inner: (usize, usize),
 ) -> Option<String> {
+    let (floor, ceiling) = inner;
     if elements.is_empty() {
         return Some(String::new());
     }
@@ -153,6 +155,10 @@ pub(crate) fn render(
         .iter()
         .map(|e| unit_for(source, e, floor))
         .collect();
+    // Captured before reordering: these bound the region the elements occupy,
+    // so the whitespace at either end can be reproduced.
+    let first_start = units.first().map_or(floor, |u| u.start);
+    let last_end = units.last().map_or(ceiling, |u| u.end);
 
     // The separator between elements as the author wrote it, so a one-per-line
     // array stays one-per-line and a single-line one stays single-line.
@@ -181,7 +187,12 @@ pub(crate) fn render(
         .iter()
         .map(|u| String::from_utf8_lossy(&source[u.start..u.end]).into_owned())
         .collect();
-    Some(rendered.join(&separator))
+
+    // Reproduce the whitespace the author put between the delimiters and the
+    // elements, so layout survives a reorder.
+    let prefix = String::from_utf8_lossy(&source[floor..first_start]).into_owned();
+    let suffix = String::from_utf8_lossy(&source[last_end.min(ceiling)..ceiling]).into_owned();
+    Some(format!("{prefix}{}{suffix}", rendered.join(&separator)))
 }
 
 #[cfg(test)]
@@ -202,7 +213,7 @@ mod tests {
     }
 
     /// The offset just past the array's opening bracket.
-    fn floor_of<'a>(parsed: &'a ruby_prism::ParseResult<'a>) -> usize {
+    fn inner_of<'a>(parsed: &'a ruby_prism::ParseResult<'a>) -> (usize, usize) {
         let node = parsed.node();
         let program = node.as_program_node().expect("program");
         let first = program
@@ -212,7 +223,10 @@ mod tests {
             .next()
             .expect("one statement");
         let array = first.as_array_node().expect("an array");
-        array.opening_loc().map_or(0, |l| l.end_offset())
+        (
+            array.opening_loc().map_or(0, |l| l.end_offset()),
+            array.closing_loc().map_or(0, |l| l.start_offset()),
+        )
     }
 
     fn sorted(src: &str) -> Option<String> {
@@ -222,7 +236,7 @@ mod tests {
             src.as_bytes(),
             &elements,
             Transform::Sort,
-            floor_of(&parsed),
+            inner_of(&parsed),
         )
     }
 
@@ -260,13 +274,13 @@ mod tests {
     fn uniq_and_reverse() {
         let parsed = ruby_prism::parse(b"[:a, :b, :a]");
         let elements = elements_of(&parsed);
-        let floor = floor_of(&parsed);
+        let inner = inner_of(&parsed);
         assert_eq!(
-            render(b"[:a, :b, :a]", &elements, Transform::Uniq, floor).as_deref(),
+            render(b"[:a, :b, :a]", &elements, Transform::Uniq, inner).as_deref(),
             Some(":a, :b")
         );
         assert_eq!(
-            render(b"[:a, :b, :a]", &elements, Transform::Reverse, floor).as_deref(),
+            render(b"[:a, :b, :a]", &elements, Transform::Reverse, inner).as_deref(),
             Some(":a, :b, :a")
         );
     }

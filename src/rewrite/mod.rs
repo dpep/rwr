@@ -36,6 +36,13 @@ pub(crate) enum Refusal {
     /// The rewritten source no longer parses, or parses to something other than
     /// intended. The whole transformation is discarded (DESIGN.md §7).
     VerifyFailed { message: String },
+    /// A rewrite template applies an unknown transform to a sequence, e.g.
+    /// `*$ITEMS.srot`. Emitting it as literal text would be a silent wrong
+    /// rewrite, so it is reported (D33).
+    UnknownTransform { name: String },
+    /// Reordering a sequence would move a comment that shares a line with
+    /// several elements, so it has no unambiguous owner (D35).
+    AmbiguousComment,
     /// A capture being spliced contains a heredoc, whose content is
     /// *discontiguous*: the `<<~FOO` token sits inline while the body lives
     /// after the enclosing line. Splicing it by range would drag along text
@@ -113,13 +120,67 @@ fn captured_text<'a>(bound: &Bound<'_>, source: &'a [u8]) -> Result<Option<&'a [
 ///
 /// The captured subtrees keep their exact formatting; the template governs
 /// everything around them.
-pub(crate) fn render(template: &str, env: &Env<'_>, source: &[u8]) -> Result<String, Refusal> {
+/// A container's span between its delimiters, for sequence transforms.
+fn inner_span(node: &Node<'_>) -> Option<(usize, usize)> {
+    let (open, close) = match node {
+        Node::ArrayNode { .. } => {
+            let a = node.as_array_node()?;
+            (a.opening_loc()?, a.closing_loc()?)
+        }
+        Node::HashNode { .. } => {
+            let h = node.as_hash_node()?;
+            (h.opening_loc(), h.closing_loc())
+        }
+        _ => return None,
+    };
+    Some((open.end_offset(), close.start_offset()))
+}
+
+/// A `.name` suffix directly after a metavariable in a template.
+fn transform_suffix(template: &str, at: usize) -> Option<(&str, usize)> {
+    let rest = template.get(at..)?.strip_prefix('.')?;
+    let len = rest
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .unwrap_or(rest.len());
+    (len > 0).then(|| (&rest[..len], at + 1 + len))
+}
+
+pub(crate) fn render(
+    template: &str,
+    env: &Env<'_>,
+    source: &[u8],
+    inner: (usize, usize),
+) -> Result<String, Refusal> {
     let vars = metavar::scan(template);
     let mut out = String::with_capacity(template.len());
     let mut cursor = 0;
 
     for var in &vars {
         let mut start = var.start;
+        let mut end = var.end;
+
+        // A transform is recognised only on a *sequence* capture: `$X.sort` on a
+        // single capture is legitimate literal output, so arity disambiguates
+        // (D33).
+        let mut transformed: Option<String> = None;
+        if var.arity == Arity::Many
+            && let Some((name, after)) = transform_suffix(template, var.end)
+        {
+            let Some(transform) = sequence::Transform::parse(name) else {
+                return Err(Refusal::UnknownTransform {
+                    name: name.to_string(),
+                });
+            };
+            let nodes = match var.name.as_ref().and_then(|n| env.get(n)) {
+                Some(Bound::Many(nodes)) => nodes.as_slice(),
+                _ => &[],
+            };
+            let Some(text) = sequence::render(source, nodes, transform, inner) else {
+                return Err(Refusal::AmbiguousComment);
+            };
+            transformed = Some(text);
+            end = after;
+        }
         let replacement: Option<String> = match var.name.as_ref().and_then(|n| env.get(n)) {
             None => None,
             Some(Bound::Name(bytes)) => Some(String::from_utf8_lossy(bytes).into_owned()),
@@ -128,7 +189,7 @@ pub(crate) fn render(template: &str, env: &Env<'_>, source: &[u8]) -> Result<Str
             }
         };
 
-        let text = match replacement {
+        let text = match transformed.or(replacement) {
             Some(text) => text,
             // An empty sequence: drop a separator that would otherwise dangle,
             // so `foo($A, *$REST)` with nothing left renders `foo(a)`.
@@ -145,7 +206,7 @@ pub(crate) fn render(template: &str, env: &Env<'_>, source: &[u8]) -> Result<Str
 
         out.push_str(&template[cursor..start.max(cursor)]);
         out.push_str(&text);
-        cursor = var.end;
+        cursor = end;
     }
     out.push_str(&template[cursor..]);
     Ok(out)
@@ -196,7 +257,15 @@ pub(crate) fn plan(
                 edits.push(Edit {
                     start,
                     end,
-                    text: render(template, &m.env, source)?,
+                    text: render(
+                        template,
+                        &m.env,
+                        source,
+                        inner_span(&m.node).unwrap_or_else(|| {
+                            let l = m.node.location();
+                            (l.start_offset(), l.end_offset())
+                        }),
+                    )?,
                 });
             }
         }
