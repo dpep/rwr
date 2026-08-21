@@ -806,3 +806,42 @@ cheap, and it stays deterministic. Implemented in `src/pattern/prepare.rs`.
 pattern means. There is no parse error to react to. The matcher must therefore treat a
 placeholder as a wildcard by name rather than trusting the node type it landed on - pinned by
 `scope_resolution_parses_under_either_casing`.
+
+## D37 - Comparator implementation: visitor for children, explicit arms for atoms
+**Decided.** Implements D36, deviating from its "generate everything from config.json"
+recommendation for a reason found while building.
+
+**The constraint.** `ruby-prism` exposes no typed-node -> `Node` conversion: no `as_node()`,
+no `From<CallNode> for Node`. Typed accessors return *typed* values - `CallNode::arguments()`
+gives `Option<ArgumentsNode>`, not `Option<Node>`. Generating a generic child walk would
+therefore mean reconstructing `Node` enum variants from raw pointers per type, which is fiddly
+and fragile in a way the codegen was supposed to avoid. D36's recommendation assumed that
+conversion existed.
+
+**So the two halves are built differently:**
+
+- **Children: the `Visit` trait's depth-tracked enter/leave hooks.** These yield `Node`
+  uniformly, so no conversion problem arises and no codegen is needed. D36 proposed dropping
+  this in favour of generated code; the missing conversion reverses that call.
+- **Atoms: explicit per-variant arms**, since extracting `ConstantId::as_slice()`,
+  `unescaped()`, `value()` requires the typed accessor either way. Only 66 of 151 node types
+  carry atoms.
+
+**How the drift risk of hand-written arms is contained** - this is the part that matters, and
+it keeps D36's guarantee without its mechanism:
+
+1. The schema parity test (already built) catches a new *field type*.
+2. A second parity test asserts every node type that config.json says carries atoms either has
+   an arm **or** appears on an explicit `UNIMPLEMENTED` list. A new atom-carrying node cannot
+   be silently skipped.
+3. **The matcher refuses on an unimplemented atom-carrying node** rather than comparing
+   incompletely. This is the right behaviour independent of implementation strategy: comparing
+   a node while ignoring atoms it carries is precisely the `foo(a)` == `bar(a)` bug that
+   started D36, and refusing is the design's answer to not knowing (principle 2).
+
+That third point converts hand-written arms from a correctness risk into a *coverage* one:
+incomplete arms make rwr decline work, never do it wrongly. Coverage can then grow with the
+corpus rather than needing to be complete on day one.
+
+*Reverses if:* a future `ruby-prism` adds a typed-node -> `Node` conversion, at which point
+full codegen becomes as clean as D36 assumed and should be adopted.
