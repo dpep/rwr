@@ -77,7 +77,17 @@ make check      # pre-push gate: fmt + clippy (-D warnings) + tests
 make lint       # fmt --check + clippy
 ```
 
-Before committing: `make check`.
+Before committing: `make check` — or better, `script/commit.sh -m "..."`, which
+runs the gate and commits only if it passes.
+
+**Never chain the gate to an action in one shell command.** `check.sh; git commit`
+ignores the gate, and `check.sh | grep … && git commit` masks it behind grep's
+exit status. Both look correct and neither is; two commits went out red before
+`script/commit.sh` existed.
+
+**Edit, then format — not the reverse.** `cargo fmt` reflows long lines, so a
+text replacement written against pre-format source stops matching after it runs.
+Batch related edits, then format once, then build.
 
 ## Testing conventions
 
