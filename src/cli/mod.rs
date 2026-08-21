@@ -4,7 +4,8 @@
 //! `docs/cli-conventions.md`. Conventions are inherited from `rq` so that an
 //! agent which has learned one of these tools has learned the others.
 
-use crate::pattern::{matcher, prepare};
+use crate::pattern::{matcher, prefilter, prepare};
+use crate::profile;
 use crate::residue;
 use crate::rewrite;
 use crate::rule;
@@ -102,6 +103,13 @@ pub(crate) struct Common {
     /// conflict suppressed a match, how a residue occurrence was classified.
     #[arg(short = 'e', long, global = true)]
     explain: bool,
+
+    /// Report where the time went, as a phase table on stderr.
+    ///
+    /// `RWR_PROFILE` in the environment enables it too, so a shipped binary can
+    /// be measured in place.
+    #[arg(long, global = true)]
+    profile: bool,
 }
 
 impl Common {
@@ -206,6 +214,7 @@ enum Command {
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     let out = cli.common.output();
+    profile::enable_from(cli.common.profile);
 
     // The shorthand desugars to a verb; it can only ever reach a read-only one.
     let command = match (cli.command, cli.pattern) {
@@ -354,17 +363,39 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
 
     let mut scoped: Vec<String> = paths.to_vec();
     scoped.extend(common.path.iter().cloned());
-    let files = source::ruby_files(&scoped, common.include_vendored);
+    let files = profile::span_noted(
+        "walk",
+        || source::ruby_files(&scoped, common.include_vendored),
+        |f| format!("{} files", f.len()),
+    );
 
     // Residue is collected across the parallel walk, so it needs a shared sink.
     let residues: std::sync::Mutex<Vec<Residue>> = std::sync::Mutex::new(Vec::new());
 
+    // Literals the pattern requires, so a file that cannot contribute is never
+    // parsed. This is what keeps the cost proportional to how many files
+    // mention the identifier rather than to repository size.
+    let required_literals = prefilter::required(pattern);
+    let anchors_for_filter: Vec<Vec<u8>> = {
+        let parsed = ruby_prism::parse(prepared.source.as_bytes());
+        matcher::pattern_root(&parsed.node())
+            .map(|root| residue::anchors(&root, &prepared))
+            .unwrap_or_default()
+    };
+    let filter = prefilter::Filter::new(&required_literals, &anchors_for_filter);
+    let skipped = std::sync::atomic::AtomicUsize::new(0);
+
+    let scanning = profile::now();
     let mut found: Vec<Found> = files
         .par_iter()
         .flat_map_iter(|path| {
             let Ok(src) = std::fs::read(path) else {
                 return Vec::new().into_iter();
             };
+            if !filter.may_contribute(&src) {
+                skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Vec::new().into_iter();
+            }
             let parsed = ruby_prism::parse(&src);
             // An unparseable file is reported and skipped, never guessed at.
             if parsed.errors().count() > 0 {
@@ -441,6 +472,16 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
 
     found.sort_by(|a, b| (&a.file, a.line, a.col).cmp(&(&b.file, b.line, b.col)));
 
+    profile::mark("scan", scanning, || {
+        let skipped = skipped.load(std::sync::atomic::Ordering::Relaxed);
+        format!(
+            "{} matches, {} parsed, {} skipped",
+            found.len(),
+            files.len() - skipped,
+            skipped
+        )
+    });
+
     let mut residues = residues.into_inner().unwrap_or_default();
     residues.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
 
@@ -458,6 +499,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
         }
     }
 
+    profile::report();
     if found.is_empty() {
         Exit::Negative.into()
     } else {
@@ -521,7 +563,11 @@ fn cmd_apply(
 
     let mut scoped: Vec<String> = paths.to_vec();
     scoped.extend(common.path.iter().cloned());
-    let files = source::ruby_files(&scoped, common.include_vendored);
+    let files = profile::span_noted(
+        "walk",
+        || source::ruby_files(&scoped, common.include_vendored),
+        |f| format!("{} files", f.len()),
+    );
 
     // Built per run rather than cached: a full rails parse is under 200ms
     // (Phase 0 measurement (d)), so there is no staleness to manage.
@@ -531,7 +577,9 @@ fn cmd_apply(
                 .values()
                 .any(|c| c.subclasses.unwrap_or(false))
     }) {
-        crate::hierarchy::Hierarchy::from_files(&files)
+        profile::span("hierarchy", || {
+            crate::hierarchy::Hierarchy::from_files(&files)
+        })
     } else {
         crate::hierarchy::Hierarchy::default()
     };
@@ -554,10 +602,26 @@ fn cmd_apply(
             .or_else(|| r.constraints.values().find_map(|c| c.receiver_type.clone()))
     });
 
+    // Union across the rule set: a file kept by any rule must still be parsed.
+    // One filter per rule, checked disjunctively: any rule needing the file is
+    // enough to parse it.
+    let filters: Vec<prefilter::Filter> = rules
+        .iter()
+        .map(|r| prefilter::Filter::new(&prefilter::required(&r.pattern), &[]))
+        .collect();
+    let skipped = std::sync::atomic::AtomicUsize::new(0);
+
+    let scanning = profile::now();
     let outcomes: Vec<Outcome> = files
         .par_iter()
         .filter_map(|path| {
             let original = std::fs::read(path).ok()?;
+            // A rule set's literals are checked disjunctively -- any one rule
+            // matching is enough to need this file.
+            if !filters.iter().any(|f| f.may_contribute(&original)) {
+                skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return None;
+            }
             let file = path.display().to_string();
             let mut current = original.clone();
             let mut total = 0usize;
@@ -673,6 +737,9 @@ fn cmd_apply(
             })
         })
         .collect();
+    profile::mark("scan", scanning, || {
+        format!("{} files changed", outcomes.len())
+    });
 
     let mut refused = false;
     let mut changed: Vec<Changed> = Vec::new();
@@ -717,6 +784,7 @@ fn cmd_apply(
         }
     }
 
+    profile::report();
     if refused {
         return Exit::Refused.into();
     }
@@ -769,6 +837,7 @@ mod tests {
             path: vec![],
             include_vendored: false,
             explain: false,
+            profile: false,
         };
         assert_eq!(c.output(), Output::Ndjson);
     }

@@ -10,6 +10,7 @@
 
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Directory names skipped unless `--include-vendored` is given, matched as
 /// whole path components rather than substrings.
@@ -50,13 +51,32 @@ pub(crate) fn ruby_files(roots: &[String], include_vendored: bool) -> Vec<PathBu
         builder.add(extra);
     }
 
-    let mut files: Vec<PathBuf> = builder
-        .build()
-        .filter_map(Result::ok)
-        .map(ignore::DirEntry::into_path)
-        .filter(|p| p.extension().is_some_and(|x| x == "rb"))
-        .filter(|p| include_vendored || !roots.iter().any(|r| is_excluded(p, Path::new(r))))
-        .collect();
+    // Parallel walk: with a literal prefilter making parsing cheap, file
+    // discovery becomes the dominant cost on a large repository.
+    let found = Arc::new(Mutex::new(Vec::new()));
+    let owned_roots: Vec<String> = roots.iter().map(|r| (*r).to_string()).collect();
+
+    builder.build_parallel().run(|| {
+        let found = Arc::clone(&found);
+        let roots = owned_roots.clone();
+        Box::new(move |entry| {
+            if let Ok(entry) = entry {
+                let path = entry.into_path();
+                let keep = path.extension().is_some_and(|x| x == "rb")
+                    && (include_vendored
+                        || !roots.iter().any(|r| is_excluded(&path, Path::new(r))));
+                if keep && let Ok(mut sink) = found.lock() {
+                    sink.push(path);
+                }
+            }
+            ignore::WalkState::Continue
+        })
+    });
+
+    let mut files = Arc::try_unwrap(found)
+        .map(|m| m.into_inner().unwrap_or_default())
+        .unwrap_or_default();
+    // Sorted so output is deterministic regardless of walk order.
     files.sort();
     files
 }

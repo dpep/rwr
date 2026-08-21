@@ -528,6 +528,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "ignore",
+ "memchr",
  "rayon",
  "ruby-prism",
  "serde",

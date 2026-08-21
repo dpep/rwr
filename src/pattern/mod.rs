@@ -15,6 +15,9 @@
 pub(crate) mod metavar;
 
 #[allow(dead_code)]
+pub(crate) mod prefilter;
+
+#[allow(dead_code)]
 pub(crate) mod prepare;
 
 #[allow(dead_code)]
