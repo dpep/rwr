@@ -31,30 +31,35 @@ The report itself accounts for what it walked: `files` counts files walked (it c
 applies. `schema` is now 2. A repo given as `.` reports its own directory name rather than the
 `corpus` fallback.
 
-**The rule pack is compiled into the binary.** `rwr check all`, `rwr check performance`,
-`rwr check style/return-nil` work from any directory — `cargo install` copies the binary and
-nothing else, so a pack that lived only in the repo was not shipped. A real path still wins
-over a built-in name.
+**A built-in rule pack — ten rules, compiled into the binary.**
 
-**Four new rules**, plus `sorted-constant-array` and `string-replacement` (`gsub` → `tr`).
-Two new `where:` predicates make them safe rather than plausible: `is:` constrains a
-capture's node kind and `length:` its literal content in characters. `is: constant` also
-picks the placeholder casing, which is what lets a pattern reach `FOO = [...]` at all —
-before, `$C = [...]` silently meant a *local* assignment, since both casings parse.
+```sh
+rwr check all app/                 # every safe rule
+rwr check performance app/         # one family
+rwr check style/return-nil app/    # one rule
+```
+
+It works from any directory, since `cargo install` copies the binary and nothing else. A
+directory of your own rules is selected the same way, and a real path wins over a built-in
+name. A run reports which rule accounted for what: a single total across ten rules is not a
+reviewable answer.
+
+`style` covers `return-nil`, `hash-shorthand`, `redundant-self-assign` and
+`sorted-constant-array`; `performance` covers `detect`, `count`, `filter-map`, `sum`,
+`reverse-each` and `string-replacement` (`gsub` → `tr`).
 
 **Rules that can change behaviour say so, and are held back by default.** A rule may carry
-`unsafe: <reason>`; those need `--unsafe`, the run reports how many it skipped and why, and
-a reason prints next to the diff when its rule fires. There are no per-rule options — the
-rule is four lines of YAML, so the rule *is* the option (D57).
+`unsafe: <reason>` — `inject(:+)` returns nil for an empty collection where `sum` returns 0;
+`select` on an ActiveRecord relation names columns rather than filtering rows. Those need
+`--unsafe`, the run reports how many it skipped and why, and the reason prints next to the
+diff when the rule fires. There are no per-rule options: a rule is four lines of YAML, so
+the rule *is* the option (D57).
 
-**A shipped rule pack.** `rwr check rules` runs every rule under a directory,
-`rwr check rules/performance` runs one family. A run reports which rule
-accounted for what, since a total across five rules is not reviewable. Rules
-take their id from their path within the pack. See `rules/README.md` for what
-was deliberately left out.
-
-`--help` had promised "a rule file or directory of them" since 0.1.0; only a
-file worked.
+**Two new `where:` predicates.** `is:` constrains a capture's node kind and `length:` its
+literal content in characters — together they are what makes `gsub` → `tr` safe rather than
+plausible, since `tr` maps character by character. `is: constant` also picks the placeholder
+casing, which is what lets a pattern reach `FOO = [...]` at all: before, `$C = [...]`
+silently meant a *local* assignment, since both casings parse.
 
 **Minimal diffs now survive sequence placeholders.** Any rule spelled with `*$REST` or
 `**$REST` fell through to whole-node replacement, so hash shorthand returned multiline
