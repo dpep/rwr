@@ -15,5 +15,6 @@ pub(crate) mod profile;
 pub(crate) mod residue;
 pub(crate) mod rewrite;
 #[allow(dead_code)]
+pub(crate) mod ruby;
 pub(crate) mod rule;
 pub(crate) mod source;

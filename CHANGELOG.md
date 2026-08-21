@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**Rules declare the Ruby version their output needs, and are held back when the codebase is
+older.** `{foo:}` is a syntax error before 3.1 and `filter_map` does not exist before 2.7 —
+and `verify` cannot catch either, because Prism parses modern Ruby and the output is valid
+*there*. The version is read from `.ruby-version`, a Gemfile `ruby` line, or a gemspec's
+`required_ruby_version`; `--ruby X.Y` overrides. An undetected version holds the rules back
+rather than assuming the newest (Q6, now closed).
+
 **A Claude skill**, at `claude/rwr-skill.md`, teaching an agent to drive rwr — the three
 verbs, metavariable syntax, the `where:` predicates, the built-in pack, and what each exit
 code means. `claude/INSTALL.md` covers installing it. It ships through the private

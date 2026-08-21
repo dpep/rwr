@@ -35,6 +35,15 @@ pub(crate) struct Rule {
     #[serde(default)]
     pub scope: Scope,
 
+    /// The lowest Ruby version this rule's *output* parses on.
+    ///
+    /// `{foo:}` is a syntax error before 3.1 and `filter_map` does not exist
+    /// before 2.7, and rwr's own `verify` cannot catch either -- Prism parses
+    /// modern Ruby, so the output is valid there. The check has to come from the
+    /// codebase's declared version instead (Q6).
+    #[serde(default)]
+    pub ruby: Option<String>,
+
     /// Why this rule can change behaviour, when it can.
     ///
     /// Present means unsafe, and the value is the reason -- there is no boolean

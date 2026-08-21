@@ -104,6 +104,13 @@ pub(crate) struct Common {
     #[arg(short = 'e', long, global = true)]
     explain: bool,
 
+    /// The Ruby version to target, e.g. `3.1`.
+    ///
+    /// Detected from `.ruby-version`, a Gemfile `ruby` line, or a gemspec's
+    /// `required_ruby_version` when not given.
+    #[arg(long, global = true, value_name = "X.Y")]
+    ruby: Option<String>,
+
     /// Include rules that can change behaviour, printing why for each.
     ///
     /// Ruby is dynamically typed, so most interesting rewrites have an input
@@ -630,6 +637,60 @@ fn cmd_apply(
             );
         }
     }
+    // Some rewrites emit syntax an older Ruby cannot parse, and `verify` cannot
+    // catch it: Prism parses modern Ruby, so the output is valid there (Q6).
+    let target = match common.ruby.as_deref() {
+        Some(text) => match crate::ruby::Version::parse(text) {
+            Some(version) => Some(crate::ruby::Detected {
+                version,
+                source: "--ruby".to_string(),
+            }),
+            None => {
+                eprintln!("rwr: --ruby wants a version like 3.1, not {text:?}");
+                return Exit::Error.into();
+            }
+        },
+        None => {
+            let start = paths
+                .first()
+                .or_else(|| common.path.first())
+                .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
+            crate::ruby::detect(&start)
+        }
+    };
+
+    let (rules, too_new): (Vec<rule::Rule>, Vec<rule::Rule>) =
+        rules.into_iter().partition(|r| match &r.ruby {
+            None => true,
+            Some(floor) => match (&target, crate::ruby::Version::parse(floor)) {
+                (Some(t), Some(f)) => t.version >= f,
+                // An undetected version is not permission to assume the newest.
+                _ => false,
+            },
+        });
+    if !too_new.is_empty() {
+        match &target {
+            Some(t) => eprintln!(
+                "rwr: {} rule(s) need a newer Ruby than {} (from {}):",
+                too_new.len(),
+                t.version,
+                t.source
+            ),
+            None => eprintln!(
+                "rwr: {} rule(s) declare a Ruby version and none was detected; \
+                 pass --ruby X.Y or add a .ruby-version:",
+                too_new.len()
+            ),
+        }
+        for r in &too_new {
+            eprintln!(
+                "  {}: needs {}",
+                r.id.as_deref().unwrap_or("(unnamed)"),
+                r.ruby.as_deref().unwrap_or_default()
+            );
+        }
+    }
+
     if rules.is_empty() {
         return Exit::Ok.into();
     }
@@ -1020,6 +1081,7 @@ mod tests {
             path: vec![],
             include_vendored: false,
             explain: false,
+            ruby: None,
             unsafe_rules: false,
             profile: false,
         };

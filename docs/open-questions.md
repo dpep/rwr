@@ -32,12 +32,6 @@ How much is recoverable from a symbol index plus local inference (literal receiv
 **Now scheduled as Phase 0 measurement (c)**, on the *public* corpus specifically. Sorbet
 ingestion is out of Phase 2's committed scope until this answers.
 
-## Q6 — Ruby version targeting
-
-Prism can parse for specific Ruby versions. Does a rule declare its target version? Is the
-default the repo's `.ruby-version`, or newest? Affects whether patterns are portable between
-repos. Public contract, so it needs settling before v0.1.
-
 ## Q7 — Perf targets are unfalsifiable until Phase 0
 
 No latency numbers are set because none are measured. Phase 0 must produce cold parse (both
@@ -181,3 +175,33 @@ A general rule *is* derivable: `effective_range()` = transitive closure over des
 unioning heredoc `closing_loc`, at splice time. The enforcement matters more than the rule —
 never expose raw `.location` from the capture API.
 
+
+## Q6 — Ruby version targeting — **closed**
+
+**A rule declares the floor its *output* needs; the codebase declares what it is.** Not the
+other way round: the version is a property of the repository, and a pattern that had to name
+one would stop being portable between repos, which was the original worry.
+
+```yaml
+ruby: '3.1'     # `{foo:}` is a syntax error before this
+```
+
+The premise the question rested on turned out to be false in practice: Prism can parse for a
+specific Ruby version, but the `ruby-prism` crate exposes only `parse(source)` and passes a
+null options pointer, so version-targeted parsing is not reachable. That is fine, because it
+would have been the wrong mechanism anyway — the danger is not that rwr *reads* new syntax,
+it is that rwr *writes* it.
+
+**And `verify` cannot catch this one.** Reparsing the output proves it is valid Ruby to
+*Prism*, which is modern Ruby. `{foo:}` sails through and then breaks on the target's 2.7.
+This is exactly DESIGN.md §4's dangerous failure — clean, confident, wrong — and the only
+guard is knowing what version the codebase targets.
+
+Detection reads `.ruby-version`, a Gemfile `ruby` line, or a gemspec's
+`required_ruby_version`, walking up to the repository root. All three were needed: rails
+declares it only in a gemspec, discourse and mastodon only in a Gemfile. `--ruby X.Y`
+overrides.
+
+**An undetected version is not permission to assume the newest.** The rules are held back and
+the run says so, the same shape as the unsafe gate (D57) — a rule that did not run must not
+look like a rule that found nothing.

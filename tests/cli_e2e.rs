@@ -305,6 +305,57 @@ fn held_back_rules_are_reported_not_silent() {
     );
 }
 
+/// `{foo:}` is a syntax error before Ruby 3.1, and `verify` cannot catch it --
+/// Prism parses modern Ruby, so the output is valid there. The guard has to come
+/// from the codebase's declared version (Q6).
+#[test]
+fn a_rule_needing_a_newer_ruby_is_held_back() {
+    let dir = fixture("a = { x: x }\n");
+    std::fs::write(dir.path().join(".ruby-version"), "2.7.8\n").expect("write");
+
+    let out = rwr(&[
+        "check",
+        "style/hash-shorthand",
+        dir.path().to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(err.contains("newer Ruby"), "{err}");
+    assert!(err.contains("2.7"), "says what it found, and where: {err}");
+    assert_eq!(out.status.code(), Some(0), "nothing ran, so nothing to do");
+
+    // The same tree on a Ruby that has the syntax.
+    std::fs::write(dir.path().join(".ruby-version"), "3.2.2\n").expect("write");
+    let ok = rwr(&[
+        "check",
+        "style/hash-shorthand",
+        dir.path().to_str().unwrap(),
+    ]);
+    assert_eq!(ok.status.code(), Some(1), "{}", stderr(&ok));
+}
+
+/// An undetected version is not permission to assume the newest one.
+#[test]
+fn an_undetected_ruby_version_holds_the_rule_back() {
+    let dir = fixture("a = { x: x }\n");
+    let out = rwr(&[
+        "check",
+        "style/hash-shorthand",
+        dir.path().to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(err.contains("none was detected"), "{err}");
+    assert!(err.contains("--ruby"), "says how to answer it: {err}");
+
+    let forced = rwr(&[
+        "check",
+        "style/hash-shorthand",
+        dir.path().to_str().unwrap(),
+        "--ruby",
+        "3.2",
+    ]);
+    assert_eq!(forced.status.code(), Some(1), "{}", stderr(&forced));
+}
+
 /// No arguments is a usage error, not a silent no-op.
 #[test]
 fn bare_invocation_explains_itself() {
