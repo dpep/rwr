@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+**A shipped rule pack.** `rwr check rules` runs every rule under a directory,
+`rwr check rules/performance` runs one family. A run reports which rule
+accounted for what, since a total across five rules is not reviewable. Rules
+take their id from their path within the pack. See `rules/README.md` for what
+was deliberately left out.
+
+`--help` had promised "a rule file or directory of them" since 0.1.0; only a
+file worked.
+
+**The `edits` field in JSON output is now `sites`, and counts differently.** It
+had reported edits, and a rewrite that changes shape emits several edits for one
+place a reader sees in the diff — `select { }.first` → `detect { }` counted as
+two. It now counts matched sites.
+
 ## 0.1.0 - 2026-08-21
 
 First working release. `find`, `check` and `rewrite` all do real work.

@@ -331,8 +331,10 @@ pub(crate) fn plan(
     let t_node = t_parsed.as_ref().map(ruby_prism::ParseResult::node);
     let t_root = t_node.as_ref().and_then(matcher::pattern_root);
 
-    let mut edits: Vec<Edit> = Vec::new();
-    for m in matches {
+    // Each edit remembers which match produced it: a shape-changing rewrite
+    // emits several edits for one site, so edits cannot stand in for sites.
+    let mut edits: Vec<(usize, Edit)> = Vec::new();
+    for (index, m) in matches.iter().enumerate() {
         // Minimal first: where pattern and template agree in shape, edit only
         // what differs and leave every untouched subtree's bytes alone.
         let minimal = match (&t_root, &t_prepared) {
@@ -348,38 +350,43 @@ pub(crate) fn plan(
         };
 
         match minimal {
-            Some(mut found) if !found.is_empty() => edits.append(&mut found),
+            Some(found) if !found.is_empty() => {
+                edits.extend(found.into_iter().map(|e| (index, e)));
+            }
             // No difference at all: the rule is a no-op here.
             Some(_) => {}
             // Shapes diverge, so fall back to replacing the whole span. Correct,
             // merely non-minimal.
             None => {
                 let (start, end) = effective_range(&m.node);
-                edits.push(Edit {
-                    start,
-                    end,
-                    text: render(
-                        template,
-                        &m.env,
-                        source,
-                        inner_span(&m.node).unwrap_or_else(|| {
-                            let l = m.node.location();
-                            (l.start_offset(), l.end_offset())
-                        }),
-                    )?,
-                });
+                edits.push((
+                    index,
+                    Edit {
+                        start,
+                        end,
+                        text: render(
+                            template,
+                            &m.env,
+                            source,
+                            inner_span(&m.node).unwrap_or_else(|| {
+                                let l = m.node.location();
+                                (l.start_offset(), l.end_offset())
+                            }),
+                        )?,
+                    },
+                ));
             }
         }
     }
 
     // Outermost first: a wider edit that contains a narrower one wins, and the
     // contained match is dropped rather than applied against stale offsets.
-    edits.sort_by_key(|e| (e.start, std::cmp::Reverse(e.end)));
+    edits.sort_by_key(|(_, e)| (e.start, std::cmp::Reverse(e.end)));
     let mut dropped = 0usize;
 
-    let mut kept: Vec<Edit> = Vec::new();
-    for edit in edits {
-        match kept.last() {
+    let mut kept: Vec<(usize, Edit)> = Vec::new();
+    for (index, edit) in edits {
+        match kept.last().map(|(_, e)| e) {
             Some(previous) if edit.start < previous.end => {
                 if edit.end <= previous.end {
                     // Contained in a wider edit. Dropping it is correct -- its
@@ -394,11 +401,17 @@ pub(crate) fn plan(
                     second: edit,
                 });
             }
-            _ => kept.push(edit),
+            _ => kept.push((index, edit)),
         }
     }
+
+    // A site counts once however many edits it took, and only if one survived.
+    let mut sites: Vec<usize> = kept.iter().map(|(i, _)| *i).collect();
+    sites.sort_unstable();
+    sites.dedup();
     Ok(Planned {
-        edits: kept,
+        sites: sites.len(),
+        edits: kept.into_iter().map(|(_, e)| e).collect(),
         dropped,
     })
 }
@@ -407,6 +420,10 @@ pub(crate) fn plan(
 #[derive(Debug)]
 pub(crate) struct Planned {
     pub edits: Vec<Edit>,
+    /// Matched sites that changed. A shape-changing rewrite emits several edits
+    /// for one site, so reporting `edits.len()` overstates what a reader sees
+    /// in the diff.
+    pub sites: usize,
     /// Matches skipped because a wider edit covered them. Non-zero means a
     /// rerun will make further progress -- the retryable outcome (exit 4).
     pub dropped: usize,

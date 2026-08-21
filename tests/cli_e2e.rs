@@ -189,6 +189,58 @@ fn a_rename_reports_what_it_could_not_account_for() {
     );
 }
 
+/// The shipped pack loads as a directory and says which rule did what.
+///
+/// Pins two things at once: `--help` promises a directory of rules, and a pack
+/// is useless without attribution -- "27 sites changed" across five rules is
+/// not a reviewable answer.
+#[test]
+fn the_shipped_pack_names_the_rule_that_fired() {
+    let dir = fixture(
+        "class Widget\n  def go(items)\n    items.select { |i| i.ready? }.first\n  end\n\n  def nothing\n    return nil\n  end\nend\n",
+    );
+    let pack = concat!(env!("CARGO_MANIFEST_DIR"), "/rules");
+
+    let out = rwr(&["check", pack, dir.path().to_str().unwrap(), "-j"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rows: serde_json::Value = serde_json::from_str(&text).expect("json");
+    let rules = &rows[0]["rules"];
+    let named: Vec<&str> = rules
+        .as_array()
+        .expect("rules array")
+        .iter()
+        .map(|r| r["rule"].as_str().expect("rule id"))
+        .collect();
+    assert!(named.contains(&"performance/detect"), "{text}");
+    assert!(named.contains(&"style/return-nil"), "{text}");
+}
+
+/// A site counts once however many edits it takes.
+///
+/// `select { }.first` -> `detect { }` is a shape change that the structural
+/// diff splits into two edits. Reporting edits would say "2 sites" for one
+/// place a reader sees in the diff.
+#[test]
+fn a_site_counts_once_however_many_edits_it_takes() {
+    let dir = fixture("items.select { |i| i.ready? }.first\n");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(
+        &rule,
+        "match: $R.select { |$P| $B }.first\nrewrite: $R.detect { |$P| $B }\n",
+    )
+    .expect("write");
+
+    let out = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+        "-j",
+    ]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rows: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(rows[0]["sites"], 1, "{text}");
+}
+
 /// No arguments is a usage error, not a silent no-op.
 #[test]
 fn bare_invocation_explains_itself() {

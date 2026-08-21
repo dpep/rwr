@@ -1,0 +1,8 @@
+# One pattern covers both spellings: `foo: foo` and `:foo => foo` parse to the
+# same node, so the rocket needs no separate rule.
+description: Ruby 3.1+ shorthand for a hash entry whose key and value share a name.
+match: '{**$BEFORE, $K: $V, **$AFTER}'
+where:
+  $K:
+    same_name_as: $V
+rewrite: '{**$BEFORE, $K:, **$AFTER}'

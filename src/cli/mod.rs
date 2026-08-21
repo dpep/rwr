@@ -284,6 +284,30 @@ fn emit_rows<T: Serialize>(out: Output, rows: &[T]) -> Option<ExitCode> {
 /// anyone reads. Counts by class stay exact; only the detail is capped.
 const RESIDUE_DETAIL_CAP: usize = 40;
 
+/// Print which rules of a pack accounted for the edits.
+///
+/// Only when more than one fired: a single-rule run already said everything in
+/// its file lines, and naming the rule there would be noise.
+fn report_by_rule(changed: &[Changed]) {
+    // First-seen order is the order the rules ran in, which is the order a
+    // reader of the pack expects.
+    let mut totals: Vec<(String, usize)> = Vec::new();
+    for hit in changed.iter().flat_map(|c| &c.rules) {
+        match totals.iter_mut().find(|(id, _)| *id == hit.rule) {
+            Some((_, n)) => *n += hit.sites,
+            None => totals.push((hit.rule.clone(), hit.sites)),
+        }
+    }
+    if totals.len() < 2 {
+        return;
+    }
+    let width = totals.iter().map(|(id, _)| id.len()).max().unwrap_or(0);
+    println!();
+    for (id, n) in &totals {
+        println!("  {id:<width$}  {n} site(s)");
+    }
+}
+
 /// Print the account of what the rule could not see, grouped by class.
 ///
 /// Grouping matters as much as the total: the classes mean different things.
@@ -516,7 +540,21 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
 #[derive(Debug, Serialize, Clone)]
 struct Changed {
     file: String,
-    edits: usize,
+    /// Matched locations changed -- not edits. One site can take several edits
+    /// when the rewrite changes shape, and a reader counts sites in the diff.
+    sites: usize,
+    /// Which rules of the set accounted for those edits. Empty for the inline
+    /// `-r` form, which has no rule to name, so a one-pattern run's output is
+    /// unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rules: Vec<RuleHits>,
+}
+
+/// One rule's share of a file's edits.
+#[derive(Debug, Serialize, Clone)]
+struct RuleHits {
+    rule: String,
+    sites: usize,
 }
 
 /// `check` and `rewrite` differ only in whether they write and in how their
@@ -624,7 +662,10 @@ fn cmd_apply(
     // rather than aborting work already proven safe elsewhere (DESIGN.md §4).
     struct Outcome {
         file: String,
-        edits: usize,
+        sites: usize,
+        /// Edits per rule, positionally. Attribution is per file because that
+        /// is where the work happened; totals aggregate from it.
+        by_rule: Vec<usize>,
         rewritten: Option<String>,
         refusal: Option<String>,
         residue: Vec<Residue>,
@@ -670,7 +711,8 @@ fn cmd_apply(
             // failure (D15).
             let mut deferred = 0usize;
 
-            for (rule, prepared) in rules.iter().zip(&prepareds) {
+            let mut by_rule = vec![0usize; rules.len()];
+            for (index, (rule, prepared)) in rules.iter().zip(&prepareds).enumerate() {
                 // Scoped so every borrow of `current` ends before it is
                 // replaced with this rule's output.
                 let step: Result<Option<(String, usize, usize)>, String> = {
@@ -704,11 +746,9 @@ fn cmd_apply(
                                         let text = rewrite::apply(&current, &planned.edits);
                                         match rewrite::verify(&text) {
                                             Err(r) => Err(format!("{r:?}")),
-                                            Ok(()) => Ok(Some((
-                                                text,
-                                                planned.edits.len(),
-                                                planned.dropped,
-                                            ))),
+                                            Ok(()) => {
+                                                Ok(Some((text, planned.sites, planned.dropped)))
+                                            }
                                         }
                                     }
                                 }
@@ -721,7 +761,8 @@ fn cmd_apply(
                     Err(refusal) => {
                         return Some(Outcome {
                             file,
-                            edits: 0,
+                            sites: 0,
+                            by_rule: Vec::new(),
                             rewritten: None,
                             refusal: Some(refusal),
                             residue: Vec::new(),
@@ -731,6 +772,7 @@ fn cmd_apply(
                     Ok(None) => {}
                     Ok(Some((text, n, skipped))) => {
                         total += n;
+                        by_rule[index] += n;
                         deferred += skipped;
                         current = text.into_bytes();
                     }
@@ -780,7 +822,8 @@ fn cmd_apply(
 
             Some(Outcome {
                 file,
-                edits: total,
+                sites: total,
+                by_rule,
                 rewritten: Some(String::from_utf8_lossy(&current).into_owned()),
                 refusal: None,
                 residue,
@@ -809,7 +852,19 @@ fn cmd_apply(
         }
         changed.push(Changed {
             file: outcome.file.clone(),
-            edits: outcome.edits,
+            sites: outcome.sites,
+            rules: outcome
+                .by_rule
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| **n > 0)
+                .filter_map(|(i, n)| {
+                    rules[i].id.as_ref().map(|id| RuleHits {
+                        rule: id.clone(),
+                        sites: *n,
+                    })
+                })
+                .collect(),
         });
     }
 
@@ -824,8 +879,9 @@ fn cmd_apply(
         Output::Text => {
             for c in &changed {
                 let verb = if write { "rewrote" } else { "would rewrite" };
-                println!("{}: {verb} {} site(s)", c.file, c.edits);
+                println!("{}: {verb} {} site(s)", c.file, c.sites);
             }
+            report_by_rule(&changed);
             report_residue(&left_over);
         }
         _ => {

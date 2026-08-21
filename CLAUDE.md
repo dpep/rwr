@@ -64,6 +64,7 @@ rwr/
     pattern/     ← pattern parsing + structural matching
     rewrite/     ← action tree, effective_range, splicing
     residue/     ← name-scoped residue reporting
+  rules/         ← the shipped rule pack, loaded as a directory (D54)
   docs/          ← design, decisions, open questions, research
   tests/         ← e2e over the built binary
 ```

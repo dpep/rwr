@@ -8,8 +8,20 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub(crate) struct Rule {
+    /// What to call this rule when reporting which one fired.
+    ///
+    /// Absent for the inline `-r` form, which has no name to report. A rule
+    /// loaded from a pack takes its path within the pack when it declares
+    /// nothing, so `rules/performance/detect.yml` reports as
+    /// `performance/detect`.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// One line on what the rule does, for humans reading the pack.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub description: Option<String>,
     /// The structural pattern, in Ruby with `$METAVAR` placeholders.
     #[serde(rename = "match")]
     pub pattern: String,
@@ -124,6 +136,10 @@ pub(crate) enum RuleError {
     },
     /// A bare pattern was given with no replacement, for a command that needs one.
     NoTemplate,
+    /// A directory was given as a rule pack but holds no rule files.
+    EmptyPack {
+        path: String,
+    },
 }
 
 impl std::fmt::Display for RuleError {
@@ -131,6 +147,9 @@ impl std::fmt::Display for RuleError {
         match self {
             RuleError::Unreadable { path, message } => write!(f, "cannot read {path}: {message}"),
             RuleError::Malformed { path, message } => write!(f, "{path} is not a rule: {message}"),
+            RuleError::EmptyPack { path } => {
+                write!(f, "no .yml or .yaml rule files under {path}")
+            }
             RuleError::NoTemplate => write!(
                 f,
                 "a replacement is required — pass -r/--replace, or give a rule file with a `rewrite:` key"
@@ -196,14 +215,14 @@ impl MethodRename {
             Kind::Instance => Rule {
                 pattern: format!("def {name}; $B; end"),
                 rewrite: Some(format!("def {new}; $B; end")),
-                constraints: HashMap::new(),
                 scope: scope(),
+                ..Default::default()
             },
             Kind::Class => Rule {
                 pattern: format!("def self.{name}; $B; end"),
                 rewrite: Some(format!("def self.{new}; $B; end")),
-                constraints: HashMap::new(),
                 scope: scope(),
+                ..Default::default()
             },
         };
 
@@ -214,7 +233,7 @@ impl MethodRename {
             pattern: format!("$R.{name}"),
             rewrite: Some(format!("$R.{new}")),
             constraints: receiver(),
-            scope: Scope::default(),
+            ..Default::default()
         };
 
         let mut rules = vec![definition, calls];
@@ -227,12 +246,12 @@ impl MethodRename {
             rules.push(Rule {
                 pattern: name.to_string(),
                 rewrite: Some(new.to_string()),
-                constraints: HashMap::new(),
                 scope: Scope {
                     inside: class.map(str::to_string),
                     singleton: Some(kind == Kind::Class),
                     subclasses: Some(true),
                 },
+                ..Default::default()
             });
         }
         rules
@@ -249,34 +268,113 @@ pub(crate) fn load_all(rule: &str, replace: Option<&str>) -> Result<Vec<Rule>, R
         return Ok(vec![Rule {
             pattern: rule.to_string(),
             rewrite: Some(template.to_string()),
-            constraints: HashMap::new(),
-            scope: Scope::default(),
+            ..Default::default()
         }]);
     }
 
-    if !Path::new(rule).is_file() {
+    let path = Path::new(rule);
+    if path.is_dir() {
+        return load_pack(path);
+    }
+    if !path.is_file() {
         return Err(RuleError::NoTemplate);
     }
-    let raw = std::fs::read_to_string(rule).map_err(|e| RuleError::Unreadable {
-        path: rule.to_string(),
+    let id = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| rule.to_string());
+    load_file(path, &id)
+}
+
+/// Every rule in one file, each stamped with `id` unless it named itself.
+fn load_file(path: &Path, id: &str) -> Result<Vec<Rule>, RuleError> {
+    let name = path.display().to_string();
+    let raw = std::fs::read_to_string(path).map_err(|e| RuleError::Unreadable {
+        path: name.clone(),
         message: e.to_string(),
     })?;
 
     // The method-notation shorthand expands to a rule set.
-    if let Ok(rename) = serde_yaml::from_str::<MethodRename>(&raw) {
-        return Ok(rename.expand());
+    let mut rules = if let Ok(rename) = serde_yaml::from_str::<MethodRename>(&raw) {
+        rename.expand()
+    } else if let Ok(rules) = serde_yaml::from_str::<Vec<Rule>>(&raw) {
+        // A sequence is a rule set; a mapping is one rule. Trying the sequence
+        // first keeps the single-rule spelling unchanged.
+        rules
+    } else {
+        vec![
+            serde_yaml::from_str::<Rule>(&raw).map_err(|e| RuleError::Malformed {
+                path: name,
+                message: e.to_string(),
+            })?,
+        ]
+    };
+
+    // The file is the unit of identity: a rename expands to several rules but
+    // is one thing a user turned on, and reports as one.
+    for rule in &mut rules {
+        if rule.id.is_none() {
+            rule.id = Some(id.to_string());
+        }
     }
-    // A sequence is a rule set; a mapping is one rule. Trying the sequence
-    // first keeps the single-rule spelling unchanged.
-    if let Ok(rules) = serde_yaml::from_str::<Vec<Rule>>(&raw) {
-        return Ok(rules);
+    Ok(rules)
+}
+
+/// Every rule under a directory, in path order.
+///
+/// A pack is a directory because that is how a user turns a subset on: point at
+/// `rules/performance` and get those rules, point at `rules` and get all of
+/// them. A file that fails to parse is an error rather than a skip -- silently
+/// dropping a rule is the same failure as silently dropping an edit.
+fn load_pack(dir: &Path) -> Result<Vec<Rule>, RuleError> {
+    let mut files = Vec::new();
+    collect(dir, &mut files)?;
+    // Sorted so a pack applies in the same order everywhere. Rules run in
+    // sequence, each seeing the last one's output, so the order is observable.
+    files.sort();
+    if files.is_empty() {
+        return Err(RuleError::EmptyPack {
+            path: dir.display().to_string(),
+        });
     }
-    serde_yaml::from_str::<Rule>(&raw)
-        .map(|r| vec![r])
-        .map_err(|e| RuleError::Malformed {
-            path: rule.to_string(),
+
+    let mut rules = Vec::new();
+    for file in &files {
+        // The path within the pack, so `performance/detect.yml` reports as
+        // `performance/detect` and stays unambiguous across subdirectories.
+        let id = file
+            .strip_prefix(dir)
+            .unwrap_or(file)
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/");
+        rules.extend(load_file(file, &id)?);
+    }
+    Ok(rules)
+}
+
+/// Every `.yml`/`.yaml` file under `dir`, recursively.
+fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<(), RuleError> {
+    let entries = std::fs::read_dir(dir).map_err(|e| RuleError::Unreadable {
+        path: dir.display().to_string(),
+        message: e.to_string(),
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| RuleError::Unreadable {
+            path: dir.display().to_string(),
             message: e.to_string(),
-        })
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect(&path, out)?;
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("yml" | "yaml")
+        ) {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Resolve the `RULE` argument, which is a file path when one exists and a bare
@@ -287,8 +385,7 @@ pub(crate) fn load(rule: &str, replace: Option<&str>) -> Result<Rule, RuleError>
         return Ok(Rule {
             pattern: rule.to_string(),
             rewrite: Some(template.to_string()),
-            constraints: HashMap::new(),
-            scope: Scope::default(),
+            ..Default::default()
         });
     }
 
@@ -389,6 +486,62 @@ mod tests {
         let rule = load(path.to_str().expect("utf8"), None).expect("rule");
         let names = rule.constraints["$SEL"].name.as_ref().expect("names");
         assert_eq!(names, &["select", "find_all"]);
+    }
+
+    #[test]
+    fn a_directory_loads_as_a_pack() {
+        let dir = std::env::temp_dir().join("rwr-pack");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("style")).expect("temp dir");
+        std::fs::write(
+            dir.join("style/return-nil.yml"),
+            "match: return nil\nrewrite: return\n",
+        )
+        .expect("write");
+        std::fs::write(dir.join("a.yaml"), "match: foo\nrewrite: bar\n").expect("write");
+        // Not a rule file, and must be ignored rather than fail the load.
+        std::fs::write(dir.join("README.md"), "notes\n").expect("write");
+
+        let rules = load_all(dir.to_str().expect("utf8"), None).expect("pack");
+        let ids: Vec<&str> = rules.iter().filter_map(|r| r.id.as_deref()).collect();
+        // Path order, so a pack applies the same way everywhere.
+        assert_eq!(ids, ["a", "style/return-nil"]);
+    }
+
+    /// A rule that names itself keeps that name, whatever file it came from.
+    #[test]
+    fn a_declared_id_wins_over_the_path() {
+        let dir = std::env::temp_dir().join("rwr-pack-id");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("whatever.yml"),
+            "id: style/return-nil\nmatch: return nil\nrewrite: return\n",
+        )
+        .expect("write");
+        let rules = load_all(dir.to_str().expect("utf8"), None).expect("pack");
+        assert_eq!(rules[0].id.as_deref(), Some("style/return-nil"));
+    }
+
+    /// Silently skipping an unparseable rule is the same failure as silently
+    /// dropping an edit: the pack would look like it ran.
+    #[test]
+    fn a_malformed_rule_fails_the_pack() {
+        let dir = std::env::temp_dir().join("rwr-pack-bad");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("ok.yml"), "match: return nil\nrewrite: return\n").expect("write");
+        std::fs::write(dir.join("bad.yml"), "nonsense: true\n").expect("write");
+        assert!(load_all(dir.to_str().expect("utf8"), None).is_err());
+    }
+
+    #[test]
+    fn an_empty_directory_says_so() {
+        let dir = std::env::temp_dir().join("rwr-pack-empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let err = load_all(dir.to_str().expect("utf8"), None).expect_err("empty");
+        assert!(matches!(err, RuleError::EmptyPack { .. }));
     }
 
     #[test]

@@ -1,0 +1,3 @@
+description: An explicit `return nil` says nothing `return` does not.
+match: return nil
+rewrite: return

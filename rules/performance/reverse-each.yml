@@ -1,0 +1,3 @@
+description: '`reverse.each` allocates a reversed copy; `reverse_each` iterates backwards in place.'
+match: $R.reverse.each { |$P| $B }
+rewrite: $R.reverse_each { |$P| $B }

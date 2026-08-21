@@ -969,3 +969,52 @@ an opinion.
 
 *Reverses if:* rwr ever grows a concrete-syntax layer for its own reasons, at which point
 this becomes nearly free -- but it should not be the reason for growing one.
+
+## D54 - A rule pack is a directory, and every rule carries an id
+**Decided.**
+
+`rwr check rules` loads every `.yml`/`.yaml` under a directory, recursively, in path order. A
+rule's id defaults to its path within the pack, so `rules/performance/detect.yml` reports as
+`performance/detect`, and an explicit `id:` key overrides that.
+
+Three things follow from the directory being the unit, and each was a choice:
+
+**A subset is a subdirectory.** `rwr check rules/performance` is how a family gets turned on.
+No config file listing enabled rules, no `--only` flag — the filesystem already expresses
+selection, and a second mechanism for it would drift from the first.
+
+**A malformed rule fails the pack.** Skipping it would leave a run that looks complete and is
+not, which is the same failure as silently dropping an edit (principle 2). The error names
+the file.
+
+**The file is the unit of identity, not the rule.** A `method:` rename expands to three or
+four rules, but it is one thing a user turned on and reports as one. Only a rule that names
+itself gets its own id.
+
+**Attribution is the point, not decoration.** Before this, a run over a pack could say "27
+sites changed" and nothing more. That is not a reviewable answer, and it is the failure mode
+of every linter that reports a total instead of a cop name.
+
+*Reverses if:* rules ever need ordering that path order cannot express — a dependency between
+rules, say — at which point a manifest becomes necessary and the directory becomes just its
+default.
+
+## D55 - Output counts sites, not edits
+**Decided**, and it corrects output that shipped in 0.1.0.
+
+A rewrite that changes shape is split by the structural diff into several edits — `select { }
+.first` → `detect { }` is two, because the receiver and the block are carried across
+unchanged and only the two ends differ. Reporting `edits.len()` therefore said "2 site(s)"
+for one place a reader sees in the diff.
+
+`plan` now tags each edit with the match that produced it and counts distinct surviving
+matches. A site counts once however many edits it takes, and only if at least one survived
+conflict resolution. The JSON field is renamed `edits` → `sites` to match, which is a
+breaking change to output that was wrong.
+
+The general form of the mistake: an internal quantity that is easy to reach is not the
+quantity the reader is asking about. Edits are an implementation detail of minimal diffs;
+sites are what a human reviews.
+
+*Reverses if:* nothing plausible. Edit counts remain available internally where the
+conflict-resolution logic needs them.

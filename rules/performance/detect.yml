@@ -1,0 +1,12 @@
+# The alternation is what lets one rule cover both synonyms -- ast-grep needs a
+# separate pass per name.
+#
+# Unsafe on an ActiveRecord relation, where `select` names columns rather than
+# filtering rows. Narrow with a `where:` receiver type on `$R` when running this
+# over a Rails app; rwr reports the sites it could not resolve as residue.
+description: '`select { }.first` builds the whole array to take one element; `detect` stops at the first match.'
+match: $R.$SEL { |$P| $B }.first
+where:
+  $SEL:
+    name: [select, find_all]
+rewrite: $R.detect { |$P| $B }

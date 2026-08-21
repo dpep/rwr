@@ -1,0 +1,7 @@
+# Carries the same ActiveRecord caveat as `detect`.
+description: '`select { }.size` allocates the filtered array only to measure it.'
+match: $R.$SEL { |$P| $B }.size
+where:
+  $SEL:
+    name: [select, find_all]
+rewrite: $R.count { |$P| $B }
