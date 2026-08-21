@@ -122,6 +122,73 @@ fn writing_requires_the_rewrite_verb() {
     assert!(stderr(&rwr(&["rewrite", "rule.yml"])).contains("rewrite"));
 }
 
+/// `check` inverts polarity deliberately (D22): a clean tree is success, so a
+/// git hook does not block a commit where a rule correctly matches nothing.
+#[test]
+fn check_exits_zero_when_clean_and_one_when_there_is_work() {
+    let clean = fixture("def a\n  1\nend\n");
+    let dirty = fixture("def a\n  return nil\nend\n");
+    let rule = clean.path().join("r.yml");
+    std::fs::write(&rule, "match: return nil\nrewrite: return\n").expect("write rule");
+
+    let out = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        clean.path().to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "clean tree is success");
+
+    let out = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dirty.path().to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "work to do is the signal");
+}
+
+/// `check` never writes, whatever it finds.
+#[test]
+fn check_never_writes() {
+    let dir = fixture("def a\n  return nil\nend\n");
+    let file = dir.path().join("fixture.rb");
+    let before = std::fs::read(&file).expect("read");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(&rule, "match: return nil\nrewrite: return\n").expect("write rule");
+
+    rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    assert_eq!(std::fs::read(&file).expect("read"), before);
+}
+
+/// The account of what a rule could not see reaches the output, and names the
+/// class of each occurrence. Without this the blind-spot report could regress
+/// to silence and nothing would notice.
+#[test]
+fn a_rename_reports_what_it_could_not_account_for() {
+    // The macro sits inside the class -- both the realistic shape and what the
+    // class-anchored scoping keeps, since an unrelated class's symbol is
+    // correctly filtered out.
+    let dir =
+        fixture("class Account\n  attr_reader :display_name\n  def display_name; 1; end\nend\n");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(&rule, "method: Account#display_name\nrename: full_name\n").expect("write");
+
+    let out = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(err.contains("could not account for"), "{err}");
+    assert!(
+        err.contains("Symbol"),
+        "the attr_reader symbol is a blind spot: {err}"
+    );
+}
+
 /// No arguments is a usage error, not a silent no-op.
 #[test]
 fn bare_invocation_explains_itself() {
