@@ -59,6 +59,72 @@ are not valid standalone Ruby.
 It does not yet prove the converse (that tree-sitter's Ruby grammar *would* differ), which
 needs a direct comparison. But it removes the possibility that Prism itself has gaps here.
 
+## (b) Bare-name match collateral — **measured**
+
+Rails: **309,683 call sites, 12,686 distinct method names.** No matcher needed — collect every
+`CallNode`, group by name, classify each receiver by syntax alone.
+
+```sh
+cargo test --test phase0_receivers -- --nocapture
+```
+
+### D6's premise is confirmed, with a number
+
+| name | call sites | implicit | constant | receiver shapes |
+|---|---:|---:|---:|---:|
+| `name` | 2,067 | 15% | 2% | 6 |
+| `id` | 1,608 | 4% | 0% | 6 |
+| `create` | 875 | 2% | 75% | 5 |
+| `call` | 686 | 0% | 4% | 6 |
+| `save` | 585 | 1% | 0% | 4 |
+| `execute` | 564 | 17% | 2% | 5 |
+| `build` | 394 | 20% | 10% | 5 |
+| `value` | 335 | 27% | 0% | 6 |
+
+Renaming `Foo#name` by bare identifier touches **2,067 sites in Rails alone**, essentially all
+of them wrong. That is what Ruby LSP's `ReferenceFinder` does today (bare name equality, no
+receiver check), and it is the disease D6 and the semantic layer exist to cure. The premise
+was previously asserted; it is now measured.
+
+### A nuance that corrects the case studies
+
+`create` is **75% constant-receiver** (`Foo.create`) — statically known, and therefore the
+*easy* case. The case studies worried that `create`/`update`/`call` were hopeless because
+residue degrades on common names. That is right for `name`, `id` and `value`, and wrong for
+`create`. Commonness and tractability are not the same axis, and D20's "identifier too common"
+degradation should key on **receiver-shape diversity**, not raw frequency.
+
+### Receiver shapes across all 309,683 call sites
+
+| shape | count | share | resolvable without type inference? |
+|---|---:|---:|---|
+| Implicit (`foo`) | 134,642 | 43.5% | **yes** — lexical scope names the enclosing class |
+| Local (`x.foo`) | 55,563 | 17.9% | sometimes — local inference from `Foo.new` etc. |
+| Chained (`a.b.foo`) | 49,051 | 15.8% | hardest — needs the chain's type |
+| Constant (`Foo.foo`) | 44,436 | 14.3% | **yes** — statically known |
+| Ivar (`@x.foo`) | 17,668 | 5.7% | sometimes |
+| Self (`self.foo`) | 2,402 | 0.8% | **yes** |
+| Other | 5,921 | 1.9% | no |
+
+### Preliminary answer to Q2 — favourable
+
+**~58.6% of call sites (implicit + constant + explicit self) are structurally resolvable from a
+symbol index plus lexical scope, with no type inference and no Sorbet.**
+
+That is better than expected, and the reason is the shape of the data rather than any
+cleverness: the dominant bucket is *implicit self*, and knowing which class you are lexically
+inside is pure symbol-index work.
+
+Stated carefully, because this is an upper bound on the easy cases rather than a finished
+result: resolving an implicit-self call still requires the index to know the enclosing class
+*and* that the method is defined on it or an ancestor. Local and ivar receivers (23.6%
+combined) would push the number higher with modest inference. Chained receivers (15.8%) are
+where a type layer would actually earn its keep.
+
+This does not close Q2 — that needs the index built and measured — but it removes the
+worry that receiver narrowing is unworkable without Sorbet. The largest bucket needs no types
+at all.
+
 ---
 
 ## Still outstanding
@@ -66,8 +132,8 @@ needs a direct comparison. But it removes the possibility that Prism itself has 
 | measurement | status | needs |
 |---|---|---|
 | (a) residue-reporting spike | not started | a matcher, plus real renames with hand-verified ground truth |
-| (b) bare-`foo(...)` false-positive rate | **now possible** — rails is a usable corpus | a matcher |
-| (c) receiver resolution for methods, no Sorbet | not started | symbol index |
+| (b) bare-name collateral | **done** — see above | — |
+| (c) receiver resolution for methods, no Sorbet | **preliminary, favourable** (~59% structurally resolvable) | symbol index to confirm |
 | syntactic-partition scoring vs incumbents | not started | competitor binaries installed |
 
 (b) was previously blocked on the author's private monolith. Rails is a legitimate public
