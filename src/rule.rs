@@ -60,6 +60,14 @@ pub(crate) struct Constraint {
     /// rename, where a subclass call site left behind is a `NoMethodError`.
     #[serde(default)]
     pub subclasses: Option<bool>,
+
+    /// This capture must name the same identifier as another.
+    ///
+    /// `{foo: foo}` -> `{foo:}` needs a symbol key compared against a
+    /// local-variable or method-call value: the same *name*, but different node
+    /// kinds, so D16's AST equality does not apply.
+    #[serde(default)]
+    pub same_name_as: Option<String>,
 }
 
 /// Which of a class's two method tables a constraint means.
@@ -175,10 +183,10 @@ impl MethodRename {
             c.insert(
                 "$R".to_string(),
                 Constraint {
-                    name: None,
                     receiver_type: class.map(str::to_string),
                     kind: Some(kind),
                     subclasses: Some(true),
+                    ..Default::default()
                 },
             );
             c

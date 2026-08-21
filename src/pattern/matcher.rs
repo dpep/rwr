@@ -188,6 +188,19 @@ fn match_atoms<'pr>(
         return false;
     }
     pa.iter().zip(&ta).all(|(p, t)| match (p, t) {
+        // A symbol's name is a *value* atom, not a constant one, so `:$M` and a
+        // label key `$K:` reach here rather than the Name arm below. Without
+        // this a metavariable in label position silently matched nothing.
+        (Atom::Value(pn), Atom::Value(tn)) => match std::str::from_utf8(pn)
+            .ok()
+            .and_then(|s| prepared.bindings.get_key_value(s))
+        {
+            Some((_, binding)) => match &binding.name {
+                None => true,
+                Some(name) => bind(env, name, Bound::Name(tn.clone())),
+            },
+            None => pn == tn,
+        },
         (Atom::Name(pn), Atom::Name(tn)) => match std::str::from_utf8(pn)
             .ok()
             .and_then(|s| prepared.bindings.get_key_value(s))
@@ -324,6 +337,16 @@ pub(crate) fn satisfies(
             }
         }
 
+        if let Some(other) = &constraint.same_name_as {
+            let Some(other_bound) = found.env.get(other.trim_start_matches('$')) else {
+                return false;
+            };
+            match (identifier_of(bound), identifier_of(other_bound)) {
+                (Some(a), Some(b)) if a == b => {}
+                _ => return false,
+            }
+        }
+
         if let Some(wanted) = &constraint.receiver_type {
             let Bound::One(node) = bound else {
                 return false;
@@ -378,6 +401,21 @@ impl Receiver {
 
     pub(crate) fn is_instance(&self) -> bool {
         matches!(self, Receiver::Instance(_))
+    }
+}
+
+/// The identifier a binding names, across node kinds.
+///
+/// A symbol key and a variable read are different nodes carrying the same name,
+/// which is exactly the correspondence `{foo: foo}` turns on.
+fn identifier_of(bound: &Bound<'_>) -> Option<Vec<u8>> {
+    match bound {
+        Bound::Name(bytes) => Some(bytes.clone()),
+        Bound::One(node) => match node {
+            Node::SymbolNode { .. } => Some(node.as_symbol_node()?.unescaped().to_vec()),
+            _ => bare_name(node),
+        },
+        Bound::Many(_) => None,
     }
 }
 
@@ -650,9 +688,7 @@ end
             "$SEL".to_string(),
             Constraint {
                 name: Some(vec!["select".into(), "find_all".into()]),
-                receiver_type: None,
-                kind: None,
-                subclasses: None,
+                ..Default::default()
             },
         );
         let scope = Scope::default();
@@ -683,10 +719,9 @@ end
         instances.insert(
             "$R".to_string(),
             Constraint {
-                name: None,
                 receiver_type: Some("Account".into()),
                 kind: Some(Kind::Instance),
-                subclasses: None,
+                ..Default::default()
             },
         );
         let scope = Scope::default();
@@ -701,10 +736,9 @@ end
         classes.insert(
             "$R".to_string(),
             Constraint {
-                name: None,
                 receiver_type: Some("Account".into()),
                 kind: Some(Kind::Class),
-                subclasses: None,
+                ..Default::default()
             },
         );
         let narrowed = hits
@@ -712,6 +746,37 @@ end
             .filter(|m| satisfies(m, &classes, &scope, &Hierarchy::default()))
             .count();
         assert_eq!(narrowed, 1, "only Account's class call, not Widget's");
+    }
+
+    /// `{foo: foo}` -> `{foo:}` turns on a symbol key and a variable read
+    /// naming the same identifier -- the same name across different node kinds,
+    /// which D16's AST equality cannot express.
+    #[test]
+    fn same_name_relates_two_captures() {
+        let prepared = prepare("{$K => $V}").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let src = "a = {:foo => foo}\nb = {:foo => bar}\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = hits_for("", src, &parsed, &prepared, &p_node);
+        assert_eq!(hits.len(), 2, "both match structurally");
+
+        let mut constraints = HashMap::new();
+        constraints.insert(
+            "$K".to_string(),
+            Constraint {
+                same_name_as: Some("$V".into()),
+                ..Default::default()
+            },
+        );
+        let scope = Scope::default();
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
+                .count(),
+            1,
+            "only the pair naming the same identifier"
+        );
     }
 
     /// D51: a rename must reach subclass call sites, or it ships a
@@ -738,6 +803,7 @@ end
                     receiver_type: Some("Account".into()),
                     kind: Some(Kind::Instance),
                     subclasses,
+                    ..Default::default()
                 },
             );
             c
@@ -775,10 +841,8 @@ end
         constraints.insert(
             "$R".to_string(),
             Constraint {
-                name: None,
                 receiver_type: Some("Account".into()),
-                kind: None,
-                subclasses: None,
+                ..Default::default()
             },
         );
         let scope = Scope::default();
@@ -807,10 +871,8 @@ end
         constraints.insert(
             "$R".to_string(),
             Constraint {
-                name: None,
                 receiver_type: Some("Account".into()),
-                kind: None,
-                subclasses: None,
+                ..Default::default()
             },
         );
         let scope = Scope::default();
@@ -844,6 +906,7 @@ end
                     receiver_type: Some("Account".into()),
                     kind,
                     subclasses: None,
+                    ..Default::default()
                 },
             );
             c
@@ -906,7 +969,7 @@ end
         let singleton = Scope {
             inside: Some("Account".into()),
             singleton: Some(true),
-            subclasses: None,
+            ..Default::default()
         };
         assert_eq!(
             hits.iter()
@@ -918,7 +981,7 @@ end
         let instance = Scope {
             inside: Some("Account".into()),
             singleton: Some(false),
-            subclasses: None,
+            ..Default::default()
         };
         assert_eq!(
             hits.iter()
@@ -943,8 +1006,7 @@ end
 
         let scope = Scope {
             inside: Some("Account".into()),
-            singleton: None,
-            subclasses: None,
+            ..Default::default()
         };
         let narrowed = hits
             .iter()
@@ -969,9 +1031,7 @@ end
             "$NOPE".to_string(),
             Constraint {
                 name: Some(vec!["x".into()]),
-                receiver_type: None,
-                kind: None,
-                subclasses: None,
+                ..Default::default()
             },
         );
         let scope = Scope::default();
@@ -979,6 +1039,23 @@ end
             hits.iter()
                 .all(|m| !satisfies(m, &constraints, &scope, &Hierarchy::default()))
         );
+    }
+
+    /// A metavariable in *label* position binds as a name, not a node -- the
+    /// key's source is `foo:` including the colon, which a node capture would
+    /// splice back in and produce `foo::`.
+    #[test]
+    fn a_label_key_binds_as_a_name() {
+        let prepared = prepare("{$K: $V}").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let src = "a = {foo: foo}\nb = {:bar => bar}\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = hits_for("", src, &parsed, &prepared, &p_node);
+        // One pattern covers both spellings: the rocket and the label parse to
+        // the same node, and spelling is opt-in rather than baked into equality.
+        assert_eq!(hits.len(), 2);
+        assert!(matches!(hits[0].env.get("K"), Some(Bound::Name(_))));
     }
 
     /// Nested matches are reported: find is observation (D15).

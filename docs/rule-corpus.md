@@ -189,8 +189,25 @@ non-anchored-insertion case that is genuinely out of reach.
 2. **Inter-node source inspection** — unblocks all three trailing-comma cops at once. Best
    ratio of rules-unblocked to predicate.
 3. **Multiline test** — trivial (compare start and end line), pairs with (2).
-4. **Cross-capture name equality** — unblocks one cop (`enforce_shorthand`), but it is the
-   author's stated favourite, so not last.
+4. ~~**Cross-capture name equality**~~ — **built.** `where: { $K: { same_name_as: $V } }`
+   relates two captures by identifier across node kinds, which D16's AST equality cannot
+   express. Hash shorthand works for a single-pair hash and covers **both spellings with one
+   pattern**, since the rocket and the label parse to the same node.
+
+## Known limitation: one pair inside a multi-pair hash
+
+`{$K: $V}` matches `{foo: foo}` and `{:bar => bar}`, but not the `name: name` inside
+`{name: name, other: thing}` -- the pattern requires the hash to have exactly one entry.
+
+Reaching one entry among several needs a sequence metavariable on either side, and Ruby
+spells that with a **double** splat in a hash (`{**$BEFORE, $K: $V, **$AFTER}`). The matcher
+recognises `SplatNode` as a sequence placeholder but not `AssocSplatNode`, and an attempt to
+add it did not work -- `splat_placeholder` still returns `None` for a prepared
+`{**rwr_mv_0}` whose child *is* an `AssocSplatNode`, for reasons not yet understood.
+
+Recorded rather than chased: the single-pair case is the common one, the failure is a clean
+non-match rather than a wrong rewrite, and the investigation had poor return against other
+work. The reproducing case is `matcher::tests` around `{**$REST}` matching `{a: 1, b: 2}`.
 
 **A note on direction.** Several of these cops are configurable and RuboCop's default may be
 the *opposite* of what is wanted — `Style/ReturnNil` is the clearest case. rwr rules encode a
