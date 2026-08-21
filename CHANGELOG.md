@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+**Residue reporting had two defects that a purpose-built testbed found immediately.** It was
+computed only for files rwr had already *changed*, so a file that is nothing but dynamic
+reaches — a serializer full of `delegate` and `validates` — was never looked at; and the
+report was scoped to the target class, which discards exactly those reaches, since a
+delegation lives in a different class from the method it names. Recall on the testbed went
+from 2 of 7 to **7 of 7** (Q1).
+
+**Residue now appears in `-j`/`-J` output.** It was text-only, so an agent — which the skill
+tells to use `-j` — got the edits with no account of what they missed.
+
+**Breaking: `-j` emits a document, not a list.** `check`/`rewrite` produce
+`{schema, rwr_version, changed, residue, templates_skipped}` and `find` produces
+`{schema, rwr_version, matches}`, where both previously produced a bare array. `schema` is
+2; 1 was the array. `-J` is unchanged — a row per line, since a stream and a document are
+different things.
+
+**Less noise in the report.** A symbol that is a hash key is not a method reach (57% of a
+15,587-entry report on discourse was keyword-argument keys), and neither is `attr_reader
+:name` in an unrelated class, which defines that class's own method.
+
+**Honest degradation on a common identifier.** A report too long to read says so and says
+where to start, instead of advising you to narrow a rule whose whole point is completeness.
+
 ## 0.3.0 — 2026-08-21
 
 **A rename across two classes now warns.** `Account#display_name` and `Company#display_name`
