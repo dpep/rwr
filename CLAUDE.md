@@ -50,6 +50,31 @@ echo 'export PATH="/opt/homebrew/opt/rustup/bin:$PATH"' >> ~/.bash_profile
 
 — or invoke directly, or pass `CARGO=` to any `make` target.
 
+## The Claude skill
+
+`claude/rwr-skill.md` is the source; `claude/INSTALL.md` explains both halves of
+an install. The skill teaches an agent to drive rwr, so it must describe the
+binary that actually shipped — a skill a release forgets misinforms every agent
+that reads it, silently, for a whole cycle.
+
+**It ships through the private marketplace, which is not where `release` looks.**
+`rq` and `gqls` live in `code@dpep`; rwr sits in `rwr@myclaude` until it has real
+mileage. The release script defaults `PLUGINS_REPO` to `~/code/lib/claude` and
+derives the destination as `plugins/code/skills/<name>/SKILL.md`, so a release
+needs:
+
+```sh
+PLUGINS_REPO=~/code/lib/myclaude \
+SKILL_DST=~/code/lib/myclaude/plugins/rwr/skills/rwr/SKILL.md \
+release <version>
+```
+
+`PLUGIN_MANIFEST` is *not* overridable — it is derived as
+`$PLUGINS_REPO/plugins/code/...`, which does not exist in myclaude — so the
+plugin's own version bump is manual until the skill moves. Bump it: `claude
+plugin update` compares versions rather than content, so a skill change that
+does not move the version reaches nobody.
+
 ## Repo layout
 
 Single crate; modules mirror the design. Keep it a single crate until there is a
@@ -65,6 +90,7 @@ rwr/
     rewrite/     ← action tree, effective_range, splicing
     residue/     ← name-scoped residue reporting
   rules/         ← the shipped rule pack, loaded as a directory (D54)
+  claude/        ← the Claude skill and its install doc
   docs/          ← design, decisions, open questions, research
   tests/         ← e2e over the built binary
 ```

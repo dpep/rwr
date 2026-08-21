@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+**A Claude skill**, at `claude/rwr-skill.md`, teaching an agent to drive rwr — the three
+verbs, metavariable syntax, the `where:` predicates, the built-in pack, and what each exit
+code means. `claude/INSTALL.md` covers installing it. It ships through the private
+`rwr@myclaude` plugin until the tool has real mileage.
+
 **`rwr-phase0` refuses instead of reporting a clean nothing.** An unrecognised option was
 taken as a path, and any path that was not a directory — a quoted `~` the shell never
 expanded, a typo, a file — was filtered away in silence. All three produced a valid-looking

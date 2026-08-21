@@ -143,6 +143,8 @@ discovers, reads, searches, parses the survivors and matches structurally in
 
 ## Documentation
 
+- [claude/INSTALL.md](claude/INSTALL.md) — installing the Claude skill, which
+  teaches an agent to drive rwr
 - [DESIGN.md](DESIGN.md) — what it is and how it works
 - [docs/decisions.md](docs/decisions.md) — every decision, and what would reverse it
 - [docs/phase0-conclusion.md](docs/phase0-conclusion.md) — whether this should exist, and the evidence
