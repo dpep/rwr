@@ -55,6 +55,10 @@ struct NameReport {
     distinct_shapes: usize,
 }
 
+/// One file's contribution: byte length, whether it failed to parse, and the
+/// calls it contained.
+type FileMeasurement = (u64, bool, Vec<(String, &'static str)>);
+
 fn shape(receiver: Option<Node<'_>>) -> &'static str {
     match receiver {
         None => "implicit",
@@ -94,7 +98,7 @@ fn measure(root: &Path) -> RepoReport {
         .collect();
 
     let start = Instant::now();
-    let per_file: Vec<(u64, bool, Vec<(String, &'static str)>)> = files
+    let per_file: Vec<FileMeasurement> = files
         .par_iter()
         .filter_map(|path| {
             let src = std::fs::read(path).ok()?;
@@ -138,7 +142,7 @@ fn measure(root: &Path) -> RepoReport {
             }
         })
         .collect();
-    hot.sort_by(|a, b| b.sites.cmp(&a.sites));
+    hot.sort_by_key(|n| std::cmp::Reverse(n.sites));
     hot.truncate(60);
 
     RepoReport {
