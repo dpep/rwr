@@ -269,6 +269,47 @@ fn emit_rows<T: Serialize>(out: Output, rows: &[T]) -> Option<ExitCode> {
     None
 }
 
+/// How many residue occurrences to list before summarising the rest.
+///
+/// A broad rule can leave thousands, and an unbounded list is not a report
+/// anyone reads. Counts by class stay exact; only the detail is capped.
+const RESIDUE_DETAIL_CAP: usize = 40;
+
+/// Print the account of what the rule could not see, grouped by class.
+///
+/// Grouping matters as much as the total: the classes mean different things.
+/// Symbols and strings are metaprogramming reaches -- genuine blind spots.
+/// Calls and definitions are usually a different method that happens to share
+/// the name, which only receiver resolution can rule out.
+fn report_residue(residues: &[Residue]) {
+    if residues.is_empty() {
+        return;
+    }
+    let count = |c: residue::Context| residues.iter().filter(|r| r.context == c).count();
+    eprintln!(
+        "\n{} occurrence(s) this rule could not account for \
+         ({} symbol, {} string, {} call, {} definition):",
+        residues.len(),
+        count(residue::Context::Symbol),
+        count(residue::Context::String),
+        count(residue::Context::Call),
+        count(residue::Context::Definition),
+    );
+    for r in residues.iter().take(RESIDUE_DETAIL_CAP) {
+        eprintln!(
+            "  {}:{}:{}: {:?}: {}",
+            r.file, r.line, r.col, r.context, r.text
+        );
+    }
+    if residues.len() > RESIDUE_DETAIL_CAP {
+        eprintln!(
+            "  ... and {} more. Narrow the rule with a `where:` receiver \
+             constraint to scope this report.",
+            residues.len() - RESIDUE_DETAIL_CAP
+        );
+    }
+}
+
 /// One structural match, as reported.
 /// An occurrence the rule could not account for, as reported.
 #[derive(Debug, Serialize)]
@@ -339,6 +380,13 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
             // The account of what the rule could not see (D7). Name-anchored
             // rules only: a pattern with no literal identifier has nothing to
             // track, and reports nothing.
+            // Deliberately *not* scoped to files containing a match. That
+            // heuristic was tried and removes the best signal: declarations
+            // like `attr_accessor :autoload_paths` and `def autoload_paths`
+            // live in files that declare rather than call, so they have no
+            // match to co-locate with. Correct scoping needs to know which
+            // class the anchor belongs to -- which is receiver resolution, and
+            // therefore Phase 2.
             let anchors = residue::anchors(&p_root, &prepared);
             if !anchors.is_empty() {
                 let matched: Vec<(usize, usize)> = hits
@@ -391,18 +439,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
             for f in &found {
                 println!("{}:{}:{}: {}", f.file, f.line, f.col, f.text);
             }
-            if !residues.is_empty() {
-                eprintln!(
-                    "\n{} occurrence(s) this rule could not account for:",
-                    residues.len()
-                );
-                for r in &residues {
-                    eprintln!(
-                        "  {}:{}:{}: {:?}: {}",
-                        r.file, r.line, r.col, r.context, r.text
-                    );
-                }
-            }
+            report_residue(&residues);
         }
         _ => {
             if emit_rows(out, &found).is_some() {

@@ -290,11 +290,35 @@ frequency. Measurement (b) supplies the input — `name` carries six receiver sh
 constant receivers, while a distinctive name is pinned by its receiver almost everywhere. The
 threshold should be *derived* from that rather than picked.
 
-`perform` is the instructive middle: 101 residue items against 15 matches, almost all
-implicit-self calls. Those are not noise — they are real call sites a receiver-qualified
-pattern genuinely missed — which suggests the report should **separate** "reachable but
-unmatched calls" from "the name appearing in metaprogramming", since only the second is a
-blind spot.
+### Breaking the noise down, and what it actually means
+
+The totals are not uniform noise. By class:
+
+| anchor | symbol | string | call | definition |
+|---|---:|---:|---:|---:|
+| `autoload_paths` | 3 | 1 | 3 | 1 |
+| `perform` | 10 | 1 | 12 | **78** |
+| `save` | 98 | 14 | 15 | 40 |
+| `name` | **3,609** | 485 | 317 | 136 |
+
+`perform`'s noise is 78 `def perform` across rails' job classes — *different methods that
+happen to share a name*. `name`'s is 3,609 `:name` symbols in unrelated DSL calls.
+
+**A scoping heuristic was tried and rejected.** Reporting residue only from files that also
+contain a match cut `perform` from 101 to 4 — but it also dropped
+`attr_accessor :autoload_paths` and `def autoload_paths`, because declarations live in files
+that *declare* rather than call and so have no match to co-locate with. That removed the
+highest-value signal to remove noise, which is the wrong trade.
+
+**The finding that matters: residue quality is bounded by receiver resolution.** Without
+knowing which class the anchor belongs to, no heuristic separates "the method being renamed"
+from "a different method with the same name." Residue and receiver narrowing are the same
+problem, which strengthens the case for Phase 2 rather than weakening it.
+
+**What shipped instead:** the report groups by class with exact counts, caps the detail at 40
+entries, and tells the caller how to fix it — narrow the rule with a `where:` receiver
+constraint. A broad rule leaving thousands of occurrences is not a defect in residue; it is a
+rule that is not a rename.
 
 ## Still outstanding
 
