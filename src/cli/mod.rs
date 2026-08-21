@@ -5,6 +5,7 @@
 //! agent which has learned one of these tools has learned the others.
 
 use crate::pattern::{matcher, prepare};
+use crate::residue;
 use crate::rewrite;
 use crate::rule;
 use crate::source;
@@ -269,6 +270,16 @@ fn emit_rows<T: Serialize>(out: Output, rows: &[T]) -> Option<ExitCode> {
 }
 
 /// One structural match, as reported.
+/// An occurrence the rule could not account for, as reported.
+#[derive(Debug, Serialize)]
+struct Residue {
+    file: String,
+    line: usize,
+    col: usize,
+    context: residue::Context,
+    text: String,
+}
+
 #[derive(Debug, Serialize)]
 struct Found {
     file: String,
@@ -301,6 +312,9 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
     scoped.extend(common.path.iter().cloned());
     let files = source::ruby_files(&scoped, common.include_vendored);
 
+    // Residue is collected across the parallel walk, so it needs a shared sink.
+    let residues: std::sync::Mutex<Vec<Residue>> = std::sync::Mutex::new(Vec::new());
+
     let mut found: Vec<Found> = files
         .par_iter()
         .flat_map_iter(|path| {
@@ -321,6 +335,34 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                 return Vec::new().into_iter();
             };
             let hits = matcher::search(&p_root, &parsed.node(), &prepared);
+
+            // The account of what the rule could not see (D7). Name-anchored
+            // rules only: a pattern with no literal identifier has nothing to
+            // track, and reports nothing.
+            let anchors = residue::anchors(&p_root, &prepared);
+            if !anchors.is_empty() {
+                let matched: Vec<(usize, usize)> = hits
+                    .iter()
+                    .map(|m| {
+                        let l = m.node.location();
+                        (l.start_offset(), l.end_offset())
+                    })
+                    .collect();
+                let extra = residue::find(&parsed.node(), &anchors, &matched, &src);
+                if let Ok(mut sink) = residues.lock() {
+                    sink.extend(extra.into_iter().map(|o| {
+                        let (line, col) = source::line_col(&src, o.byte_start);
+                        Residue {
+                            file: path.display().to_string(),
+                            line,
+                            col,
+                            context: o.context,
+                            text: source::line_at(&src, o.byte_start),
+                        }
+                    }));
+                }
+            }
+
             hits.iter()
                 .map(|m| {
                     let loc = m.node.location();
@@ -341,10 +383,25 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
 
     found.sort_by(|a, b| (&a.file, a.line, a.col).cmp(&(&b.file, b.line, b.col)));
 
+    let mut residues = residues.into_inner().unwrap_or_default();
+    residues.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+
     match out {
         Output::Text => {
             for f in &found {
                 println!("{}:{}:{}: {}", f.file, f.line, f.col, f.text);
+            }
+            if !residues.is_empty() {
+                eprintln!(
+                    "\n{} occurrence(s) this rule could not account for:",
+                    residues.len()
+                );
+                for r in &residues {
+                    eprintln!(
+                        "  {}:{}:{}: {:?}: {}",
+                        r.file, r.line, r.col, r.context, r.text
+                    );
+                }
             }
         }
         _ => {

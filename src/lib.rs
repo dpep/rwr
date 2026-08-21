@@ -7,6 +7,7 @@
 
 pub mod cli;
 pub(crate) mod pattern;
+#[allow(dead_code)]
 pub(crate) mod residue;
 pub(crate) mod rewrite;
 #[allow(dead_code)]
