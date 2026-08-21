@@ -1,0 +1,18 @@
+name: alphabetise literal array elements
+family: syntactic
+source: author's wanted-rules list
+notes: >
+  The hardest entry in the corpus and deliberately so. Sorting *moves* nodes, which is the
+  only transformation here that exercises all three of: D14 effective_range (a moved heredoc
+  must carry its body), D33 sequence transforms (sorting is computation a static template
+  cannot express), and D35 comment attachment (which comment travels with which element).
+  If this passes, the hard machinery works.
+predicates_required:
+  - D33 sequence transform (sort)
+  - D35 comment attachment
+  - D14 effective_range under movement
+competitors:
+  rg: inexpressible
+  comby: inexpressible - no computation in templates
+  ast-grep: inexpressible - no computation in templates
+  rubocop: inexpressible without a custom cop

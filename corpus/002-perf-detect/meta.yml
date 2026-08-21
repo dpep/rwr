@@ -1,0 +1,14 @@
+name: select { }.first -> detect { }
+family: syntactic
+source: author's wanted-rules list - rubocop-performance (Performance/Detect)
+notes: >
+  Pure method-chain rewrite, the best-fitting family in the wanted list. Also the first rule
+  needing method-name alternation: select and find_all are synonyms and a rule must match
+  both, as must first/detect pairings.
+predicates_required:
+  - method-name alternation (select | find_all)
+competitors:
+  rg: not expressible - the chain spans lines and nests
+  comby: expressible but brittle across formatting
+  ast-grep: expressible
+  rubocop: Performance/Detect

@@ -1,0 +1,6 @@
+# `$SEL` sits in method-name position, which only lexes because D18 substitutes
+# metavariables before Prism parses the pattern. The alternation constrains it.
+match: $RECEIVER.$SEL { |*$PARAMS| *$BODY }.first
+where:
+  $SEL: { name: [select, find_all] }
+rewrite: $RECEIVER.detect { |*$PARAMS| *$BODY }

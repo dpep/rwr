@@ -1,0 +1,11 @@
+name: return nil -> return
+family: syntactic
+source: author's wanted-rules list (docs/rule-corpus.md)
+notes: >
+  The design's canonical example, and the simplest thing that could possibly work.
+  If rwr cannot do this cleanly, nothing else matters.
+competitors:
+  rg: expressible but unsafe - matches in comments, strings, and heredoc bodies
+  comby: expressible
+  ast-grep: expressible
+  rubocop: Style/ReturnNil, but the cop enforces the opposite direction by default

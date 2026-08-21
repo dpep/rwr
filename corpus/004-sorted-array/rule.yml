@@ -1,0 +1,2 @@
+match: '[*$ITEMS]'
+rewrite: '[*$ITEMS.sort]'

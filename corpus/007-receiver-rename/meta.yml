@@ -1,0 +1,22 @@
+name: rename Account#display_name, narrowed by receiver
+family: semantic
+source: derived from the case studies' first finding - the commonest real migration shape
+notes: >
+  The semantic partition exists for this. A bare-name rename hits every `display_name` in the
+  repo; the point is to rewrite only those whose receiver is an Account. Ruby LSP's
+  ReferenceFinder does bare-name equality and would rewrite all of them, which is the
+  incumbent having exactly the disease rwr claims to cure.
+
+  Scoring this against ast-grep or Comby proves nothing - they definitionally cannot pass -
+  so semantic entries are scored separately and their failures must not count toward rwr's
+  survival.
+predicates_required:
+  - receiver type resolution (Phase 2)
+  - name-anchored residue reporting (D7 amended)
+competitors:
+  rg: inexpressible
+  comby: inexpressible
+  ast-grep: inexpressible - the FAQ disclaims scope and type analysis outright
+  rubocop: inexpressible - node_pattern has no notion of a receiver
+  ruby-lsp: partially - finds references by bare name only, no receiver narrowing, and does
+    not expose rename to agents

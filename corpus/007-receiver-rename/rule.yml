@@ -1,0 +1,4 @@
+match: $RECEIVER.display_name
+where:
+  $RECEIVER: { type: Account }
+rewrite: $RECEIVER.full_name
