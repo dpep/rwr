@@ -24,14 +24,7 @@ jobs:
       - name: cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: fmt
-        run: cargo fmt --check
-
-      - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: build
-        run: cargo build --all-targets
-
-      - name: test
-        run: cargo test
+      # The repo's own gate is the single definition of green -- CI runs the
+      # same command a human runs before pushing, so the two cannot drift.
+      - name: check
+        run: ./script/check.sh
