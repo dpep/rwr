@@ -600,3 +600,85 @@ work here that was never designed for it.
 | sorbet-uuid | 2 | 13 |
 | accord | 4 | **0** — all heredoc |
 | rubocop | 5 | **0** — all heredoc |
+
+## The monolith — **the corpus Phase 0 was designed around, finally measured**
+
+88,128 files, 396 MB, 9,774,343 call sites, 195,834 method definitions. Roughly ten times
+discourse by volume. Every public number in this document was a stand-in for this one.
+
+### D1 fidelity: **0 unparsed files of 88,128**
+
+Prism read 396 MB of proprietary Ruby without a single failure. The public corpora had shown
+zero across 5,499 application files; this is that claim at sixteen times the scale, on code
+written under no obligation to be parseable by anything but Ruby.
+
+### Measurement (d): 106 MB/s, and D5 holds
+
+3,745 ms to parse the entire monolith on 11 threads. A full parse of the largest codebase
+anyone has pointed at rwr takes under four seconds, which is the answer to "should Phase 1
+persist anything": no. There is no staleness worth managing to save four seconds.
+
+### Chained receivers: D61 confirmed, and its cheap half is cheaper here
+
+24.3% of call sites are chained — between mastodon's 25.8% and rails' 15.8%, so the shape is
+stable across codebases of wildly different size and ownership.
+
+| | monolith | discourse | rails |
+|---|---|---|---|
+| chained, of all calls | 24.3% | 27.4% | 15.8% |
+| …`X.new`, of chains | **0.8%** | 1.9% | 3.6% |
+| …inner call has no receiver | 72.3% | 62.8% | 27.2% |
+
+**The constructor case is smaller here than anywhere public.** D61 built it because it was
+free, not because it was large, and that judgement gets better with scale rather than worse.
+
+Return types from syntax alone: **8.8%** of definitions, against 2.3–4.5% publicly. Higher —
+this codebase writes more factory methods — and still far too low to build an index on.
+70% of methods still end in another call.
+
+### The finding that changes the picture: this monolith is Sorbet-typed
+
+| | |
+|---|---|
+| `sig` blocks | **148,052** |
+| against `def`s | 195,834 → **76% of methods carry a signature** |
+| `returns` + `void` | 149,193 — within 0.8% of the `sig` count, so essentially every signature is one or the other |
+| state a return type | **78%** |
+| `T.untyped` (all uses, an upper bound on unusable returns) | 26,452 |
+| **methods with a machine-readable return type** | **≥46%** |
+
+Against 8.8% from syntax, that is **5.2×**. D62 was designed and measured on graph_weaver's
+79 signatures and judged as "pure upside where present". Here it is present 148,052 times,
+and it converts the chained-receiver bucket from mostly-unreachable to mostly-reachable — on
+the one codebase the tool was built for.
+
+**And it exposed a shape D62 did not read.** `T::Struct` states a field's type in the
+declaration itself, with no `sig` anywhere: `const :name, String`. 45,068 sites, a third
+again as many as this codebase's `sig` blocks. Now read, which also found 43 more signatures
+in graph_weaver (79 → 122).
+
+### Measurement (b): D20 was right, and here are the names
+
+`hot_names` ranks by frequency, but the number that predicts damage is receiver-shape
+diversity:
+
+| name | sites | distinct receiver shapes | implicit |
+|---|---|---|---|
+| `id` | 197,067 | **15** | 1% |
+| `uuid` | 78,277 | **14** | 2% |
+| `company` | 171,406 | 12 | 86% |
+| `employee` | 46,243 | 13 | 86% |
+| `expect` | 549,459 | 2 | 99% |
+
+`expect` is the most frequent call in the codebase and among the safest to rename — it is one
+thing in one place. `id` is a third as frequent and reaches fifteen different kinds of
+receiver. Frequency ranks the wrong thing, which is exactly what D20 amended itself to say.
+
+### Spec DSL, at monolith scale
+
+`expect(...)` is 549,453 of 2,378,428 chained receivers — **23.1%**, against 24.8% on
+discourse and 19.9% on mastodon. D61's third finding was not an artefact of two open-source
+Rails apps; roughly a quarter of every chained receiver in Ruby is an RSpec matcher.
+
+11,148 names were omitted from `hot_names` by its cap, so 11,208 distinct identifiers have
+25 or more call sites.
