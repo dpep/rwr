@@ -233,8 +233,8 @@ fn the_shipped_pack_names_the_rule_that_fired() {
         "--unsafe",
     ]);
     let text = String::from_utf8_lossy(&out.stdout);
-    let rows: serde_json::Value = serde_json::from_str(&text).expect("json");
-    let rules = &rows[0]["rules"];
+    let report: serde_json::Value = serde_json::from_str(&text).expect("json");
+    let rules = &report[0]["changed"][0]["rules"];
     let named: Vec<&str> = rules
         .as_array()
         .expect("rules array")
@@ -267,8 +267,8 @@ fn a_site_counts_once_however_many_edits_it_takes() {
         "-j",
     ]);
     let text = String::from_utf8_lossy(&out.stdout);
-    let rows: serde_json::Value = serde_json::from_str(&text).expect("json");
-    assert_eq!(rows[0]["sites"], 1, "{text}");
+    let report: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(report[0]["changed"][0]["sites"], 1, "{text}");
 }
 
 /// A rule held back for being unsafe must not look like a rule that found

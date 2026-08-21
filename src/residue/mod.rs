@@ -42,6 +42,21 @@ pub(crate) struct Occurrence {
     /// Enclosing class and module names, outermost first.
     #[serde(skip)]
     pub scope: Vec<String>,
+    /// Whether this is a call with no explicit receiver.
+    ///
+    /// An implicit-self call dispatches on its *enclosing* class, which lexical
+    /// scope already tells us -- so `Company#banner` calling its own `name` is
+    /// not a reach for a rename of `User#name`, and reporting it is noise a
+    /// scoped report can drop outright.
+    #[serde(skip)]
+    pub implicit: bool,
+    /// The call this occurrence is an argument to, if any.
+    ///
+    /// What decides whether a symbol is a *reach*. `delegate :display_name` and
+    /// `validates :display_name` hand a method name to something that will
+    /// dispatch on it; a bare `:display_name` in an unrelated array does not.
+    #[serde(skip)]
+    pub via: Option<String>,
 }
 
 /// The class or module a node introduces, if any.
@@ -54,6 +69,21 @@ fn scope_name(node: &Node<'_>) -> Option<String> {
     String::from_utf8(name).ok()
 }
 
+/// Calls whose symbol argument *defines* a method on the enclosing class rather
+/// than referring to one defined elsewhere.
+///
+/// The distinction decides whether a symbol in some other class is a reach.
+/// `delegate :display_name, to: :account` forwards to an Account and breaks
+/// when Account's method is renamed; `attr_reader :display_name` in a Widget
+/// makes Widget's own method and is untouched by it.
+const DEFINERS: &[&str] = &[
+    "attr_reader",
+    "attr_accessor",
+    "attr_writer",
+    "define_method",
+    "alias_method",
+];
+
 /// Narrow a report to what a class-anchored rule could plausibly be about.
 ///
 /// This is the payoff of receiver narrowing: the reason an unscoped report
@@ -62,10 +92,38 @@ fn scope_name(node: &Node<'_>) -> Option<String> {
 /// things remain interesting -- anything inside that class, and any call whose
 /// receiver could not be resolved, since those are exactly the sites narrowing
 /// silently declined to rewrite.
-pub(crate) fn scoped_to(occurrences: Vec<Occurrence>, class: &str) -> Vec<Occurrence> {
+pub(crate) fn scoped_to(
+    occurrences: Vec<Occurrence>,
+    class: &str,
+    hierarchy: &crate::hierarchy::Hierarchy,
+) -> Vec<Occurrence> {
     occurrences
         .into_iter()
-        .filter(|o| o.scope.iter().any(|s| s == class) || o.context == Context::Call)
+        .filter(|o| {
+            // An implicit-self call inside a class that is neither the target
+            // nor one of its descendants cannot be the target method: lexical
+            // scope has already named the receiver.
+            if o.context == Context::Call
+                && o.implicit
+                && let Some(enclosing) = o.scope.last()
+                && enclosing != class
+                && !hierarchy.descends_from(enclosing, class)
+            {
+                return false;
+            }
+            o.scope.iter().any(|s| s == class)
+                || o.context == Context::Call
+                // A symbol handed to a call is a reach wherever it lives, and
+                // scoping it away lost the whole Rails metaprogramming
+                // category: `delegate`, `validates` and `attribute` sit in a
+                // *different* class from the one they name, by construction.
+                // Measured on the testbed: recall went from 2 of 7 to 7 of 7.
+                //
+                // Except where the call *defines* a method rather than
+                // referring to one. `attr_reader :name` in an unrelated class
+                // creates that class's own `name`; it does not reach this one.
+                || o.via.as_deref().is_some_and(|call| !DEFINERS.contains(&call))
+        })
         .collect()
 }
 
@@ -132,11 +190,13 @@ pub(crate) fn find(
     let mut out = Vec::new();
     // Depth-paired stack so each occurrence carries the lexical scope it sits
     // in, which is what lets a class-anchored rule scope its own report.
-    let mut stack: Vec<(Node<'_>, Vec<String>)> = vec![(generated::dup(root), Vec::new())];
-    while let Some((node, here)) = stack.pop() {
+    let mut stack: Vec<(Node<'_>, Vec<String>, Option<String>)> =
+        vec![(generated::dup(root), Vec::new(), None)];
+    while let Some((node, here, via)) = stack.pop() {
         let loc = node.location();
         let (start, end) = (loc.start_offset(), loc.end_offset());
 
+        let mut implicit_self = false;
         let context = match &node {
             Node::SymbolNode { .. } => node
                 .as_symbol_node()
@@ -151,9 +211,12 @@ pub(crate) fn find(
             Node::CallNode { .. } => node
                 .as_call_node()
                 .filter(|c| c.message_loc().is_some())
-                .map(|c| c.name().as_slice().to_vec())
-                .filter(|v| anchors.contains(v))
-                .map(|_| Context::Call),
+                .map(|c| (c.name().as_slice().to_vec(), c.receiver().is_none()))
+                .filter(|(v, _)| anchors.contains(v))
+                .map(|(_, implicit)| {
+                    implicit_self = implicit;
+                    Context::Call
+                }),
             Node::DefNode { .. } => node
                 .as_def_node()
                 .map(|d| d.name().as_slice().to_vec())
@@ -170,6 +233,8 @@ pub(crate) fn find(
                 byte_start: start,
                 byte_end: end.min(source.len()),
                 scope: here.clone(),
+                implicit: implicit_self,
+                via: via.clone(),
             });
         }
 
@@ -177,11 +242,44 @@ pub(crate) fn find(
         if let Some(name) = scope_name(&node) {
             inner.push(name);
         }
-        stack.extend(
-            generated::children(&node)
-                .into_iter()
-                .map(|c| (c, inner.clone())),
-        );
+        // A call re-labels its argument subtrees with its own name, and clears
+        // the label everywhere else -- a receiver or a block body is not an
+        // argument. Identified by span, since the children accessor is generic.
+        let arguments = node.as_call_node().and_then(|c| c.arguments()).map(|a| {
+            let name = String::from_utf8_lossy(
+                node.as_call_node().map_or(&[][..], |c| c.name().as_slice()),
+            )
+            .into_owned();
+            (a.location().start_offset(), a.location().end_offset(), name)
+        });
+        // A hash key names a parameter, not a method to dispatch on. Without
+        // this, every `render json: { name: x }` in the corpus counted as a
+        // reach for a rename of `name` -- 57% of a 15,587-entry report on
+        // discourse was keyword keys.
+        let key_span = node
+            .as_assoc_node()
+            .map(|a| a.key().location())
+            .map(|l| (l.start_offset(), l.end_offset()));
+
+        for child in generated::children(&node) {
+            if let Some((start, end)) = key_span {
+                let loc = child.location();
+                if loc.start_offset() == start && loc.end_offset() == end {
+                    stack.push((child, inner.clone(), None));
+                    continue;
+                }
+            }
+            let child_via = match &arguments {
+                Some((start, end, name)) => {
+                    let loc = child.location();
+                    (loc.start_offset() >= *start && loc.end_offset() <= *end).then(|| name.clone())
+                }
+                // Not a call: whatever label we arrived with still applies, so a
+                // symbol nested in an array inside `delegate(...)` keeps it.
+                None => via.clone(),
+            };
+            stack.push((child, inner.clone(), child_via));
+        }
     }
     out.sort_by_key(|o| o.byte_start);
     out
@@ -256,7 +354,7 @@ mod tests {
         let widget_symbol = all.iter().filter(|o| o.context == Context::Symbol).count();
         assert_eq!(widget_symbol, 1, "unscoped report includes Widget's symbol");
 
-        let scoped = scoped_to(all, "Account");
+        let scoped = scoped_to(all, "Account", &crate::hierarchy::Hierarchy::default());
         assert!(
             scoped.iter().all(|o| o.context != Context::Symbol),
             "Widget's symbol should fall away"

@@ -1,0 +1,4 @@
+# GT:blind -- a method name in configuration. Not Ruby, not searched, and
+# rwr makes no claim about it.
+account:
+  label_method: display_name

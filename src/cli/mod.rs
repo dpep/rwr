@@ -460,12 +460,43 @@ fn report_residue(residues: &[Residue], templates: usize) {
         );
     }
     if residues.len() > RESIDUE_DETAIL_CAP {
+        eprintln!("  ... and {} more.", residues.len() - RESIDUE_DETAIL_CAP);
+        degradation(residues);
+    }
+}
+
+/// Say plainly that an account this long is not a reviewable one, and where to
+/// start with it.
+///
+/// The old message advised narrowing the rule, which is wrong for the case that
+/// produces these volumes: a rename wants *completeness*, so narrowing it would
+/// make it miss sites. Q1 asks whether this degradation is honest-and-useful or
+/// a polite failure, and "here are 8,074 more, try scoping" was the latter.
+fn degradation(residues: &[Residue]) {
+    let count = |c: residue::Context| residues.iter().filter(|r| r.context == c).count();
+    let (calls, symbols) = (
+        count(residue::Context::Call),
+        count(residue::Context::Symbol),
+    );
+
+    eprintln!(
+        "\n  This identifier is too common here for that account to be reviewed \
+         one line at a time. Where to start:"
+    );
+    if symbols > 0 {
         eprintln!(
-            "  ... and {} more. Narrow the rule with a `where:` receiver \
-             constraint to scope this report.",
-            residues.len() - RESIDUE_DETAIL_CAP
+            "    - {symbols} symbol(s): a method name handed to something that will \
+             dispatch on it. These are the ones that break -- read them first."
         );
     }
+    if calls > 0 {
+        eprintln!(
+            "    - {calls} call(s): the receiver did not resolve, so most of these \
+             are probably other classes' methods that share the name. A Sorbet \
+             `sig` on what they chain through would resolve them (D62)."
+        );
+    }
+    eprintln!("    - `-j` emits all of them, to filter by context or path.");
 }
 
 /// One structural match, as reported.
@@ -609,7 +640,11 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                 // receiver narrowing, since an unscoped report's bulk is
                 // unrelated classes sharing an identifier.
                 let extra = match class_anchor {
-                    Some(class) => residue::scoped_to(extra, class),
+                    // `find` takes a bare pattern, so it never has a class to
+                    // scope by and never builds a hierarchy.
+                    Some(class) => {
+                        residue::scoped_to(extra, class, &crate::hierarchy::Hierarchy::default())
+                    }
                     None => extra,
                 };
                 if let Ok(mut sink) = residues.lock() {
@@ -693,6 +728,21 @@ struct Changed {
     /// unchanged.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     rules: Vec<RuleHits>,
+}
+
+/// Everything a `check` or `rewrite` run has to say, for machine consumers.
+///
+/// A single object rather than a bare array of changes: the changes alone are
+/// only half the answer, and the half that shipped without the other was the
+/// half that flatters the tool.
+#[derive(Debug, Serialize)]
+struct Report<'a> {
+    changed: &'a [Changed],
+    /// Occurrences the rule could not account for. Present and empty when the
+    /// rule is name-anchored and found none; absent means it made no claim.
+    residue: &'a [Residue],
+    /// Template files not searched, since they embed Ruby rwr does not read.
+    templates_skipped: usize,
 }
 
 /// One rule's share of a file's edits.
@@ -1089,14 +1139,16 @@ fn cmd_apply(
                 }
             }
 
-            if total == 0 {
-                return None;
-            }
-
-            // What the rule set could not account for (D7). Reported against
-            // the *rewritten* source, so an occurrence a rule already handled
-            // is not counted twice -- and so a subclass call site left behind
-            // by a rename is visible rather than silently broken.
+            // Residue is computed whether or not this file changed. It used to
+            // sit behind an early return for `total == 0`, so a file containing
+            // *only* dynamic reaches -- a serializer full of `delegate` and
+            // `validates`, which is the dangerous case exactly -- was never
+            // looked at. Measured on the testbed: recall 4 of 7 to 7 of 7.
+            //
+            // Reported against the *rewritten* source, so an occurrence a rule
+            // already handled is not counted twice -- and so a subclass call
+            // site left behind by a rename is visible rather than silently
+            // broken.
             let residue = {
                 let parsed = ruby_prism::parse(&current);
                 let mut found = Vec::new();
@@ -1112,7 +1164,7 @@ fn cmd_apply(
                     }
                     let mut occurrences = residue::find(&parsed.node(), &anchors, &[], &current);
                     if let Some(class) = &class_anchor {
-                        occurrences = residue::scoped_to(occurrences, class);
+                        occurrences = residue::scoped_to(occurrences, class, &hierarchy);
                     }
                     found.extend(occurrences.into_iter().map(|o| {
                         let (line, col) = source::line_col(&current, o.byte_start);
@@ -1130,12 +1182,18 @@ fn cmd_apply(
                 found
             };
 
+            if total == 0 && residue.is_empty() {
+                return None;
+            }
+
             Some(Outcome {
                 file,
                 sites: total,
                 spread,
                 by_rule,
-                rewritten: Some(String::from_utf8_lossy(&current).into_owned()),
+                // Nothing to write when nothing changed, so the write path
+                // skips a file that only contributed residue.
+                rewritten: (total > 0).then(|| String::from_utf8_lossy(&current).into_owned()),
                 refusal: None,
                 residue,
                 deferred,
@@ -1160,6 +1218,10 @@ fn cmd_apply(
         {
             eprintln!("rwr: cannot write {}: {e}", outcome.file);
             return Exit::Error.into();
+        }
+        // A file that only contributed residue is not a changed file.
+        if outcome.sites == 0 {
+            continue;
         }
         changed.push(Changed {
             file: outcome.file.clone(),
@@ -1203,7 +1265,15 @@ fn cmd_apply(
             report_residue(&left_over, if claims_completeness { templates } else { 0 });
         }
         _ => {
-            if emit_rows(out, &changed).is_some() {
+            // Residue is the product, not a diagnostic, so it cannot be text-only:
+            // an agent runs `-j` and was getting the edits with no account of what
+            // they missed at all (D7, principle 3).
+            let report = Report {
+                changed: &changed,
+                residue: &left_over,
+                templates_skipped: if claims_completeness { templates } else { 0 },
+            };
+            if emit_rows(out, std::slice::from_ref(&report)).is_some() {
                 return Exit::Error.into();
             }
         }

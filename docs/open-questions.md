@@ -5,22 +5,6 @@ survey and recorded as decisions; kept here with their resolutions for continuit
 
 ---
 
-## Q1 — Does residue reporting hit its pass bar? *(highest risk — the thesis)*
-
-Reformulated from "can we report dynamic-dispatch reachability" (intractable) to
-**name-scoped residue reporting** (D7 amended, DESIGN.md §4). The reformulation is lexical
-plus AST context and needs no dataflow, so it is clearly *implementable* — what is unproven
-is whether it is *useful*.
-
-Unvalidated: whether the classified residue for a real rename is reviewable rather than
-screen-filling, and whether the "identifier too common, not enumerated" degradation is
-honest-and-useful or just a polite failure.
-
-**Now scheduled as Phase 0 measurement (a)**, with a concrete pass bar: 3 real monolith
-renames with hand-enumerated ground truth; residue reporting must catch the dynamic reaches
-a human found. If it fails and ast-grep passes the syntactic partition, the honest outcome
-is to contribute upstream and stop.
-
 ## Q7 — Perf targets are unfalsifiable until Phase 0
 
 No latency numbers are set because none are measured. Phase 0 must produce cold parse (both
@@ -250,3 +234,57 @@ residue report's `Definition` entries remain the other tell, and they need no re
 the name being renamed*, which is purely syntactic and would fire regardless of whether any
 receiver resolves. That is strictly higher reach than what shipped, and the reason it did not
 ship here is cost — it wants an index pass of its own — not doubt about its value.
+
+## Q1 — Does residue reporting hit its pass bar? — **closed: yes on recall, conditionally on noise**
+
+Measured in two halves, because one instrument cannot do both jobs.
+
+### Recall — measured on `testbed/`, and it found two real defects
+
+A purpose-built Ruby app where every site carries a `GT:` marker, written from the *Ruby*
+side: enumerate how Ruby reaches a method name — `send`, `respond_to?`, `alias_method`,
+`Symbol#to_proc`, `delegate`, `validates`, a serializer DSL, a subclass override,
+interpolation, ERB, YAML — not how rwr classifies them.
+
+**First run: 2 of 7 dynamic reaches reported.** The two defects:
+
+- **Residue was computed only for files rwr had already changed.** A file that is nothing
+  but dynamic reaches — a serializer full of `delegate` and `validates`, which is the
+  dangerous case exactly — was never looked at.
+- **The report was scoped to the target class**, which discards those same reaches: a
+  delegation lives in a *different* class from the method it names, by construction.
+
+**Now 7 of 7, with one budgeted false positive** — a string literal equal to the method
+name, indistinguishable from `send("display_name")` without running the program. Pinned by
+`tests/testbed.rs`.
+
+Two further precision fixes came out of the same work: a symbol that is a *hash key* is not
+a reach (57% of a 15,587-entry report on discourse was keyword-argument keys), and a call
+that *defines* a method — `attr_reader :name` in an unrelated class — is not a reach for
+another class's method of the same name.
+
+### Noise — measured on discourse, and it depends entirely on how common the name is
+
+| rename | sites rewritten | residue |
+|---|---|---|
+| `Post#cook` | 0 | 608 |
+| `Topic#save` | 2 | 544 |
+| `Topic#slug` | 3 | 1,364 |
+| `User#name` | 8 | **8,114** |
+
+**A distinctive name is reviewable; a common one is not**, and no amount of filtering
+changes that: 5,293 of `User#name`'s 8,114 are calls whose receiver did not resolve, which
+D61 measured as irreducible without a type source.
+
+So D20's warning was right and the pass bar is met **conditionally**. What makes the
+degradation honest rather than polite is that the tool now says so, and says where to start:
+symbols first, because those are the ones that break; calls are mostly other classes'
+methods; `-j` for machine filtering. The old message advised narrowing the rule, which is
+wrong for the case that produces these volumes — a rename wants completeness, so narrowing
+it would make it miss sites.
+
+### What this settles
+
+Residue reporting is worth its place in the product, and it is **not** worth trusting as a
+completeness guarantee on a common identifier. Both halves of that need saying, and the tool
+now says both.
