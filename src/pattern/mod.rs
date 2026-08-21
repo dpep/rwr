@@ -19,3 +19,12 @@ pub(crate) mod prepare;
 
 #[allow(dead_code)]
 pub(crate) mod schema;
+
+#[allow(dead_code)]
+pub(crate) mod compare;
+
+#[allow(dead_code)]
+pub(crate) mod generated;
+
+#[allow(dead_code)]
+pub(crate) mod matcher;

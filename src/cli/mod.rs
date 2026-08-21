@@ -4,7 +4,11 @@
 //! `docs/cli-conventions.md`. Conventions are inherited from `rq` so that an
 //! agent which has learned one of these tools has learned the others.
 
+use crate::pattern::{matcher, prepare};
+use crate::source;
 use clap::{Args, Parser, Subcommand};
+use rayon::prelude::*;
+use serde::Serialize;
 use std::process::ExitCode;
 
 /// Process exit status.
@@ -221,9 +225,129 @@ pub fn run() -> ExitCode {
     };
 
     match command {
-        Command::Find { .. } => not_yet("find", out),
+        Command::Find { pattern, paths } => cmd_find(&pattern, &paths, &cli.common, out),
         Command::Check { .. } => not_yet("check", out),
         Command::Rewrite { .. } => not_yet("rewrite", out),
+    }
+}
+
+/// Emit a row set: `--json` one pretty array, `--ndjson` one compact object
+/// per line (D23). Returns `Some(exit)` only on a serialisation failure.
+fn emit_rows<T: Serialize>(out: Output, rows: &[T]) -> Option<ExitCode> {
+    match out {
+        Output::Json => match serde_json::to_string_pretty(rows) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("rwr: {e}");
+                return Some(Exit::Error.into());
+            }
+        },
+        Output::Ndjson => {
+            for row in rows {
+                match serde_json::to_string(row) {
+                    Ok(line) => println!("{line}"),
+                    Err(e) => {
+                        eprintln!("rwr: {e}");
+                        return Some(Exit::Error.into());
+                    }
+                }
+            }
+        }
+        Output::Text => {}
+    }
+    None
+}
+
+/// One structural match, as reported.
+#[derive(Debug, Serialize)]
+struct Found {
+    file: String,
+    line: usize,
+    col: usize,
+    byte_start: usize,
+    byte_end: usize,
+    text: String,
+}
+
+fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> ExitCode {
+    let prepared = match prepare::prepare(pattern) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("rwr: {e}");
+            return Exit::PatternError.into();
+        }
+    };
+
+    // Validate the pattern once, up front, for a clean error message.
+    {
+        let parsed = ruby_prism::parse(prepared.source.as_bytes());
+        if matcher::pattern_root(&parsed.node()).is_none() {
+            eprintln!("rwr: a pattern must be a single expression");
+            return Exit::PatternError.into();
+        }
+    }
+
+    let mut scoped: Vec<String> = paths.to_vec();
+    scoped.extend(common.path.iter().cloned());
+    let files = source::ruby_files(&scoped, common.include_vendored);
+
+    let mut found: Vec<Found> = files
+        .par_iter()
+        .flat_map_iter(|path| {
+            let Ok(src) = std::fs::read(path) else {
+                return Vec::new().into_iter();
+            };
+            let parsed = ruby_prism::parse(&src);
+            // An unparseable file is reported and skipped, never guessed at.
+            if parsed.errors().count() > 0 {
+                return Vec::new().into_iter();
+            }
+            // Prism nodes are not Sync, so the pattern tree cannot be shared
+            // across threads. Reparsing it per file costs microseconds against
+            // a file parse and keeps the walk parallel.
+            let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+            let p_node = p_parsed.node();
+            let Some(p_root) = matcher::pattern_root(&p_node) else {
+                return Vec::new().into_iter();
+            };
+            let hits = matcher::search(&p_root, &parsed.node(), &prepared);
+            hits.iter()
+                .map(|m| {
+                    let loc = m.node.location();
+                    let (line, col) = source::line_col(&src, loc.start_offset());
+                    Found {
+                        file: path.display().to_string(),
+                        line,
+                        col,
+                        byte_start: loc.start_offset(),
+                        byte_end: loc.end_offset(),
+                        text: source::line_at(&src, loc.start_offset()),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+        })
+        .collect();
+
+    found.sort_by(|a, b| (&a.file, a.line, a.col).cmp(&(&b.file, b.line, b.col)));
+
+    match out {
+        Output::Text => {
+            for f in &found {
+                println!("{}:{}:{}: {}", f.file, f.line, f.col, f.text);
+            }
+        }
+        _ => {
+            if emit_rows(out, &found).is_some() {
+                return Exit::Error.into();
+            }
+        }
+    }
+
+    if found.is_empty() {
+        Exit::Negative.into()
+    } else {
+        Exit::Ok.into()
     }
 }
 

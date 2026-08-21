@@ -16,23 +16,57 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// A temp directory holding one Ruby file.
+fn fixture(source: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("fixture.rb"), source).expect("write fixture");
+    dir
+}
+
+/// The shorthand really searches: one argument routes to `find` and reports
+/// structural matches, not a stub.
 #[test]
 fn bare_pattern_is_shorthand_for_find() {
-    let out = rwr(&["foo($A, $B)"]);
-    assert!(stderr(&out).contains("find"), "{}", stderr(&out));
+    let dir = fixture("def a\n  return nil if x\n  # return nil\n  s = \"return nil\"\nend\n");
+    let out = rwr(&["return nil", dir.path().to_str().expect("utf8")]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        text.lines().count(),
+        1,
+        "comment and string literal are not code: {text}"
+    );
+}
+
+/// Exit 1 means "no match" and is a clean result, not an error.
+#[test]
+fn no_match_exits_one() {
+    let dir = fixture("def a\n  1\nend\n");
+    let out = rwr(&["return nil", dir.path().to_str().expect("utf8")]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+}
+
+/// A pattern that is not valid Ruby gets its own code, distinct from an I/O or
+/// internal failure -- the caller must fix the rule, not the invocation.
+#[test]
+fn unparseable_pattern_exits_three() {
+    let out = rwr(&["def foo("]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
 }
 
 /// Trailing positionals are paths, rg-style, and must not be mistaken for a
-/// replacement — which is why the replacement is a flag (D31). If this ever
-/// routes to `check`, the argument grammar has become ambiguous.
+/// replacement -- which is why the replacement is a flag (D31). Scoping to a
+/// directory without matches must find nothing.
 #[test]
 fn trailing_positionals_scope_the_search() {
-    let err = stderr(&rwr(&["foo($A)", "app/models", "lib/tasks/thing.rb"]));
-    assert!(err.contains("find"), "{err}");
-    assert!(
-        !err.contains("check"),
-        "a path was read as a replacement: {err}"
-    );
+    let has = fixture("def a\n  return nil\nend\n");
+    let hasnt = fixture("def a\n  1\nend\n");
+
+    let hit = rwr(&["return nil", has.path().to_str().expect("utf8")]);
+    assert_eq!(hit.status.code(), Some(0), "{}", stderr(&hit));
+
+    let miss = rwr(&["return nil", hasnt.path().to_str().expect("utf8")]);
+    assert_eq!(miss.status.code(), Some(1), "{}", stderr(&miss));
 }
 
 /// The safety property behind D30: the shorthand is read-only *by
