@@ -53,6 +53,9 @@ pub(crate) struct Match<'pr> {
     /// (b) found 43.5% of rails call sites are implicit self, and knowing which
     /// class you are inside needs no type inference at all.
     pub scope: Vec<String>,
+    /// Whether the match sits in a singleton context -- inside `def self.x` or
+    /// `class << self` -- which decides what `self` denotes.
+    pub singleton: bool,
     /// Local variables whose class is known from an assignment in scope.
     ///
     /// Locals are 17.9% of rails call receivers -- the second-largest bucket --
@@ -316,17 +319,53 @@ pub(crate) fn satisfies(
                 return false;
             };
             // Unresolved means "not known to be this type", never "assume yes".
-            let resolved = resolve_type(node, &found.scope).or_else(|| {
+            let resolved = resolve_type(node, &found.scope, found.singleton).or_else(|| {
                 bare_name(node)
                     .and_then(|n| String::from_utf8(n).ok())
                     .and_then(|n| found.locals.get(&n).cloned())
+                    .map(Receiver::Instance)
             });
-            if resolved.as_deref() != Some(wanted.as_str()) {
+            let Some(resolved) = resolved else {
+                return false;
+            };
+            if resolved.class_name() != wanted.as_str() {
+                return false;
+            }
+            // `Account.foo` and `account.foo` are different methods, so a
+            // constraint must say which it means. Instance is the default,
+            // matching Ruby's `Account#foo`.
+            if resolved.is_instance() != constraint.wants_instance() {
                 return false;
             }
         }
         true
     })
+}
+
+/// Whether a receiver is the class object or an instance of it.
+///
+/// `Account.display_name` and `account.display_name` name **different
+/// methods**. Collapsing them to "Account" made a rename of one rewrite the
+/// other -- a silent wrong edit, which is the failure the whole design exists
+/// to prevent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Receiver {
+    /// An instance, as in `Account#display_name`.
+    Instance(String),
+    /// The class object itself, as in `Account.display_name`.
+    Class(String),
+}
+
+impl Receiver {
+    pub(crate) fn class_name(&self) -> &str {
+        match self {
+            Receiver::Instance(n) | Receiver::Class(n) => n,
+        }
+    }
+
+    pub(crate) fn is_instance(&self) -> bool {
+        matches!(self, Receiver::Instance(_))
+    }
 }
 
 /// The class a receiver node denotes, where syntax alone can tell.
@@ -335,19 +374,28 @@ pub(crate) fn satisfies(
 /// explicit self (0.8%) -- and returns `None` for locals, ivars and chains
 /// (39.4%), which need inference this does not yet do. `None` narrows the match
 /// away rather than admitting it, so the constraint is always conservative.
-pub(crate) fn resolve_type(node: &Node<'_>, scope: &[String]) -> Option<String> {
+pub(crate) fn resolve_type(node: &Node<'_>, scope: &[String], singleton: bool) -> Option<Receiver> {
     match node {
+        // A bare constant names the class *object*, so a call on it dispatches
+        // to a singleton method.
         Node::ConstantReadNode { .. } => {
             let name = node.as_constant_read_node()?.name().as_slice().to_vec();
-            String::from_utf8(name).ok()
+            String::from_utf8(name).ok().map(Receiver::Class)
         }
         Node::ConstantPathNode { .. } => {
             // `A::B` denotes B; the path is how you reach it, not what it is.
-            let path = node.as_constant_path_node()?;
-            let name = path.name()?.as_slice().to_vec();
-            String::from_utf8(name).ok()
+            let name = node.as_constant_path_node()?.name()?.as_slice().to_vec();
+            String::from_utf8(name).ok().map(Receiver::Class)
         }
-        Node::SelfNode { .. } => scope.last().cloned(),
+        // `self` is the class inside `def self.x` or `class << self`, and an
+        // instance inside an ordinary method body.
+        Node::SelfNode { .. } => scope.last().cloned().map(|n| {
+            if singleton {
+                Receiver::Class(n)
+            } else {
+                Receiver::Instance(n)
+            }
+        }),
         _ => None,
     }
 }
@@ -375,7 +423,15 @@ pub(crate) fn search<'pr>(
     let mut out = Vec::new();
     let mut scope = Vec::new();
     let mut locals = HashMap::new();
-    walk(pattern, target, prepared, &mut scope, &mut locals, &mut out);
+    walk(
+        pattern,
+        target,
+        prepared,
+        &mut scope,
+        &mut locals,
+        false,
+        &mut out,
+    );
     out
 }
 
@@ -386,9 +442,10 @@ fn assigned_class(node: &Node<'_>) -> Option<(String, String)> {
     if call.name().as_slice() != b"new" {
         return None;
     }
-    let class = resolve_type(&call.receiver()?, &[])?;
+    // `X.new` yields an *instance*, whatever the receiver's own kind was.
+    let class = resolve_type(&call.receiver()?, &[], false)?;
     let name = String::from_utf8(write.name().as_slice().to_vec()).ok()?;
-    Some((name, class))
+    Some((name, class.class_name().to_string()))
 }
 
 fn walk<'pr>(
@@ -397,6 +454,7 @@ fn walk<'pr>(
     prepared: &Prepared,
     scope: &mut Vec<String>,
     locals: &mut HashMap<String, String>,
+    singleton: bool,
     out: &mut Vec<Match<'pr>>,
 ) {
     // Recorded before matching so an assignment is visible to uses that follow
@@ -411,6 +469,7 @@ fn walk<'pr>(
             node: generated::dup(target),
             env,
             scope: scope.clone(),
+            singleton,
             locals: locals.clone(),
         });
     }
@@ -422,8 +481,25 @@ fn walk<'pr>(
     // A method body is a fresh local scope, so bindings must not leak across.
     let shadowed = matches!(target, Node::DefNode { .. }).then(|| std::mem::take(locals));
 
+    // `def self.x` and `class << self` both put their bodies in singleton
+    // context, which is what makes `self` mean the class rather than an
+    // instance.
+    let inner_singleton = match target {
+        Node::DefNode { .. } => target.as_def_node().is_some_and(|d| d.receiver().is_some()),
+        Node::SingletonClassNode { .. } => true,
+        _ => singleton,
+    };
+
     for child in generated::children(target) {
-        walk(pattern, &child, prepared, scope, locals, out);
+        walk(
+            pattern,
+            &child,
+            prepared,
+            scope,
+            locals,
+            inner_singleton,
+            out,
+        );
     }
 
     if let Some(saved) = shadowed {
@@ -438,6 +514,7 @@ fn walk<'pr>(
 mod tests {
     use super::*;
     use crate::pattern::prepare::prepare;
+    use crate::rule::Kind;
 
     fn matches(pattern: &str, source: &str) -> usize {
         let prepared = prepare(pattern).expect("pattern prepares");
@@ -561,6 +638,7 @@ end
             Constraint {
                 name: Some(vec!["select".into(), "find_all".into()]),
                 receiver_type: None,
+                kind: None,
             },
         );
         let scope = Scope::default();
@@ -571,9 +649,9 @@ end
         assert_eq!(narrowed, 2, "reject is not a synonym for select");
     }
 
-    /// Receiver narrowing: the capability no other Ruby structural tool offers.
-    /// `node_pattern` has no notion of a receiver and Ruby LSP matches by bare
-    /// name, so both would rewrite all three of these.
+    /// Receiver narrowing: the capability no other Ruby structural tool
+    /// offers. `node_pattern` has no notion of a receiver and Ruby LSP matches
+    /// by bare name, so both would rewrite all three of these.
     #[test]
     fn type_constraints_narrow_by_receiver() {
         let prepared = prepare("$R.display_name").expect("prepares");
@@ -584,20 +662,40 @@ end
         let hits = hits_for("", src, &parsed, &prepared, &p_node);
         assert_eq!(hits.len(), 3, "all three match structurally");
 
-        let mut constraints = HashMap::new();
-        constraints.insert(
+        // These are constant receivers, so they are *class* calls. Asking for
+        // Account's instance method correctly matches none of them -- the
+        // distinction this test used to be blind to.
+        let mut instances = HashMap::new();
+        instances.insert(
             "$R".to_string(),
             Constraint {
                 name: None,
                 receiver_type: Some("Account".into()),
+                kind: Some(Kind::Instance),
             },
         );
         let scope = Scope::default();
-        let narrowed: Vec<_> = hits
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &instances, &scope))
+                .count(),
+            0
+        );
+
+        let mut classes = HashMap::new();
+        classes.insert(
+            "$R".to_string(),
+            Constraint {
+                name: None,
+                receiver_type: Some("Account".into()),
+                kind: Some(Kind::Class),
+            },
+        );
+        let narrowed = hits
             .iter()
-            .filter(|m| satisfies(m, &constraints, &scope))
-            .collect();
-        assert_eq!(narrowed.len(), 1, "only the Account receiver should match");
+            .filter(|m| satisfies(m, &classes, &scope))
+            .count();
+        assert_eq!(narrowed, 1, "only Account's class call, not Widget's");
     }
 
     /// An unresolvable receiver must *not* match. Narrowing may only ever
@@ -618,6 +716,7 @@ end
             Constraint {
                 name: None,
                 receiver_type: Some("Account".into()),
+                kind: None,
             },
         );
         let scope = Scope::default();
@@ -648,6 +747,7 @@ end
             Constraint {
                 name: None,
                 receiver_type: Some("Account".into()),
+                kind: None,
             },
         );
         let scope = Scope::default();
@@ -656,6 +756,74 @@ end
             .filter(|m| satisfies(m, &constraints, &scope))
             .count();
         assert_eq!(narrowed, 1, "only the local assigned from Account.new");
+    }
+
+    /// `Account.display_name` and `account.display_name` name different
+    /// methods. Conflating them made a rename of one silently rewrite the
+    /// other, which is the exact failure the design exists to prevent.
+    #[test]
+    fn class_and_instance_receivers_are_different_methods() {
+        let prepared = prepare("$R.display_name").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let src = "Account.display_name\naccount = Account.new\naccount.display_name\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = hits_for("", src, &parsed, &prepared, &p_node);
+        assert_eq!(hits.len(), 2, "both match structurally");
+
+        let scope = Scope::default();
+        let constrain = |kind| {
+            let mut c = HashMap::new();
+            c.insert(
+                "$R".to_string(),
+                Constraint {
+                    name: None,
+                    receiver_type: Some("Account".into()),
+                    kind,
+                },
+            );
+            c
+        };
+
+        let instances = constrain(Some(Kind::Instance));
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &instances, &scope))
+                .count(),
+            1,
+            "only account.display_name is an instance call"
+        );
+
+        let classes = constrain(Some(Kind::Class));
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &classes, &scope))
+                .count(),
+            1,
+            "only Account.display_name is a class call"
+        );
+
+        // Default is instance, matching Ruby's `Account#display_name`.
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &constrain(None), &scope))
+                .count(),
+            1
+        );
+    }
+
+    /// `self` means the class inside `def self.x` and an instance inside an
+    /// ordinary method, so the same expression resolves differently.
+    #[test]
+    fn self_resolves_by_singleton_context() {
+        let prepared = prepare("self.display_name").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let src = "class Account\n  def self.a; self.display_name; end\n  def b; self.display_name; end\nend\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = hits_for("", src, &parsed, &prepared, &p_node);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.iter().filter(|m| m.singleton).count(), 1);
     }
 
     /// `inside:` reaches implicit-self call sites, which measurement (b) found
@@ -698,6 +866,7 @@ end
             Constraint {
                 name: Some(vec!["x".into()]),
                 receiver_type: None,
+                kind: None,
             },
         );
         let scope = Scope::default();

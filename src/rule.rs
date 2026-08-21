@@ -45,6 +45,31 @@ pub(crate) struct Constraint {
     /// silently rewritten.
     #[serde(default, rename = "type")]
     pub receiver_type: Option<String>,
+
+    /// Whether `type:` means an instance or the class object.
+    ///
+    /// `Account.display_name` and `account.display_name` are different methods,
+    /// so a rule has to say which. Defaults to `instance`, matching Ruby's own
+    /// `Account#display_name` notation and the commoner case.
+    #[serde(default)]
+    pub kind: Option<Kind>,
+}
+
+/// Which of a class's two method tables a constraint means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Kind {
+    /// `Account#display_name`
+    Instance,
+    /// `Account.display_name`
+    Class,
+}
+
+impl Constraint {
+    /// Whether this constraint wants an instance receiver.
+    pub(crate) fn wants_instance(&self) -> bool {
+        !matches!(self.kind, Some(Kind::Class))
+    }
 }
 
 /// Constraints on the match as a whole rather than on one capture.
