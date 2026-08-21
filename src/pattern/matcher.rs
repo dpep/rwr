@@ -110,11 +110,15 @@ fn splat_placeholder<'a>(
     node: &Node<'_>,
     bindings: &'a HashMap<String, Binding>,
 ) -> Option<&'a str> {
-    let Node::SplatNode { .. } = node else {
-        return None;
+    let inner = match node {
+        Node::SplatNode { .. } => node.as_splat_node()?.expression()?,
+        // Ruby spells "the remaining entries" with a double splat inside a
+        // hash, which is a different node. Without this a pattern cannot reach
+        // one pair among several.
+        Node::AssocSplatNode { .. } => node.as_assoc_splat_node()?.value()?,
+        _ => return None,
     };
-    let splat = node.as_splat_node()?;
-    placeholder(&splat.expression()?, bindings)
+    placeholder(&inner, bindings)
 }
 
 /// Bind `key`, enforcing D16: a repeated metavariable must match AST-equal

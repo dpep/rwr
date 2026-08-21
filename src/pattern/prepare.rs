@@ -141,7 +141,9 @@ fn render(
         // The metavariable's span includes the leading `*` for sequences, so the
         // splat has to be re-emitted around the placeholder.
         if var.arity == Arity::Many {
-            source.push('*');
+            // Re-emit the splat the metavariable's span swallowed, in the
+            // spelling the author used -- `**` inside a hash, `*` elsewhere.
+            source.push_str(if var.double { "**" } else { "*" });
         }
         let start = source.len();
         source.push_str(&cases[i].placeholder(i));

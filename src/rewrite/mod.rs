@@ -285,10 +285,19 @@ pub(crate) fn render(
             // An empty sequence: drop a separator that would otherwise dangle,
             // so `foo($A, *$REST)` with nothing left renders `foo(a)`.
             None if var.arity == Arity::Many => {
+                // An empty sequence must not leave a dangling separator on
+                // either side: `foo($A, *$R)` renders `foo(a)`, and
+                // `{**$B, $K:}` renders `{k:}` rather than `{, k:}`.
                 let head = &template[..var.start];
                 let trimmed = head.trim_end();
                 if trimmed.ends_with(',') {
                     start = trimmed.len() - 1;
+                } else {
+                    let tail = &template[end..];
+                    let stripped = tail.trim_start();
+                    if let Some(rest) = stripped.strip_prefix(',') {
+                        end = template.len() - rest.trim_start().len();
+                    }
                 }
                 String::new()
             }
@@ -622,6 +631,15 @@ mod tests {
     fn empty_sequences_drop_their_separator() {
         let out = rewrite("foo($A, *$R)", "bar($A, *$R)", "foo(1)\n").unwrap();
         assert_eq!(out, "bar(1)\n");
+    }
+
+    /// An empty sequence must not leave a dangling separator on *either* side.
+    /// `{**$B, $K: $V}` with nothing before the pair renders `{a: 1}`, not
+    /// `{, a: 1}` -- which reparse-verify would refuse, correctly but late.
+    #[test]
+    fn an_empty_leading_sequence_drops_its_separator() {
+        let out = rewrite("{**$B, $K: $V}", "{**$B, $K: $V}", "x = {a: 1}\n").unwrap();
+        assert_eq!(out, "x = {a: 1}\n");
     }
 
     /// D15's conflict unit is the *edit* range, not the match range. Minimal

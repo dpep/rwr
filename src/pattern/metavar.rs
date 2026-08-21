@@ -32,6 +32,12 @@ pub(crate) struct Metavar {
     /// `None` for the anonymous forms `_` and `*_`.
     pub name: Option<String>,
     pub arity: Arity,
+    /// Spelled `**` rather than `*`, as Ruby requires inside a hash.
+    ///
+    /// The whole `**$NAME` is one token: treating the second asterisk as the
+    /// metavariable would leave the first behind as literal template text, and
+    /// an empty sequence would render `{*, a:}`.
+    pub double: bool,
     /// Byte range in the pattern source, for substitution and diagnostics.
     pub start: usize,
     pub end: usize,
@@ -57,7 +63,10 @@ pub(crate) fn scan(pattern: &str) -> Vec<Metavar> {
         }
 
         let start = i;
-        let (arity, j) = if b[i] == b'*' {
+        let double = b[i] == b'*' && b.get(i + 1) == Some(&b'*');
+        let (arity, j) = if double {
+            (Arity::Many, i + 2)
+        } else if b[i] == b'*' {
             (Arity::Many, i + 1)
         } else {
             (Arity::One, i)
@@ -68,6 +77,7 @@ pub(crate) fn scan(pattern: &str) -> Vec<Metavar> {
                 out.push(Metavar {
                     name,
                     arity,
+                    double,
                     start,
                     end,
                 });
@@ -146,6 +156,18 @@ mod tests {
                 (None, Arity::Many),
             ]
         );
+    }
+
+    /// Ruby needs a double splat inside a hash, and the whole `**$NAME` is one
+    /// token -- treating the second asterisk as the metavariable leaves the
+    /// first behind as literal text, so an empty sequence renders `{*, a:}`.
+    #[test]
+    fn a_double_splat_is_one_token() {
+        let found = scan("{**$REST}");
+        assert_eq!(found.len(), 1);
+        assert!(found[0].double);
+        assert_eq!(&"{**$REST}"[found[0].start..found[0].end], "**$REST");
+        assert!(!scan("foo(*$R)")[0].double);
     }
 
     /// The case rule means ordinary Ruby globals need no escape - including

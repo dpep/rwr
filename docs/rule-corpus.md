@@ -194,20 +194,33 @@ non-anchored-insertion case that is genuinely out of reach.
    express. Hash shorthand works for a single-pair hash and covers **both spellings with one
    pattern**, since the rocket and the label parse to the same node.
 
-## Known limitation: one pair inside a multi-pair hash
+## Hash shorthand, including multi-pair hashes
 
-`{$K: $V}` matches `{foo: foo}` and `{:bar => bar}`, but not the `name: name` inside
-`{name: name, other: thing}` -- the pattern requires the hash to have exactly one entry.
+```yaml
+match: '{**$BEFORE, $K: $V, **$AFTER}'
+where:
+  $K: { same_name_as: $V }
+rewrite: '{**$BEFORE, $K:, **$AFTER}'
+```
 
-Reaching one entry among several needs a sequence metavariable on either side, and Ruby
-spells that with a **double** splat in a hash (`{**$BEFORE, $K: $V, **$AFTER}`). The matcher
-recognises `SplatNode` as a sequence placeholder but not `AssocSplatNode`, and an attempt to
-add it did not work -- `splat_placeholder` still returns `None` for a prepared
-`{**rwr_mv_0}` whose child *is* an `AssocSplatNode`, for reasons not yet understood.
+```ruby
+{ foo: foo }                  ->  {foo:}
+{ :bar => bar }               ->  {bar:}      # one pattern, both spellings
+{ baz: qux }                  ->  unchanged
+{ name: name, other: thing }  ->  {name:, other: thing}
+```
 
-Recorded rather than chased: the single-pair case is the common one, the failure is a clean
-non-match rather than a wrong rewrite, and the investigation had poor return against other
-work. The reproducing case is `matcher::tests` around `{**$REST}` matching `{a: 1, b: 2}`.
+Three things this needed, and the first was not a code problem at all:
+
+1. **`AssocSplatNode` as a sequence placeholder.** Ruby spells "the remaining entries" with a
+   double splat inside a hash. This was recorded as an unexplained bug -- `splat_placeholder`
+   returned `None` for a node that *was* an `AssocSplatNode` -- and the explanation was that
+   the branch had never been added: a string-replacement edit had silently failed to match
+   and the code being debugged did not exist. Edits now assert that they applied.
+2. **`**$NAME` is one token.** Treating only the second asterisk as the metavariable left the
+   first as literal template text, so an empty sequence rendered `{*, a:}`.
+3. **Empty sequences drop a separator on either side.** The cleanup only removed a *preceding*
+   comma, so `{**$B, $K:}` rendered `{, k:}`.
 
 **A note on direction.** Several of these cops are configurable and RuboCop's default may be
 the *opposite* of what is wanted — `Style/ReturnNil` is the clearest case. rwr rules encode a
