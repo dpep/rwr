@@ -10,6 +10,7 @@ refuse when it can't be sure.
 rwr 'return nil'                       # find, whole repo
 rwr 'return nil' app/models            # find, scoped
 rwr '$R.select { |$P| $B }.first'      # metavariables
+rwr check all app/                     # every built-in rule, read-only
 rwr check rule.yml app/                # CI and git hooks
 rwr rewrite rule.yml app/              # apply
 ```
@@ -55,6 +56,26 @@ declines with the source untouched.
 cargo install rwr
 ```
 
+## The built-in pack
+
+A set of rules ships compiled into the binary, so it runs from any directory:
+
+```bash
+rwr check all app/                 # every safe rule
+rwr check performance app/         # one family
+rwr check style/return-nil app/    # one rule
+```
+
+Rules that can change behaviour are **held back**, and the run says which and
+why — `inject(:+)` returns nil for an empty collection where `sum` returns 0;
+`select` on an ActiveRecord relation names columns rather than filtering rows.
+`--unsafe` includes them and prints each caveat next to the diff.
+
+There are no per-rule options. A cop needs configuring because it is opaque
+code; an rwr rule is four lines of YAML, so the rule *is* the option — to get
+the other direction, copy the file and swap `match` with `rewrite`. See
+[rules/README.md](rules/README.md).
+
 ## Rules
 
 A rule is Ruby source with `$METAVARS`, plus constraints source syntax cannot
@@ -74,6 +95,12 @@ rewrite: $R.detect { |$P| $B }
 
 All four are valid Ruby, so the language's own grammar validates where a
 sequence may appear.
+
+`where:` also carries `type:`/`kind:`/`subclasses:` (receiver narrowing),
+`same_name_as:` (two captures naming one identifier across node kinds), and
+`is:`/`length:` (a capture's node kind and a literal's content) — the pair that
+makes `gsub` → `tr` safe rather than plausible, since `tr` maps character by
+character.
 
 ## Exit codes
 
