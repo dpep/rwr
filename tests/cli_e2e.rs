@@ -69,18 +69,52 @@ fn trailing_positionals_scope_the_search() {
     assert_eq!(miss.status.code(), Some(1), "{}", stderr(&miss));
 }
 
-/// The safety property behind D30: the shorthand is read-only *by
-/// construction*. A pattern plus a replacement previews — it must never reach
-/// `rewrite`, because a terse two-argument command that silently mutated a repo
-/// is exactly the foot-gun D29 removed the mode flags to avoid.
+/// The safety property behind D30, asserted on the filesystem rather than on a
+/// message: the shorthand is read-only *by construction*. A pattern plus a
+/// replacement previews and must never write, because a terse two-argument
+/// command that silently mutated a repo is exactly the foot-gun D29 removed the
+/// mode flags to avoid.
 #[test]
 fn shorthand_with_replacement_cannot_reach_rewrite() {
-    let err = stderr(&rwr(&["foo($A)", "-r", "bar($A)"]));
-    assert!(err.contains("check"), "{err}");
-    assert!(
-        !err.contains("rewrite"),
-        "shorthand routed to a writing verb: {err}"
+    let dir = fixture("def a\n  return nil\nend\n");
+    let file = dir.path().join("fixture.rb");
+    let before = std::fs::read(&file).expect("read");
+
+    let out = rwr(&[
+        "return nil",
+        "-r",
+        "return",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "expected preview: {}",
+        stderr(&out)
     );
+
+    let after = std::fs::read(&file).expect("read");
+    assert_eq!(before, after, "the shorthand wrote to disk");
+}
+
+/// And the verb does write, so the invariant above is about the shorthand
+/// rather than about rwr being unable to rewrite at all.
+#[test]
+fn the_rewrite_verb_writes() {
+    let dir = fixture("def a\n  return nil\nend\n");
+    let file = dir.path().join("fixture.rb");
+
+    let out = rwr(&[
+        "rewrite",
+        "return nil",
+        "-r",
+        "return",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let after = String::from_utf8(std::fs::read(&file).expect("read")).expect("utf8");
+    assert_eq!(after, "def a\n  return\nend\n");
 }
 
 #[test]

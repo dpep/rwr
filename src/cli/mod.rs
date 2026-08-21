@@ -472,13 +472,12 @@ fn cmd_apply(
             eprintln!("rwr: refused {}: {reason}", outcome.file);
             continue;
         }
-        if write {
-            if let Some(text) = &outcome.rewritten {
-                if let Err(e) = std::fs::write(&outcome.file, text) {
-                    eprintln!("rwr: cannot write {}: {e}", outcome.file);
-                    return Exit::Error.into();
-                }
-            }
+        if write
+            && let Some(text) = &outcome.rewritten
+            && let Err(e) = std::fs::write(&outcome.file, text)
+        {
+            eprintln!("rwr: cannot write {}: {e}", outcome.file);
+            return Exit::Error.into();
         }
         changed.push(Changed {
             file: outcome.file.clone(),
@@ -504,11 +503,10 @@ fn cmd_apply(
     if refused {
         return Exit::Refused.into();
     }
-    // `check` is enforcement polarity: a clean tree is success (D22). `rewrite`
-    // reports nothing-to-do the same way, which reads correctly for both.
-    if changed.is_empty() {
-        Exit::Ok.into()
-    } else if write {
+    // `check` is enforcement polarity: nothing to change is success, and
+    // something to change is the signal a hook or CI acts on (D22). `rewrite`
+    // succeeds either way, having done whatever there was to do.
+    if write || changed.is_empty() {
         Exit::Ok.into()
     } else {
         Exit::Negative.into()
