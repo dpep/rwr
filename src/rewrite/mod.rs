@@ -8,6 +8,11 @@
 //! far from its `<<~FOO` token, and detaching one still *parses*, so no
 //! downstream check would catch the mistake.
 
+// Reachable only from its own tests until `render` wires transforms into
+// template substitution. Drop this allow then.
+#[allow(dead_code)]
+pub(crate) mod sequence;
+
 use crate::pattern::generated;
 use crate::pattern::matcher::{self, Bound, Env, Match};
 use crate::pattern::metavar::{self, Arity};
