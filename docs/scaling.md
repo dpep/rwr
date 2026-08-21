@@ -203,3 +203,16 @@ reproduce the real path reports the guard rather than the work.
 **And the cheapest fix was the least interesting one.** `let original = mapped.to_vec()`
 followed by `let mut current = original.clone()`, where `original` is never read again: a
 copy of every candidate file, up to 39 MB a run, deleted in one line for 78 ms.
+
+## The mmap win does not generalise, and that is the point
+
+`find` reads with `std::fs::read`; `check` maps. Given the 28% mapping bought the scan path,
+that reads like an oversight. Measured, it is the opposite: on discourse, `find` is
+**170-179 ms** reading and **181-187 ms** mapped.
+
+The earlier win came from *reuse*. `check` maps each source once and three phases consume it
+— hierarchy, signatures, scan — so two syscalls per file buy three passes. `find` touches
+each file exactly once, and there mmap plus munmap is more work than a single read.
+
+Worth writing down because the code looks identical at both sites. The thing that differed
+was the access pattern, which is invisible in the diff and decisive in the profile.

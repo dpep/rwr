@@ -1272,6 +1272,17 @@ of wall clock across eight threads. Sharing them would need thread-local storage
 self-referential parse, since `ParseResult` borrows its source and is not `Sync`. Not worth
 it for 7 ms.
 
+**Memory-mapping `find`'s reads.** `find` uses `std::fs::read` where `check` maps, and
+scaling.md records mapping as a 28% win — so this looked like an oversight. It is not.
+Measured both ways on discourse, same build, same warmth: `fs::read` **170-179 ms**, mapped
+**181-187 ms**. Mapping is ~3% *slower* here.
+
+The reason is that the 28% came from *reuse*, not from mapping. `check` reads every source
+once and three phases consume it — hierarchy, signatures, scan — so the mapping is amortised.
+`find` touches each file exactly once, and then mmap and munmap are two syscalls and a page
+fault where a read is one syscall into a buffer. A win that came from an access pattern does
+not transfer to a different access pattern, however similar the code looks.
+
 **A multi-pattern matcher** — walk the tree once and match every rule simultaneously. This is
 the only thing left that would attack the remaining `scan` cost, which is now genuine
 matching work. Rejected on architecture rather than effort: it taxes the file rules are added
