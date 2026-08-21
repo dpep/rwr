@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**Sorbet signatures resolve chained receivers.** Where a repository has `sig { returns(X) }`,
+rwr reads it as a return type, so `parser.document.name` narrows by `type:` — the case D61
+measured as unreachable from syntax alone. It needs no Sorbet, no RBI parser and no new file
+format: a signature is ordinary Ruby, already in the tree rwr parses. `T.untyped`, `T.any`
+and `void` yield nothing rather than a guess; `T.nilable(X)` yields X; `T::Array[X]` yields
+Array. A repository with no signatures is unaffected and pays nothing measurable.
+
 **Constructor chains resolve their receiver.** `Widget.new.display_name` now narrows by
 `type: Widget`, and identity methods (`freeze`, `dup`, `clone`, `itself`, `tap`) pass a type
 through, so `Widget.new.dup.display_name` resolves too. Anything else chained stays

@@ -869,6 +869,23 @@ fn cmd_apply(
         crate::hierarchy::Hierarchy::default()
     };
 
+    // Return types stated by Sorbet signatures. Built only when a rule narrows
+    // by receiver, and costing a single substring search per file in a
+    // repository that has none (D62).
+    let sigs = if rules
+        .iter()
+        .any(|r| r.constraints.values().any(|c| c.receiver_type.is_some()))
+    {
+        let started = profile::now();
+        let (found, parsed) = crate::sigs::Signatures::from_sources(&sources);
+        profile::mark("signatures", started, || {
+            format!("{} signature(s) from {parsed} file(s)", found.len())
+        });
+        found
+    } else {
+        crate::sigs::Signatures::default()
+    };
+
     // Each file is independent: one refusal declines that file and is reported,
     // rather than aborting work already proven safe elsewhere (DESIGN.md §4).
     struct Outcome {
@@ -947,6 +964,7 @@ fn cmd_apply(
                                 constraints: &rule.constraints,
                                 scope: &rule.scope,
                                 hierarchy: &hierarchy,
+                                sigs: &sigs,
                             };
                             let mut hits =
                                 matcher::search(&p_root, &parsed.node(), prepared, &criteria);

@@ -551,3 +551,31 @@ for *receivers named directly* — locals, ivars, constants, `self`, constructor
 **not** reach chained receivers. Those need a type source (RBS or Sorbet) or they stay
 residue. Staying residue is the honest default: rwr does not match them, does not rewrite
 them, and reports them.
+
+## Sorbet signatures — **measured on graph_weaver, and they clear D61's bar**
+
+D61 left chained receivers needing a type source. graph_weaver is one: a real Sorbet project
+with `srb tc` in its Makefile, 29 sigiled files (22 `typed: true`, 7 `typed: strict`).
+
+| | value |
+|---|---|
+| method definitions | 511 |
+| signatures rwr extracts | 79, from 20 files |
+| signatures naming a usable class | **64%** |
+| returns inferable from *syntax* in the same repo | **3.9%** |
+
+Sixteen times the per-method yield, and the two sources are complementary rather than
+overlapping — a signature is written exactly where the syntax says nothing.
+
+What the 64% is made of: `T::Array`/`T::Hash`/`T::Set` generics (42% of signatures, erased to
+the collection class), bare class names (14%), and `T.nilable(X)` (9%). What is discarded:
+`T.untyped` (12%) and `void`, which name no single class to dispatch on.
+
+**Cost on a repository with no signatures: none.** Five runs of the same rule over Discourse,
+159-164ms with the signature pass against 172-185ms without — *faster* with it on, because
+the pass faults mmapped pages in parallel ahead of the scan. The phase table shows the pass
+costing 190ms, which is real time attributed to the wrong phase; reading it alone would have
+condemned a feature that is free.
+
+The prefilter earns its own note: filtering on `sig` rather than `sig ` parsed 1,584 Discourse
+files to find nothing, 46% of that run. "sig" is inside "design", "assign" and "signature".

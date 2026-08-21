@@ -381,8 +381,9 @@ pub(crate) fn satisfies(
     constraints: &HashMap<String, Constraint>,
     scope: &Scope,
     hierarchy: &Hierarchy,
+    sigs: &crate::sigs::Signatures,
 ) -> bool {
-    verdict(found, constraints, scope, hierarchy) == Verdict::Ok
+    verdict(found, constraints, scope, hierarchy, sigs) == Verdict::Ok
 }
 
 pub(crate) fn verdict(
@@ -390,6 +391,7 @@ pub(crate) fn verdict(
     constraints: &HashMap<String, Constraint>,
     scope: &Scope,
     hierarchy: &Hierarchy,
+    sigs: &crate::sigs::Signatures,
 ) -> Verdict {
     if let Some(wanted) = &scope.inside {
         let reached = found.scope.iter().any(|s| {
@@ -456,13 +458,13 @@ pub(crate) fn verdict(
                 return Verdict::BadBinding(short);
             };
             // Unresolved means "not known to be this type", never "assume yes".
-            let resolved = resolve_type(node, &found.scope, found.singleton).or_else(|| {
-                variable_name(node)
-                    .and_then(|n| String::from_utf8(n).ok())
-                    .and_then(|n| found.locals.get(&n).cloned())
-                    .map(Receiver::Instance)
-            });
-            let Some(resolved) = resolved else {
+            let at = Where {
+                scope: &found.scope,
+                singleton: found.singleton,
+                locals: &found.locals,
+                sigs,
+            };
+            let Some(resolved) = resolve_type(node, &at) else {
                 return Verdict::BadBinding(short);
             };
             let matches_class = resolved.class_name() == wanted.as_str()
@@ -562,8 +564,19 @@ fn assigned_class(node: &Node<'_>) -> Option<(String, String)> {
     if call.name().as_slice() != b"new" {
         return None;
     }
-    // `X.new` yields an *instance*, whatever the receiver's own kind was.
-    let class = resolve_type(&call.receiver()?, &[], false)?;
+    // `X.new` yields an *instance*, whatever the receiver's own kind was. The
+    // receiver here is a constant, which needs nothing from the surroundings.
+    let empty = crate::sigs::Signatures::default();
+    let locals = HashMap::new();
+    let class = resolve_type(
+        &call.receiver()?,
+        &Where {
+            scope: &[],
+            singleton: false,
+            locals: &locals,
+            sigs: &empty,
+        },
+    )?;
     Some((
         String::from_utf8(name).ok()?,
         class.class_name().to_string(),
@@ -633,7 +646,23 @@ impl Receiver {
 /// explicit self (0.8%) -- and returns `None` for locals, ivars and chains
 /// (39.4%), which need inference this does not yet do. `None` narrows the match
 /// away rather than admitting it, so the constraint is always conservative.
-pub(crate) fn resolve_type(node: &Node<'_>, scope: &[String], singleton: bool) -> Option<Receiver> {
+/// What is known about the place a receiver expression sits.
+///
+/// Bundled because resolution recurses through chains, and threading four
+/// arguments through that by hand is how one of them ends up stale.
+pub(crate) struct Where<'a> {
+    /// Enclosing class and module names, outermost first.
+    pub scope: &'a [String],
+    /// Whether the match sits in singleton context.
+    pub singleton: bool,
+    /// Local and instance variables assigned from a constructor.
+    pub locals: &'a HashMap<String, String>,
+    /// Return types stated by Sorbet signatures, when the repo has any.
+    pub sigs: &'a crate::sigs::Signatures,
+}
+
+pub(crate) fn resolve_type(node: &Node<'_>, at: &Where<'_>) -> Option<Receiver> {
+    let (scope, singleton) = (at.scope, at.singleton);
     match node {
         // A bare constant names the class *object*, so a call on it dispatches
         // to a singleton method.
@@ -664,6 +693,15 @@ pub(crate) fn resolve_type(node: &Node<'_>, scope: &[String], singleton: bool) -
         // in another call, so resolution recurses into more unknowns. What is
         // free is the chain that carries its own answer, and `new` is the
         // commonest such inner call in all three corpora (docs/scaling.md).
+        // A local or instance variable whose assignment named a class.
+        Node::LocalVariableReadNode { .. } | Node::InstanceVariableReadNode { .. } => {
+            variable_name(node)
+                .and_then(|n| String::from_utf8(n).ok())
+                .and_then(|n| at.locals.get(&n).cloned())
+                .map(Receiver::Instance)
+        }
+        // A chained receiver: `Widget.new.foo`, `thing.dup.foo`, and -- where a
+        // signature says so -- `parser.document.foo`.
         Node::CallNode { .. } => {
             let call = node.as_call_node()?;
             let name = call.name();
@@ -671,7 +709,7 @@ pub(crate) fn resolve_type(node: &Node<'_>, scope: &[String], singleton: bool) -
                 // `Widget.new` is an instance of Widget, said outright.
                 b"new" => match call.receiver()? {
                     receiver @ (Node::ConstantReadNode { .. } | Node::ConstantPathNode { .. }) => {
-                        match resolve_type(&receiver, scope, singleton)? {
+                        match resolve_type(&receiver, at)? {
                             Receiver::Class(name) => Some(Receiver::Instance(name)),
                             Receiver::Instance(_) => None,
                         }
@@ -682,9 +720,28 @@ pub(crate) fn resolve_type(node: &Node<'_>, scope: &[String], singleton: bool) -
                 // through. Deliberately not `then`, which returns the block's
                 // value, nor `presence`, which may return nil.
                 b"freeze" | b"dup" | b"clone" | b"itself" | b"tap" => {
-                    resolve_type(&call.receiver()?, scope, singleton)
+                    resolve_type(&call.receiver()?, at)
                 }
-                _ => None,
+                // Anything else needs to know what the method returns, which
+                // only a signature states (D61, D62). The class it is called on
+                // has to resolve first -- except for implicit self, where the
+                // enclosing class *is* the answer.
+                _ => {
+                    let method = std::str::from_utf8(name.as_slice()).ok()?;
+                    let on = match call.receiver() {
+                        None => {
+                            if singleton {
+                                Receiver::Class(scope.last()?.clone())
+                            } else {
+                                Receiver::Instance(scope.last()?.clone())
+                            }
+                        }
+                        Some(receiver) => resolve_type(&receiver, at)?,
+                    };
+                    at.sigs
+                        .returns(on.class_name(), method, !on.is_instance())
+                        .cloned()
+                }
             }
         }
         _ => None,
@@ -711,19 +768,31 @@ pub(crate) struct Criteria<'a> {
     pub constraints: &'a HashMap<String, Constraint>,
     pub scope: &'a Scope,
     pub hierarchy: &'a Hierarchy,
+    pub sigs: &'a crate::sigs::Signatures,
 }
 
 impl Criteria<'_> {
     /// Criteria that accept any structural match.
     pub(crate) fn none() -> Criteria<'static> {
-        static EMPTY: std::sync::OnceLock<(HashMap<String, Constraint>, Scope, Hierarchy)> =
-            std::sync::OnceLock::new();
-        let (constraints, scope, hierarchy) =
-            EMPTY.get_or_init(|| (HashMap::new(), Scope::default(), Hierarchy::default()));
+        static EMPTY: std::sync::OnceLock<(
+            HashMap<String, Constraint>,
+            Scope,
+            Hierarchy,
+            crate::sigs::Signatures,
+        )> = std::sync::OnceLock::new();
+        let (constraints, scope, hierarchy, sigs) = EMPTY.get_or_init(|| {
+            (
+                HashMap::new(),
+                Scope::default(),
+                Hierarchy::default(),
+                crate::sigs::Signatures::default(),
+            )
+        });
         Criteria {
             constraints,
             scope,
             hierarchy,
+            sigs,
         }
     }
 }
@@ -790,6 +859,7 @@ fn walk<'pr>(
             criteria.constraints,
             criteria.scope,
             criteria.hierarchy,
+            criteria.sigs,
         ) {
             Verdict::Ok => {
                 state.out.push(candidate);
@@ -879,10 +949,17 @@ mod tests {
         let t_result = ruby_prism::parse(source.as_bytes());
         assert_eq!(t_result.errors().count(), 0, "target does not parse");
         let hierarchy = Hierarchy::default();
+        // Built from the same source, so a test can exercise signature-driven
+        // resolution through the path a real run takes.
+        let sigs = crate::sigs::Signatures::from_sources(&[crate::source::Source::Owned(
+            source.as_bytes().to_vec(),
+        )])
+        .0;
         let criteria = Criteria {
             constraints: &rule.constraints,
             scope: &rule.scope,
             hierarchy: &hierarchy,
+            sigs: &sigs,
         };
         search(&p_root, &t_result.node(), &prepared, &criteria).len()
     }
@@ -1014,7 +1091,15 @@ end
         let scope = Scope::default();
         let narrowed = hits
             .iter()
-            .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
+            .filter(|m| {
+                satisfies(
+                    m,
+                    &constraints,
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default(),
+                )
+            })
             .count();
         assert_eq!(narrowed, 2, "reject is not a synonym for select");
     }
@@ -1047,7 +1132,13 @@ end
         let scope = Scope::default();
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &instances, &scope, &Hierarchy::default()))
+                .filter(|m| satisfies(
+                    m,
+                    &instances,
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             0
         );
@@ -1063,7 +1154,15 @@ end
         );
         let narrowed = hits
             .iter()
-            .filter(|m| satisfies(m, &classes, &scope, &Hierarchy::default()))
+            .filter(|m| {
+                satisfies(
+                    m,
+                    &classes,
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default(),
+                )
+            })
             .count();
         assert_eq!(narrowed, 1, "only Account's class call, not Widget's");
     }
@@ -1089,10 +1188,12 @@ end
         );
         let scope = Scope::default();
         let hierarchy = Hierarchy::default();
+        let sigs = crate::sigs::Signatures::default();
         let criteria = Criteria {
             constraints: &constraints,
             scope: &scope,
             hierarchy: &hierarchy,
+            sigs: &sigs,
         };
 
         // `name:` is already shorthand and cannot satisfy the constraint, so the
@@ -1129,7 +1230,13 @@ end
         let scope = Scope::default();
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
+                .filter(|m| satisfies(
+                    m,
+                    &constraints,
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             1,
             "only the pair naming the same identifier"
@@ -1168,14 +1275,26 @@ end
 
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &constrain(Some(true)), &scope, &hierarchy))
+                .filter(|m| satisfies(
+                    m,
+                    &constrain(Some(true)),
+                    &scope,
+                    &hierarchy,
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             1,
             "a Premium receiver should match Account once subclasses are admitted"
         );
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &constrain(None), &scope, &hierarchy))
+                .filter(|m| satisfies(
+                    m,
+                    &constrain(None),
+                    &scope,
+                    &hierarchy,
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             0,
             "and must not, by default"
@@ -1205,7 +1324,13 @@ end
         let scope = Scope::default();
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
+                .filter(|m| satisfies(
+                    m,
+                    &constraints,
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             0
         );
@@ -1233,7 +1358,13 @@ end
         );
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &constraints, &Scope::default(), &Hierarchy::default()))
+                .filter(|m| satisfies(
+                    m,
+                    &constraints,
+                    &Scope::default(),
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             1
         );
@@ -1264,7 +1395,13 @@ end
         let scope = Scope::default();
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
+                .filter(|m| satisfies(
+                    m,
+                    &constraints,
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             1,
             "only the ivar assigned from Account.new"
@@ -1295,7 +1432,15 @@ end
         let scope = Scope::default();
         let narrowed = hits
             .iter()
-            .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
+            .filter(|m| {
+                satisfies(
+                    m,
+                    &constraints,
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default(),
+                )
+            })
             .count();
         assert_eq!(narrowed, 1, "only the local assigned from Account.new");
     }
@@ -1332,7 +1477,13 @@ end
         let instances = constrain(Some(Kind::Instance));
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &instances, &scope, &Hierarchy::default()))
+                .filter(|m| satisfies(
+                    m,
+                    &instances,
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             1,
             "only account.display_name is an instance call"
@@ -1341,7 +1492,13 @@ end
         let classes = constrain(Some(Kind::Class));
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &classes, &scope, &Hierarchy::default()))
+                .filter(|m| satisfies(
+                    m,
+                    &classes,
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             1,
             "only Account.display_name is a class call"
@@ -1350,7 +1507,13 @@ end
         // Default is instance, matching Ruby's `Account#display_name`.
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &constrain(None), &scope, &Hierarchy::default()))
+                .filter(|m| satisfies(
+                    m,
+                    &constrain(None),
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             1
         );
@@ -1390,7 +1553,13 @@ end
         };
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &HashMap::new(), &singleton, &Hierarchy::default()))
+                .filter(|m| satisfies(
+                    m,
+                    &HashMap::new(),
+                    &singleton,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             1
         );
@@ -1402,7 +1571,13 @@ end
         };
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &HashMap::new(), &instance, &Hierarchy::default()))
+                .filter(|m| satisfies(
+                    m,
+                    &HashMap::new(),
+                    &instance,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default()
+                ))
                 .count(),
             1
         );
@@ -1427,7 +1602,15 @@ end
         };
         let narrowed = hits
             .iter()
-            .filter(|m| satisfies(m, &HashMap::new(), &scope, &Hierarchy::default()))
+            .filter(|m| {
+                satisfies(
+                    m,
+                    &HashMap::new(),
+                    &scope,
+                    &Hierarchy::default(),
+                    &crate::sigs::Signatures::default(),
+                )
+            })
             .count();
         assert_eq!(narrowed, 1, "only the call inside Account");
     }
@@ -1452,10 +1635,13 @@ end
             },
         );
         let scope = Scope::default();
-        assert!(
-            hits.iter()
-                .all(|m| !satisfies(m, &constraints, &scope, &Hierarchy::default()))
-        );
+        assert!(hits.iter().all(|m| !satisfies(
+            m,
+            &constraints,
+            &scope,
+            &Hierarchy::default(),
+            &crate::sigs::Signatures::default()
+        )));
     }
 
     /// A metavariable in *label* position binds as a name, not a node -- the
@@ -1514,6 +1700,33 @@ end
         let rule = "match: $R.display_name\nwhere:\n  $R:\n    type: Widget\n    kind: class\nrewrite: $R.full_name\n";
         assert_eq!(applied(rule, "Widget.new.display_name\n"), 0);
         assert_eq!(applied(rule, "Widget.display_name\n"), 1);
+    }
+
+    /// A signature is what makes the rest of the chained-receiver bucket
+    /// reachable: `parser.document.foo` needs to know what `document` returns,
+    /// and only a `sig` says so (D62).
+    #[test]
+    fn a_signature_resolves_a_chained_receiver() {
+        let rule =
+            "match: $R.display_name\nwhere:\n  $R:\n    type: Widget\nrewrite: $R.full_name\n";
+
+        // Implicit self: the enclosing class is the receiver, so the signature
+        // is looked up without needing to resolve anything first. This is the
+        // largest slice of the chained bucket.
+        let implicit = "class P\n  sig { returns(Widget) }\n  def widget; @w; end\n                          def go; widget.display_name; end\nend\n";
+        assert_eq!(applied(rule, implicit), 1);
+
+        // A type rwr cannot use yields nothing rather than a guess.
+        let untyped = "class P\n  sig { returns(T.untyped) }\n  def widget; @w; end\n                         def go; widget.display_name; end\nend\n";
+        assert_eq!(applied(rule, untyped), 0);
+
+        // Resolution composes: a local from a constructor, then the signature.
+        let chained = "class P\n  sig { returns(Widget) }\n  def widget; @w; end\nend\n\n                       p = P.new\np.widget.display_name\n";
+        assert_eq!(applied(rule, chained), 1);
+
+        // An unresolvable receiver stays unresolvable, signature or not.
+        let unknown = "class P\n  sig { returns(Widget) }\n  def widget; @w; end\nend\n\n                       whatever.widget.display_name\n";
+        assert_eq!(applied(rule, unknown), 0);
     }
 
     /// `gsub` -> `tr` is only valid character-for-character, so the predicate

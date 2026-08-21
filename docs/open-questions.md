@@ -214,6 +214,12 @@ mis-matching: an unresolved receiver does not match, is not rewritten, and is re
 residue. A rule narrowed by `type:` is exactly as correct on a repo with no signatures — it
 simply reaches fewer sites, and says which ones it could not reach.
 
-**This is also the real case for RBS/Sorbet ingestion**, and a much narrower one than "it
-would help receiver narrowing": it would turn that 70% from inference into data. That remains
-out of committed scope, but the question it has to answer is now specific.
+**This was also the real case for RBS/Sorbet ingestion**, and a much narrower one than "it
+would help receiver narrowing": it turns that 70% from inference into data. **Since D62 it is
+built, for Sorbet's inline signatures** — 64% of them name a class rwr can use, against 3.9%
+inferable from the same repository's syntax. It needed no Sorbet and no RBI parser, because a
+`sig` block is ordinary Ruby.
+
+Still open, and deliberately: **RBS** (`sig/*.rbs`), which is a genuinely different grammar
+rather than Ruby, and **RBI files for gems**, which would reach typed receivers from
+dependencies rather than from the repository's own classes.

@@ -1201,3 +1201,43 @@ which is under-matching in the safe direction.
 outright and turn the 70% into data rather than inference. That is the case for ingesting
 them — a much stronger one than "it would help receiver narrowing generally", which this
 measurement refutes.
+
+## D62 - Sorbet signatures are read as a return-type index; RBI is not parsed
+**Decided.** This is the narrow case D61 said RBS/Sorbet ingestion would have to make, and
+it makes it.
+
+D61 measured that syntax states a method's return type for only 2-4% of definitions, leaving
+chained receivers unreachable. A `sig` block states it outright. On graph_weaver — a real
+Sorbet project, `srb tc` in its Makefile — **64% of signatures name a class rwr can use**,
+against 3.9% inferable from that repo's syntax. Sixteen times the per-method yield.
+
+**No Sorbet, no RBI parser, no new file format.** A signature is ordinary Ruby: `sig {
+returns(String) }` is a method call with a block, already in the tree rwr parses. The whole
+feature is reading a shape out of an AST that exists.
+
+**It composes with what was already there.** `p = P.new; p.widget.display_name` resolves the
+local from its constructor, then the signature of `P#widget`. And implicit self — the largest
+slice of the chained bucket at 53-66% — needs no resolution at all, because the enclosing
+class *is* the receiver.
+
+**Partial by construction.** `T.untyped`, `T.any(...)` and `void` name no single class to
+dispatch on, so they yield nothing rather than a guess. `T.nilable(X)` yields X, because a
+value that reaches a call site is not nil there. `T::Array[Widget]` yields Array: the element
+type is erased, and what dispatches is the collection.
+
+**Cost when a repository has no signatures: none, and measured.** The prefilter is `sig `
+with the trailing space — the bare word occurs inside "design", "assign" and "signature", and
+filtering on it parsed 1,584 files of Discourse to find nothing, 46% of that run. With the
+space, Discourse parses zero files. Five runs each: 159-164ms with the signature pass against
+172-185ms without, i.e. **slightly faster with it on**, because the pass faults the mmapped
+pages in parallel before the scan needs them. The profile's phase table over-attributes here,
+and reading it alone would have said the feature cost 190ms.
+
+**RBI files are out of scope for now.** `sorbet/rbi/gems/*.rbi` describes *dependencies*,
+which would reach a different and larger class of receiver, and `.rbi` is parseable Ruby so
+the same machinery would work. It is not built because nothing has asked for it yet, and
+gem-typed receivers are a different rule population from a repository's own classes.
+
+*Reverses if:* nothing about this one. The feature is pure upside — a repository without
+signatures is unaffected, and a wrong signature narrows to a class that simply does not
+match, which under-matches rather than mis-rewrites.
