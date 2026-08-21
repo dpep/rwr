@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-08-21
 
 **A rename across two classes now warns.** `Account#display_name` and `Company#display_name`
 are different methods; a rule with no `type:` constraint renamed both at exit 0, and nothing
