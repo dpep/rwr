@@ -289,11 +289,14 @@ The measurements exist now, so the targets are derived rather than picked. Five 
 warm; the first run of each set is cold-cache and reported separately because it is a
 different question.
 
-| corpus | files | `find` one pattern | a rename | the 10-rule pack |
+| corpus | files | `find` one pattern | a rename | the shipped pack |
 |---|---|---|---|---|
-| mastodon | 3,269 | 39 ms | 37 ms | 178 ms |
-| rails | 3,321 | 64 ms | 69 ms | 348 ms |
-| discourse | 11,006 | 174 ms | 312 ms | 970 ms |
+| mastodon | 3,269 | 39 ms | 37 ms | 102 ms |
+| rails | 3,321 | 65 ms | 67 ms | 205 ms |
+| discourse | 11,006 | 175 ms | 272 ms | 565 ms |
+
+*(Pack figures are post-D63; they were 178 / 348 / 970 ms when the targets below
+were first set, and the targets were deliberately not lowered to match — see D63.)*
 
 Cold-cache first runs: 99 ms, 105 ms, 280 ms for `find`. The gap is page-in, not work.
 

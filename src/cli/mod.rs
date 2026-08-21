@@ -1087,12 +1087,14 @@ fn cmd_apply(
                 return None;
             }
             // Materialised only now, for the few files that survive.
-            let original = mapped.to_vec();
             let file = path.display().to_string();
             // git reports paths from the repository root; the walk may have
-            // produced relative ones.
-            let absolute = path.canonicalize().unwrap_or_else(|_| path.clone());
-            let mut current = original.clone();
+            // produced relative ones. Resolved only under `--diff`, since it is
+            // a syscall and there are eleven thousand files.
+            let absolute = changed
+                .as_ref()
+                .map(|_| path.canonicalize().unwrap_or_else(|_| path.clone()));
+            let mut current = mapped.to_vec();
             let mut total = 0usize;
             // Matches a wider edit covered. Non-zero means a rerun makes
             // further progress, which is the retryable outcome rather than a
@@ -1101,96 +1103,143 @@ fn cmd_apply(
 
             let mut by_rule = vec![0usize; rules.len()];
             let mut spread: Vec<String> = Vec::new();
-            for (index, (rule, prepared)) in rules.iter().zip(&prepareds).enumerate() {
-                // Scoped so every borrow of `current` ends before it is
-                // replaced with this rule's output.
-                let step: Result<Option<(String, usize, usize)>, String> = {
+            // One parse serves every rule until a rule actually rewrites
+            // something. It used to be one parse *per rule*, so a ten-rule pack
+            // parsed each candidate file ten times whether or not any rule
+            // matched -- measured at ~85 ms per additional rule on discourse,
+            // for rules that matched nothing at all.
+            let mut next = 0;
+            'generation: while next < rules.len() {
+                // What a rule changed, carried out of the parse's scope so
+                // `current` can be replaced once the borrow ends.
+                let mut applied: Option<(String, usize, usize, usize)> = None;
+                let step: Result<(), String> = {
                     let parsed = ruby_prism::parse(&current);
                     if parsed.errors().count() > 0 {
                         return None;
                     }
-                    let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
-                    let p_node = p_parsed.node();
-                    match matcher::pattern_root(&p_node) {
-                        None => Ok(None),
-                        Some(p_root) => {
-                            // Criteria are applied *inside* the search now, so a
-                            // constraint rejection drives backtracking to a
-                            // different binding rather than discarding the match
-                            // (Q13).
-                            let criteria = matcher::Criteria {
-                                constraints: &rule.constraints,
-                                scope: &rule.scope,
-                                hierarchy: &hierarchy,
-                                sigs: &sigs,
-                            };
-                            let mut hits =
-                                matcher::search(&p_root, &parsed.node(), prepared, &criteria);
-                            if let Some(changed) = changed.as_ref() {
-                                hits.retain(|m| {
-                                    let (start, end) = rewrite::effective_range(&m.node);
-                                    let (first, _) = source::line_col(&current, start);
-                                    let (last, _) = source::line_col(&current, end);
-                                    changed.touches(&absolute, first, last)
-                                });
-                            }
-                            // A rule that does not say which class it means may
-                            // be renaming across several. Recorded here, warned
-                            // about once at the end (Q10).
-                            if unnarrowed {
-                                for hit in &hits {
-                                    if let Some(class) = matcher::receiver_class(hit, &sigs) {
-                                        spread.push(class);
+                    let mut outcome = Ok(());
+                    for (index, (rule, prepared)) in
+                        rules.iter().zip(&prepareds).enumerate().skip(next)
+                    {
+                        // Each rule's own literals, not just the set's union.
+                        // The union decides whether to *read* the file; without
+                        // a per-rule gate every rule then walked the whole tree
+                        // of every file any rule wanted, which for a ten-rule
+                        // pack is nine wasted walks per file.
+                        if !filters[index].may_contribute(&current) {
+                            continue;
+                        }
+                        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+                        let p_node = p_parsed.node();
+                        let found: Result<Option<(String, usize, usize)>, String> =
+                            match matcher::pattern_root(&p_node) {
+                                None => Ok(None),
+                                Some(p_root) => {
+                                    // Criteria are applied *inside* the search now, so a
+                                    // constraint rejection drives backtracking to a
+                                    // different binding rather than discarding the match
+                                    // (Q13).
+                                    let criteria = matcher::Criteria {
+                                        constraints: &rule.constraints,
+                                        scope: &rule.scope,
+                                        hierarchy: &hierarchy,
+                                        sigs: &sigs,
+                                    };
+                                    let mut hits = matcher::search(
+                                        &p_root,
+                                        &parsed.node(),
+                                        prepared,
+                                        &criteria,
+                                    );
+                                    if let Some(changed) = changed.as_ref() {
+                                        hits.retain(|m| {
+                                            let (start, end) = rewrite::effective_range(&m.node);
+                                            let (first, _) = source::line_col(&current, start);
+                                            let (last, _) = source::line_col(&current, end);
+                                            absolute.as_ref().is_some_and(|path| {
+                                                changed.touches(path, first, last)
+                                            })
+                                        });
                                     }
-                                }
-                            }
-                            if hits.is_empty() {
-                                Ok(None)
-                            } else {
-                                let template = rule.rewrite.as_deref().unwrap_or_default();
-                                match rewrite::plan(
-                                    &hits,
-                                    &p_root,
-                                    prepared,
-                                    template,
-                                    &current,
-                                    &rule.constant_captures(),
-                                ) {
-                                    Err(r) => Err(format!("{r:?}")),
-                                    Ok(planned) => {
-                                        let text = rewrite::apply(&current, &planned.edits);
-                                        match rewrite::verify(&text) {
+                                    // A rule that does not say which class it means may
+                                    // be renaming across several. Recorded here, warned
+                                    // about once at the end (Q10).
+                                    if unnarrowed {
+                                        for hit in &hits {
+                                            if let Some(class) = matcher::receiver_class(hit, &sigs)
+                                            {
+                                                spread.push(class);
+                                            }
+                                        }
+                                    }
+                                    if hits.is_empty() {
+                                        Ok(None)
+                                    } else {
+                                        let template = rule.rewrite.as_deref().unwrap_or_default();
+                                        match rewrite::plan(
+                                            &hits,
+                                            &p_root,
+                                            prepared,
+                                            template,
+                                            &current,
+                                            &rule.constant_captures(),
+                                        ) {
                                             Err(r) => Err(format!("{r:?}")),
-                                            Ok(()) => {
-                                                Ok(Some((text, planned.sites, planned.dropped)))
+                                            Ok(planned) => {
+                                                let text = rewrite::apply(&current, &planned.edits);
+                                                match rewrite::verify(&text) {
+                                                    Err(r) => Err(format!("{r:?}")),
+                                                    Ok(()) => Ok(Some((
+                                                        text,
+                                                        planned.sites,
+                                                        planned.dropped,
+                                                    ))),
+                                                }
                                             }
                                         }
                                     }
                                 }
+                            };
+
+                        match found {
+                            Err(refusal) => {
+                                outcome = Err(refusal);
+                                break;
+                            }
+                            // Nothing changed, so the parse still describes the
+                            // source and the next rule can reuse it.
+                            Ok(None) => {}
+                            Ok(Some((text, sites, dropped))) => {
+                                applied = Some((text, sites, dropped, index));
+                                break;
                             }
                         }
                     }
+                    outcome
                 };
 
-                match step {
-                    Err(refusal) => {
-                        return Some(Outcome {
-                            file,
-                            sites: 0,
-                            spread: Vec::new(),
-                            by_rule: Vec::new(),
-                            rewritten: None,
-                            refusal: Some(refusal),
-                            residue: Vec::new(),
-                            deferred: 0,
-                        });
-                    }
-                    Ok(None) => {}
-                    Ok(Some((text, n, skipped))) => {
-                        total += n;
-                        by_rule[index] += n;
-                        deferred += skipped;
+                if let Err(refusal) = step {
+                    return Some(Outcome {
+                        file,
+                        sites: 0,
+                        spread: Vec::new(),
+                        by_rule: Vec::new(),
+                        rewritten: None,
+                        refusal: Some(refusal),
+                        residue: Vec::new(),
+                        deferred: 0,
+                    });
+                }
+                match applied {
+                    // Every remaining rule left the source alone.
+                    None => break 'generation,
+                    Some((text, sites, dropped, index)) => {
+                        total += sites;
+                        by_rule[index] += sites;
+                        deferred += dropped;
                         current = text.into_bytes();
+                        next = index + 1;
                     }
                 }
             }

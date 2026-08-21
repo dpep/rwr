@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**The shipped pack runs 42% faster** — 970 ms to 565 ms over discourse's 11,006 files — from
+deleting redundant work rather than anything clever. Every candidate file used to be reparsed
+once per rule even when no rule had changed anything (~85 ms per added rule); every rule
+walked every file the *set's* literals wanted, rather than checking its own; and each file
+was copied once too often and resolved with a syscall needed only under `--diff` (D63).
+
 **Residue reporting had two defects that a purpose-built testbed found immediately.** It was
 computed only for files rwr had already *changed*, so a file that is nothing but dynamic
 reaches — a serializer full of `delegate` and `validates` — was never looked at; and the

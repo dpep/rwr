@@ -1241,3 +1241,49 @@ gem-typed receivers are a different rule population from a repository's own clas
 *Reverses if:* nothing about this one. The feature is pure upside — a repository without
 signatures is unaffected, and a wrong signature narrows to a class that simply does not
 match, which under-matches rather than mis-rewrites.
+
+## D63 - Three structural cuts in the scan, and the ones not taken
+**Decided**, and every number here is five warm runs on discourse (11,006 files, 39 MB).
+
+The pack went **970 ms to 565 ms, −42%**, and a rename 312 ms to 272 ms. Nothing clever
+happened; three pieces of redundant work were deleted.
+
+**One parse per generation, not per rule.** The scan reparsed every candidate file once per
+rule, whether or not the previous rule had changed a byte. Measured first, with eight rules
+that matched *nothing*: **~85 ms per additional rule**. One parse now serves every rule until
+a rule actually rewrites something, at which point the bytes have changed and a reparse is
+owed. Marginal cost per rule halved to ~40 ms.
+
+**A per-rule literal gate.** The prefilter decided whether to *read* a file, using the union
+of the set's literals — and then every rule walked the whole tree of every file that any rule
+wanted. For a ten-rule pack that is nine wasted walks per file. Each rule now checks its own
+literals first. Ten rules: 1,440 ms to 1,173 ms.
+
+**A copy and a syscall per file.** `original` was allocated, copied into `current`, and never
+read again — a redundant copy of every candidate file, up to 39 MB a run. And
+`path.canonicalize()` ran for all 11,006 files to serve `--diff`, which is usually off; it is
+resolved lazily now. 643 ms to 565 ms.
+
+### Rejected, with the numbers
+
+**Hoisting the pattern reparse.** Each rule reparses its own tiny pattern per file — 56,000
+parses for an eight-rule run. Microbenchmarked at **57 ms single-threaded**, so roughly 7 ms
+of wall clock across eight threads. Sharing them would need thread-local storage of a
+self-referential parse, since `ParseResult` borrows its source and is not `Sync`. Not worth
+it for 7 ms.
+
+**A multi-pattern matcher** — walk the tree once and match every rule simultaneously. This is
+the only thing left that would attack the remaining `scan` cost, which is now genuine
+matching work. Rejected on architecture rather than effort: it taxes the file rules are added
+to, which is the highest-traffic edit in the project, and it buys a run already at 38% of
+its budget.
+
+### The targets are not lowered to match
+
+Q7's ceilings stay at 250 ms / 500 ms / 1.5 s. A budget that tracks the best number ever
+measured is not a budget — it is a ratchet that turns every ordinary regression into a
+failure, and it would have to be re-derived after every change of this kind.
+
+*Reverses if:* the pack grows enough that per-rule tree walks dominate again, at which point
+the multi-pattern matcher stops being premature and its cost to rule-authoring is worth
+paying.

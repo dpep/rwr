@@ -176,3 +176,30 @@ files, which means an index -- deferred, with the threshold recorded above.
 | `MADV_SEQUENTIAL` readahead | shipped -- ~2-3% |
 | More threads than cores | **tried, no help** -- 8 on 8 cores is optimal |
 | Persistent index | **deferred**, with a measured threshold above |
+
+## The scan, and the three things that were wasted in it
+
+`--profile` had reported `scan` as one block at ~80% of a pack run for months, which named a
+phase without decomposing it. Three cuts, measured five warm runs each on discourse:
+
+| | pack (4 rules) | 10 rules |
+|---|---|---|
+| before | 970 ms | — |
+| one parse per generation | 725 ms | 1,440 ms |
+| per-rule literal gate | 643 ms | 1,173 ms |
+| drop the extra copy and syscall | **565 ms** | **1,110 ms** |
+
+**The measurement that found it was the marginal cost, not the total.** Eight rules that
+matched *nothing* still cost 85 ms each, which is only visible if you vary the number of
+rules and read the slope. A total says a run takes 970 ms; a slope says 680 ms of it is
+being spent on rules that do nothing.
+
+**The first attempt at that measurement measured the wrong thing.** Eight rules whose
+literals appeared nowhere in the corpus cost ~0.6 ms each — the prefilter skipped every file
+and no scan happened at all. The patterns had to be changed to ones with *common* literals
+that match nothing *structurally* before the scan was exercised. A benchmark that does not
+reproduce the real path reports the guard rather than the work.
+
+**And the cheapest fix was the least interesting one.** `let original = mapped.to_vec()`
+followed by `let mut current = original.clone()`, where `original` is never read again: a
+copy of every candidate file, up to 39 MB a run, deleted in one line for 78 ms.
