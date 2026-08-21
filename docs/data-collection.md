@@ -7,7 +7,9 @@ back.
 ## What it does and does not emit
 
 **Emits:** file and byte counts, parse timings, unparsed-file counts, call-site totals, the
-distribution of receiver shapes, and per-identifier statistics for the ~60 most-called names.
+distribution of receiver shapes (including how chained receivers break down), how each method
+definition's *return value* classifies, the commonest inner call of a chain, and
+per-identifier statistics for the ~60 most-called names.
 
 **Never emits:** source text, file contents, file paths below the corpus root, or anything
 identifying beyond the corpus directory's own name. The report is aggregates only, so it can
@@ -19,14 +21,14 @@ small and readable.
 Needs Rust. If the machine lacks it: `brew install rustup && rustup-init -y`.
 
 ```sh
-cargo install --git https://github.com/dpep/rwr
+cargo install rwr
 ```
 
-That installs both `rwr` and `rwr-phase0` into `~/.cargo/bin`. Re-run to update.
+That installs both `rwr` and `rwr-phase0` into `~/.cargo/bin`. Re-run to update, and check
+`rwr-phase0 --version` matches what this document describes — the report is at **schema 2**.
 
-*(A Homebrew formula is deliberately not shipped yet: it wants a tagged release, and tagging
-before Phase 0 has reported would be committing to a tool that Phase 0 might still say should
-not exist.)*
+*(No Homebrew formula yet. `cargo install` is the only route, and it needs a Rust toolchain:
+`brew install rustup && rustup-init -y` if the machine lacks one.)*
 
 ## Run
 
@@ -50,6 +52,10 @@ Expect it to take roughly a second per 50 MB of Ruby on 8 cores.
 | `unparsed` | D1 fidelity | whether Prism has gaps on real proprietary Ruby. Zero across 5,499 public application files so far |
 | `receiver_shapes` | (c) receiver resolution | what fraction resolves with no type inference. ~59% on rails, and the monolith is the number that matters |
 | `hot_names` | (b) bare-name collateral | how much damage a bare-name rename does, and — per D20 as amended — whether a name's *receiver-shape diversity* rather than its frequency is what makes it dangerous |
+| `receiver_shapes["chained:*"]` | D61 chained receivers | how much of the largest unresolved bucket is `X.new` (free), spec DSL (uninteresting), or genuinely needs a return type |
+| `return_shapes` | D61, D62 | what fraction of methods state a return type syntactically. 2.3–4.5% on public corpora; a monolith with Sorbet coverage would look very different |
+| `chain_inner_names` | D61 | whether the chained bucket is dominated by domain methods or, as on public Rails apps, by `expect(...)` |
+| `files_unreadable`, `hot_names_omitted` | honesty | what the run could not read and what the caps left out, so a total is never mistaken for a whole |
 
 ## What this still does not cover
 

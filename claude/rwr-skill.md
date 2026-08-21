@@ -32,7 +32,11 @@ rwr rewrite <rule> app/     # apply   — writes to disk
 Writing always requires typing `rewrite`, so the terse form can never surprise
 you. Trailing arguments are paths, rg-style.
 
-Always add `-j` (JSON) or `-J` (NDJSON) when you'll parse the output.
+Always add `-j` (JSON) or `-J` (NDJSON) when you'll parse the output. `-j` is one
+document — `{schema, rwr_version, changed, residue, templates_skipped}` for
+`check`/`rewrite`, `{schema, rwr_version, matches}` for `find` — so the account
+of what a rule *missed* is machine-readable, not just printed. `-J` streams a
+row per line and carries no metadata.
 
 ## Finding
 
