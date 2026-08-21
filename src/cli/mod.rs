@@ -430,10 +430,10 @@ fn report_unsafe(changed: &[Changed], rules: &[rule::Rule]) {
 /// Calls and definitions are usually a different method that happens to share
 /// the name, which only receiver resolution can rule out.
 fn report_residue(residues: &[Residue], templates: usize) {
-    // The templates note stands alone: a rule that accounted for everything in
-    // Ruby still did not look at ERB, and saying so only when residue happens to
-    // be non-empty would make the blind spot appear and vanish for reasons
-    // unrelated to it.
+    // Printed even when the residue list is empty: a rule that accounted for
+    // everything in Ruby still did not look at ERB, and a blind spot that
+    // appears and vanishes with unrelated results is not a report. The caller
+    // passes zero when the run makes no completeness claim at all.
     if templates > 0 {
         eprintln!(
             "\nnote: {templates} template file(s) were not searched. rwr reads Ruby, \
@@ -850,6 +850,16 @@ fn cmd_apply(
         }
     }
 
+    // Whether this run claims completeness at all. Residue applies to
+    // name-anchored rules only (D7), and the templates note is part of that
+    // claim -- a pack of shape rules makes no claim, so noting what it did not
+    // read there is noise on every run.
+    let claims_completeness = prepareds.iter().any(|prepared| {
+        let parsed = ruby_prism::parse(prepared.source.as_bytes());
+        matcher::pattern_root(&parsed.node())
+            .is_some_and(|root| !residue::anchors(&root, prepared).is_empty())
+    });
+
     let mut scoped: Vec<String> = paths.to_vec();
     scoped.extend(common.path.iter().cloned());
     let (files, templates) = profile::span_noted(
@@ -1190,7 +1200,7 @@ fn cmd_apply(
                     .collect::<Vec<_>>(),
             );
             report_unsafe(&changed, &rules);
-            report_residue(&left_over, templates);
+            report_residue(&left_over, if claims_completeness { templates } else { 0 });
         }
         _ => {
             if emit_rows(out, &changed).is_some() {
