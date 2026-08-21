@@ -748,6 +748,23 @@ pub(crate) fn resolve_type(node: &Node<'_>, at: &Where<'_>) -> Option<Receiver> 
     }
 }
 
+/// The class a match's receiver resolves to, when the match is a call on one.
+///
+/// Used to warn about a rule that renames across *several* classes without
+/// saying which it meant. `Account#display_name` and `Company#display_name` are
+/// different methods, and a rule with no `type:` constraint renames both at
+/// exit 0 -- the clean, confident, wrong rewrite that Q10 calls the real danger.
+pub(crate) fn receiver_class(found: &Match<'_>, sigs: &crate::sigs::Signatures) -> Option<String> {
+    let receiver = found.node.as_call_node()?.receiver()?;
+    let at = Where {
+        scope: &found.scope,
+        singleton: found.singleton,
+        locals: &found.locals,
+        sigs,
+    };
+    resolve_type(&receiver, &at).map(|r| r.class_name().to_string())
+}
+
 /// The class or module a node introduces, if any.
 fn scope_name(node: &Node<'_>) -> Option<String> {
     let name = match node {

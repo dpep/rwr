@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**A rename across two classes now warns.** `Account#display_name` and `Company#display_name`
+are different methods; a rule with no `type:` constraint renamed both at exit 0, and nothing
+in the tool noticed — there is no conflict to detect, so the refusal contract never applied.
+A warning rather than a refusal, because a repo-wide rename is legitimate and refusing it
+would teach people to disable the check. Saying which class you meant silences it (Q10).
+
 **`.rb` is not the whole language.** `.rake`, `.ru`, `.gemspec`, `.jbuilder`, `Rakefile`,
 `Gemfile`, `Vagrantfile` and friends are searched now. Discourse keeps 11,854 lines of Ruby
 in files rwr walked past — a rename silently skipped them, and the residue report claimed

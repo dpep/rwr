@@ -41,25 +41,6 @@ interesting part — combinatorial blowup? unpredictable matches? nobody used it
 Treat as a Phase 0 hypothesis, not a free win. Worth 30 minutes finding out why Semgrep
 pulled it before designing anything.
 
-## Q10 — The refusal contract guards edit mechanics, not match semantics *(new, severe)*
-
-Across seven realistic case studies (`docs/use-cases.md`) no natural exit-3 refusal could be
-constructed — while **two confidently wrong rewrites shipped at exit 0**: a
-`Company#full_name` site matched when `User#full_name` was meant, and an impure
-repeated-metavariable match (`rows.shift.present? ? rows.shift : nil`).
-
-The safety story in DESIGN.md §4 protects against *conflicts the tool can detect*. The
-actual danger is a clean, confident, semantically wrong match — and nothing guards it before
-Phase 2.
-
-This reframes Phase 2 from "makes matching usable at scale" to "is the only thing between
-the user and silent breakage," and it strengthens the case that Phase 0 measurement (b) is
-the real go/no-go rather than a supporting number.
-
-Open: is there any *syntactic* guard worth having in Phase 1 — refuse when a bare method
-name matches across more than N distinct receiver shapes? Or is honest degradation
-(ship Phase 1 as explicitly-unsafe-without-review) the better answer?
-
 ## Q12 - RuboCop positioning: resolved as complementary, personal-corpus-first
 
 **Corrected premise.** This originally recorded concrete-syntax transformations as impossible
@@ -239,3 +220,33 @@ spot that appears and vanishes with unrelated results is not a report.
 Option (b) — grep-grade residue inside templates — was judged "probably what users actually
 want", and may still be. It is a different feature from an honest claim, and shipping the
 honest claim first means it can be added without anyone having been misled meanwhile.
+
+## Q10 — The refusal contract guards edit mechanics, not match semantics — **closed, partly**
+
+The reframing was right and Phase 2 was the answer, as the question predicted: `type:`,
+`kind:`, `subclasses:`, the class hierarchy and Sorbet signatures all exist to let a rule say
+which class it means. The question's own suggestion — *refuse when a bare name matches across
+more than N receiver shapes* — is now built, as a **warning** rather than a refusal:
+
+```
+warning: rewrote receivers of 2 different classes (Account, Company). These are different
+         methods that share a name -- narrow with `where: { $R: { type: ... } }` if only
+         one was meant.
+```
+
+**Warning, not refusal, deliberately.** A genuinely repo-wide rename is legitimate, and
+refusing it would teach people to reach for the flag that turns the check off — at which
+point the check protects nobody. What they need is to be told once, with the fix in the
+message. It fires only for a rule set that narrows by no class at all, so saying which class
+you meant silences it.
+
+**Its reach is exactly receiver resolution's reach, and that is the honest limit.** The
+warning sees a class only where the receiver resolves — a local from a constructor, a
+constant, `self`, an ivar, a signature. D61 measured that chained receivers mostly do not
+resolve, so a rule whose collateral is all unresolved receivers still passes quietly. The
+residue report's `Definition` entries remain the other tell, and they need no resolution.
+
+**Still open, and worth building later:** a corpus-wide check of *how many classes define
+the name being renamed*, which is purely syntactic and would fire regardless of whether any
+receiver resolves. That is strictly higher reach than what shipped, and the reason it did not
+ship here is cost — it wants an index pass of its own — not doubt about its value.

@@ -372,6 +372,32 @@ fn report_by_rule(changed: &[Changed]) {
     }
 }
 
+/// Warn when one rule renamed across more than one class.
+///
+/// `Account#display_name` and `Company#display_name` are different methods. A
+/// rule with no `type:` constraint renames both, at exit 0, and nothing else in
+/// the tool notices -- Q10 calls this the real danger, against which the refusal
+/// contract does not protect, because there is no conflict to detect.
+///
+/// A warning rather than a refusal: a genuinely repo-wide rename is legitimate,
+/// and refusing it would train people to reach for a flag that disables the
+/// check. What they need is to be told, once, with the fix.
+fn report_spread(classes: &[&String]) {
+    let mut distinct: Vec<&str> = classes.iter().map(|c| c.as_str()).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    if distinct.len() < 2 {
+        return;
+    }
+    eprintln!(
+        "\nwarning: rewrote receivers of {} different classes ({}). These are \
+         different methods that share a name -- narrow with \
+         `where: {{ $R: {{ type: ... }} }}` if only one was meant.",
+        distinct.len(),
+        distinct.join(", ")
+    );
+}
+
 /// Say why each unsafe rule that actually fired is unsafe.
 ///
 /// At the moment of the edit, not in a config file -- the caveat is only useful
@@ -793,6 +819,12 @@ fn cmd_apply(
         eprintln!("rwr: {}", rule::RuleError::NoTemplate);
         return Exit::PatternError.into();
     }
+    // A rule set that names no class cannot tell `Account#display_name` from
+    // `Company#display_name`, so its matches are tallied by resolved receiver.
+    let unnarrowed = !rules
+        .iter()
+        .any(|r| r.constraints.values().any(|c| c.receiver_type.is_some()));
+
     // Each rule is prepared once; they apply in order, each seeing the
     // previous one's output. A rename genuinely needs a set, since the
     // definition and the call sites are different shapes.
@@ -897,6 +929,9 @@ fn cmd_apply(
     struct Outcome {
         file: String,
         sites: usize,
+        /// Classes this file's matched receivers resolved to, for the
+        /// cross-class warning. Empty unless the rule set narrows by none.
+        spread: Vec<String>,
         /// Edits per rule, positionally. Attribution is per file because that
         /// is where the work happened; totals aggregate from it.
         by_rule: Vec<usize>,
@@ -949,6 +984,7 @@ fn cmd_apply(
             let mut deferred = 0usize;
 
             let mut by_rule = vec![0usize; rules.len()];
+            let mut spread: Vec<String> = Vec::new();
             for (index, (rule, prepared)) in rules.iter().zip(&prepareds).enumerate() {
                 // Scoped so every borrow of `current` ends before it is
                 // replaced with this rule's output.
@@ -981,6 +1017,16 @@ fn cmd_apply(
                                     let (last, _) = source::line_col(&current, end);
                                     changed.touches(&absolute, first, last)
                                 });
+                            }
+                            // A rule that does not say which class it means may
+                            // be renaming across several. Recorded here, warned
+                            // about once at the end (Q10).
+                            if unnarrowed {
+                                for hit in &hits {
+                                    if let Some(class) = matcher::receiver_class(hit, &sigs) {
+                                        spread.push(class);
+                                    }
+                                }
                             }
                             if hits.is_empty() {
                                 Ok(None)
@@ -1015,6 +1061,7 @@ fn cmd_apply(
                         return Some(Outcome {
                             file,
                             sites: 0,
+                            spread: Vec::new(),
                             by_rule: Vec::new(),
                             rewritten: None,
                             refusal: Some(refusal),
@@ -1076,6 +1123,7 @@ fn cmd_apply(
             Some(Outcome {
                 file,
                 sites: total,
+                spread,
                 by_rule,
                 rewritten: Some(String::from_utf8_lossy(&current).into_owned()),
                 refusal: None,
@@ -1135,6 +1183,12 @@ fn cmd_apply(
                 println!("{}: {verb} {} site(s)", c.file, c.sites);
             }
             report_by_rule(&changed);
+            report_spread(
+                &outcomes
+                    .iter()
+                    .flat_map(|o| o.spread.iter())
+                    .collect::<Vec<_>>(),
+            );
             report_unsafe(&changed, &rules);
             report_residue(&left_over, templates);
         }

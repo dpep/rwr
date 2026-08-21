@@ -525,6 +525,45 @@ fn rake_files_are_searched() {
     );
 }
 
+/// The failure the refusal contract cannot catch: a rule that renames across
+/// two classes at exit 0, because there is no conflict to detect (Q10).
+#[test]
+fn a_rename_across_two_classes_warns() {
+    let dir = fixture(
+        "class Account\n  def display_name; 1; end\nend\n         class Company\n  def display_name; 2; end\nend\n         account = Account.new\ncompany = Company.new\n         account.display_name\ncompany.display_name\n",
+    );
+    let loose = dir.path().join("loose.yml");
+    std::fs::write(&loose, "match: $R.display_name\nrewrite: $R.full_name\n").expect("write");
+
+    let out = rwr(&[
+        "check",
+        loose.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(err.contains("2 different classes"), "{err}");
+    assert!(err.contains("Account"), "{err}");
+    assert!(err.contains("Company"), "{err}");
+
+    // Saying which class was meant is the fix, and silences it.
+    let narrow = dir.path().join("narrow.yml");
+    std::fs::write(
+        &narrow,
+        "match: $R.display_name\nwhere:\n  $R:\n    type: Account\nrewrite: $R.full_name\n",
+    )
+    .expect("write");
+    let scoped = rwr(&[
+        "check",
+        narrow.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    assert!(
+        !stderr(&scoped).contains("different classes"),
+        "{}",
+        stderr(&scoped)
+    );
+}
+
 /// No arguments is a usage error, not a silent no-op.
 #[test]
 fn bare_invocation_explains_itself() {
