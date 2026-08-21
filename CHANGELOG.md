@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-08-21
 
 **The shipped pack runs 42% faster** — 970 ms to 565 ms over discourse's 11,006 files — from
 deleting redundant work rather than anything clever. Every candidate file used to be reparsed
