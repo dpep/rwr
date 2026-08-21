@@ -1167,3 +1167,37 @@ three imports that went with them.
 Worth recording only for how it surfaced: `clippy` had been reporting them as dead for some
 time, and a cached lint result hid it until an unrelated new module forced a full re-lint. A
 gate that passes from cache is not the same as a gate that passes.
+
+## D61 - Chained receivers resolve only when the chain carries its own answer
+**Decided by measurement, and the measurement is mostly a negative result.**
+
+`Widget.new.foo` and `thing.dup.foo` resolve; `user.account.foo` does not, and will not.
+
+Three measurements across rails, discourse and mastodon, each of which changed the plan:
+
+1. **The bucket is not one problem.** Chained receivers are 15.8-27.4% of call sites, but
+   `X.new` — the case worth building first on intuition — is **under 4% of chains**.
+   Everything larger needs a method's return type.
+2. **Return types are mostly not in the syntax.** Only **2.3-4.5%** of method definitions have
+   a last expression that resolves to a class. **Seventy percent end in another call**, so an
+   index built from syntax recurses into more unknowns. That is not an implementation gap; it
+   is what dynamic typing means.
+3. **A quarter of the bucket is spec DSL.** `expect(...)` alone is 20-25% of every chained
+   receiver in both Rails applications. Nobody narrows a rename by an RSpec matcher, so the
+   headline percentage overstates the reachable problem badly.
+
+So: build the free part, and stop. Constructors and identity methods (`freeze`, `dup`,
+`clone`, `itself`, `tap`) need no index, compose recursively, and cannot be wrong. `then` is
+excluded because it returns the *block's* value, and `presence` because it may return nil —
+both would have been plausible-looking bugs.
+
+**What this settles about DESIGN.md §6.** The no-Sorbet path was required to stand alone.
+It does, for receivers named directly — locals, ivars, constants, `self`, constructors — and
+it does **not** reach chained receivers. Those need a type source or they stay residue. The
+honest default is residue: rwr does not match them, does not rewrite them, and reports them,
+which is under-matching in the safe direction.
+
+*Reverses if:* a repository carries RBS signatures or Sorbet RBI, which state return types
+outright and turn the 70% into data rather than inference. That is the case for ingesting
+them — a much stronger one than "it would help receiver narrowing generally", which this
+measurement refutes.

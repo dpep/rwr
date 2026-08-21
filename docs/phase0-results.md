@@ -486,3 +486,68 @@ already clean, which is a reason to read a zero rather than accept it.
 and `each`. That is what forced the name-anchoring test in D7's amendment — the failure only
 appears at a scale where common method names are everywhere, which is exactly the scale the
 feature was designed for.
+
+## Chained receivers — **measured, and the answer is a limit rather than a feature**
+
+Chained receivers were the largest unresolved bucket and the obvious next thing to build.
+Three measurements, in order, and each one changed the plan.
+
+### (1) The bucket is not one problem
+
+| | rails | discourse | mastodon |
+|---|---|---|---|
+| chained receivers | 15.8% of calls | 27.4% | 25.8% |
+| …inner call has no receiver | 27.2% of chains | 62.8% | 65.9% |
+| …inner receiver is another call | 19.6% | 13.9% | 16.9% |
+| …**`X.new`** | **3.6%** | **1.9%** | **1.4%** |
+| …identity method (`freeze`, `dup`, …) | 0.3% | 0.0% | 0.1% |
+
+The constructor case — the one worth building first on intuition — is under 4% of chains.
+Everything larger needs to know what a method *returns*.
+
+### (2) Return types are mostly not in the syntax
+
+Classifying every method definition by its last expression:
+
+| Return shape | rails | discourse | mastodon |
+|---|---|---|---|
+| another call | 70.0% | 59.6% | 61.2% |
+| literal | 4.4% | 9.1% | 5.5% |
+| branchy (`if`/`case`) | 6.9% | 8.7% | 11.9% |
+| **resolves to a class** | **2.9%** | **4.5%** | **2.3%** |
+
+"Resolves to a class" is `X.new`, `@ivar ||= X.new`, a constant, `self`, or a bare `@ivar`.
+**Seventy percent of methods end in another call**, so a return-type index built from syntax
+recurses into more unknowns and bottoms out unresolved. This is not a gap in the
+implementation; it is what dynamic typing means.
+
+### (3) A quarter of the bucket is spec DSL
+
+The commonest inner call of a chain, as a share of all chains:
+
+| | rails | discourse | mastodon |
+|---|---|---|---|
+| `expect` | — | **24.8%** | **19.9%** |
+| `[]` | 6.0% | 5.4% | 2.9% |
+| `new` | 3.9% | 2.4% | 1.6% |
+| `described_class` / `subject` | — | 2.5% | 5.9% |
+
+In both Rails applications, `expect(...)` alone is a fifth to a quarter of every chained
+receiver. Nobody narrows a rename by an RSpec matcher, so the headline percentage overstates
+the reachable problem by a wide margin.
+
+### What was built, and what was not
+
+**Built:** chains that carry their own answer — `Widget.new.foo`, and identity methods
+(`freeze`, `dup`, `clone`, `itself`, `tap`) which pass a type through and compose
+recursively. No index, no cross-file work, and it cannot be wrong. `new` is the commonest
+resolvable inner call in all three corpora.
+
+**Not built:** a return-type index. At 2–4% class-typed definitions the yield does not pay
+for the machinery, and the shape of the remainder says it never will from syntax alone.
+
+**What this settles:** the no-Sorbet path, which DESIGN.md §6 required to stand alone, stands
+for *receivers named directly* — locals, ivars, constants, `self`, constructors — and does
+**not** reach chained receivers. Those need a type source (RBS or Sorbet) or they stay
+residue. Staying residue is the honest default: rwr does not match them, does not rewrite
+them, and reports them.

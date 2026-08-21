@@ -655,6 +655,38 @@ pub(crate) fn resolve_type(node: &Node<'_>, scope: &[String], singleton: bool) -
                 Receiver::Instance(n)
             }
         }),
+        // A chained receiver: `Widget.new.foo`, `thing.dup.foo`.
+        //
+        // Measured before building: chained receivers are 15.8% of call sites
+        // in rails and 27% in a Rails app, but they are not one problem.
+        // Following a chain in general needs to know what a method *returns*,
+        // and only 2-4% of method definitions say that syntactically -- 70% end
+        // in another call, so resolution recurses into more unknowns. What is
+        // free is the chain that carries its own answer, and `new` is the
+        // commonest such inner call in all three corpora (docs/scaling.md).
+        Node::CallNode { .. } => {
+            let call = node.as_call_node()?;
+            let name = call.name();
+            match name.as_slice() {
+                // `Widget.new` is an instance of Widget, said outright.
+                b"new" => match call.receiver()? {
+                    receiver @ (Node::ConstantReadNode { .. } | Node::ConstantPathNode { .. }) => {
+                        match resolve_type(&receiver, scope, singleton)? {
+                            Receiver::Class(name) => Some(Receiver::Instance(name)),
+                            Receiver::Instance(_) => None,
+                        }
+                    }
+                    _ => None,
+                },
+                // Methods that hand their receiver back, so the type passes
+                // through. Deliberately not `then`, which returns the block's
+                // value, nor `presence`, which may return nil.
+                b"freeze" | b"dup" | b"clone" | b"itself" | b"tap" => {
+                    resolve_type(&call.receiver()?, scope, singleton)
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1447,6 +1479,41 @@ end
     #[test]
     fn search_is_reentrant() {
         assert_eq!(matches("foo($A)", "foo(foo(1))"), 2);
+    }
+
+    /// The part of the chained-receiver bucket that carries its own answer.
+    ///
+    /// Following a chain in general needs a method's return type, which only
+    /// 2-4% of definitions state syntactically. `Widget.new` states it.
+    #[test]
+    fn a_constructor_chain_resolves_its_receiver() {
+        let rule =
+            "match: $R.display_name\nwhere:\n  $R:\n    type: Widget\nrewrite: $R.full_name\n";
+        assert_eq!(applied(rule, "Widget.new.display_name\n"), 1);
+        assert_eq!(applied(rule, "Widget.new(1, 2).display_name\n"), 1);
+        assert_eq!(applied(rule, "Other.new.display_name\n"), 0);
+        // Unresolved is not a match: narrowing may only ever narrow.
+        assert_eq!(applied(rule, "something.display_name\n"), 0);
+    }
+
+    /// Methods that hand their receiver back pass the type through, and compose.
+    #[test]
+    fn identity_methods_pass_the_type_along() {
+        let rule =
+            "match: $R.display_name\nwhere:\n  $R:\n    type: Widget\nrewrite: $R.full_name\n";
+        assert_eq!(applied(rule, "Widget.new.freeze.display_name\n"), 1);
+        assert_eq!(applied(rule, "Widget.new.dup.itself.display_name\n"), 1);
+        // `then` returns the *block's* value, so it is not one of them.
+        assert_eq!(applied(rule, "Widget.new.then { |w| w }.display_name\n"), 0);
+    }
+
+    /// `Widget.new` is an instance; `Widget` is the class object. A constructor
+    /// chain must not satisfy a class-method constraint.
+    #[test]
+    fn a_constructor_chain_is_an_instance_not_the_class() {
+        let rule = "match: $R.display_name\nwhere:\n  $R:\n    type: Widget\n    kind: class\nrewrite: $R.full_name\n";
+        assert_eq!(applied(rule, "Widget.new.display_name\n"), 0);
+        assert_eq!(applied(rule, "Widget.display_name\n"), 1);
     }
 
     /// `gsub` -> `tr` is only valid character-for-character, so the predicate

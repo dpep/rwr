@@ -21,17 +21,6 @@ renames with hand-enumerated ground truth; residue reporting must catch the dyna
 a human found. If it fails and ast-grep passes the syntactic partition, the honest outcome
 is to contribute upstream and stop.
 
-## Q2 — Does receiver-narrowing work without Sorbet?
-
-If it depends materially on Sorbet, the OSS value proposition is weak — most public Ruby
-repos have no sigs, and the benchmark corpus likely won't either.
-
-How much is recoverable from a symbol index plus local inference (literal receivers,
-`Foo.new` assigned to a local, explicit constants, `self` in a known class)?
-
-**Now scheduled as Phase 0 measurement (c)**, on the *public* corpus specifically. Sorbet
-ingestion is out of Phase 2's committed scope until this answers.
-
 ## Q7 — Perf targets are unfalsifiable until Phase 0
 
 No latency numbers are set because none are measured. Phase 0 must produce cold parse (both
@@ -205,3 +194,26 @@ overrides.
 **An undetected version is not permission to assume the newest.** The rules are held back and
 the run says so, the same shape as the unsafe gate (D57) — a rule that did not run must not
 look like a rule that found nothing.
+
+## Q2 — Does receiver-narrowing work without Sorbet? — **closed, with a boundary**
+
+**Yes for receivers named directly; no for chained ones, permanently.**
+
+Recoverable without a type source, and shipped: `self` (singleton-aware), constants, locals
+and instance variables assigned from a constructor, and — since D61 — chains that carry their
+own answer (`Widget.new.foo`, and identity methods passing a type through).
+
+Not recoverable, and now measured rather than assumed: **chained receivers**, 15.8-27.4% of
+call sites. Following a chain needs a method's return type, and only **2.3-4.5%** of method
+definitions state one syntactically; **70% end in another call**, so inference recurses into
+more unknowns. See `docs/phase0-results.md` for the three measurements and D61 for the
+decision.
+
+**The OSS value proposition survives**, because the failure is under-matching rather than
+mis-matching: an unresolved receiver does not match, is not rewritten, and is reported as
+residue. A rule narrowed by `type:` is exactly as correct on a repo with no signatures — it
+simply reaches fewer sites, and says which ones it could not reach.
+
+**This is also the real case for RBS/Sorbet ingestion**, and a much narrower one than "it
+would help receiver narrowing": it would turn that 70% from inference into data. That remains
+out of committed scope, but the question it has to answer is now specific.

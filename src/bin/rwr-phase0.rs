@@ -45,6 +45,13 @@ struct RepoReport {
     call_sites: usize,
     distinct_names: usize,
     receiver_shapes: HashMap<String, usize>,
+    /// How many method definitions there are, and how their return values
+    /// classify. Sizes how much of a return-type index syntax alone can supply,
+    /// which is what resolving a chained receiver needs.
+    method_definitions: usize,
+    return_shapes: HashMap<String, usize>,
+    /// The commonest inner calls of a chained receiver, most frequent first.
+    chain_inner_names: Vec<(String, usize)>,
     /// The names with the most call sites, with how pinned-down their receivers
     /// are. This is the input to measurement (b): a name whose sites carry many
     /// receiver shapes is one a bare-name rename damages.
@@ -65,9 +72,92 @@ struct NameReport {
     distinct_shapes: usize,
 }
 
-/// One file's contribution: byte length, whether it failed to parse, and the
-/// calls it contained.
-type FileMeasurement = (u64, bool, Vec<(String, &'static str)>);
+/// One file's contribution: byte length, whether it failed to parse, the calls
+/// it contained, and how each method definition's return value classifies.
+type FileMeasurement = (
+    u64,
+    bool,
+    Vec<(String, &'static str)>,
+    Vec<&'static str>,
+    Vec<String>,
+);
+
+/// How a method definition's return value classifies.
+///
+/// Resolving a chained receiver means knowing what the inner call *returns*, so
+/// the question this answers is how much of a return-type index is even
+/// derivable from syntax. A method whose last expression is `Widget.new` has an
+/// answer; one that ends in a conditional does not, without real inference.
+fn return_shape(def: &ruby_prism::DefNode<'_>) -> &'static str {
+    let Some(body) = def.body() else {
+        return "empty";
+    };
+    let Some(statements) = body.as_statements_node() else {
+        return "other";
+    };
+    let Some(last) = statements.body().iter().last() else {
+        return "empty";
+    };
+    classify_return(&last)
+}
+
+fn classify_return(node: &Node<'_>) -> &'static str {
+    match node {
+        // `def build; Widget.new; end` -- the answer is written down.
+        Node::CallNode { .. } => {
+            let Some(call) = node.as_call_node() else {
+                return "other";
+            };
+            if call.name().as_slice() == b"new"
+                && matches!(
+                    call.receiver(),
+                    Some(Node::ConstantReadNode { .. } | Node::ConstantPathNode { .. })
+                )
+            {
+                "constructor"
+            } else {
+                "call"
+            }
+        }
+        Node::InstanceVariableReadNode { .. } => "ivar",
+        // `@foo ||= Widget.new` -- the memoisation idiom, worth counting apart
+        // because it is where a constructor hides in a Rails codebase.
+        Node::InstanceVariableOperatorWriteNode { .. } => "ivar_memo",
+        Node::InstanceVariableOrWriteNode { .. } => {
+            let Some(write) = node.as_instance_variable_or_write_node() else {
+                return "ivar_memo";
+            };
+            match classify_return(&write.value()) {
+                "constructor" => "ivar_memo_constructor",
+                _ => "ivar_memo",
+            }
+        }
+        Node::LocalVariableReadNode { .. } => "local",
+        Node::SelfNode { .. } => "self",
+        Node::ConstantReadNode { .. } | Node::ConstantPathNode { .. } => "constant",
+        Node::StringNode { .. }
+        | Node::InterpolatedStringNode { .. }
+        | Node::SymbolNode { .. }
+        | Node::IntegerNode { .. }
+        | Node::FloatNode { .. }
+        | Node::ArrayNode { .. }
+        | Node::HashNode { .. }
+        | Node::TrueNode { .. }
+        | Node::FalseNode { .. }
+        | Node::NilNode { .. } => "literal",
+        Node::IfNode { .. } | Node::UnlessNode { .. } | Node::CaseNode { .. } => "branchy",
+        Node::ReturnNode { .. } => {
+            let Some(ret) = node.as_return_node() else {
+                return "other";
+            };
+            match ret.arguments().and_then(|a| a.arguments().iter().next()) {
+                Some(first) => classify_return(&first),
+                None => "literal",
+            }
+        }
+        _ => "other",
+    }
+}
 
 fn shape(receiver: Option<Node<'_>>) -> &'static str {
     match receiver {
@@ -77,15 +167,57 @@ fn shape(receiver: Option<Node<'_>>) -> &'static str {
             Node::ConstantReadNode { .. } | Node::ConstantPathNode { .. } => "constant",
             Node::LocalVariableReadNode { .. } => "local",
             Node::InstanceVariableReadNode { .. } => "ivar",
-            Node::CallNode { .. } => "chained",
+            Node::CallNode { .. } => chain_shape(&n),
             _ => "other",
         },
+    }
+}
+
+/// What kind of chain a chained receiver is.
+///
+/// "Chained" is the largest unresolved bucket, but it is not one problem. Some
+/// chains carry their own answer -- `Widget.new.foo` names the class outright --
+/// and others need to know what a method returns, which is a cross-file index.
+/// Sizing the two decides how much machinery the bucket is worth.
+fn chain_shape(node: &Node<'_>) -> &'static str {
+    let Some(call) = node.as_call_node() else {
+        return "chained:other";
+    };
+    let name = call.name();
+    let name = name.as_slice();
+
+    // `Widget.new.foo` -- the receiver's type is written right there.
+    if name == b"new" {
+        return match call.receiver() {
+            Some(Node::ConstantReadNode { .. } | Node::ConstantPathNode { .. }) => {
+                "chained:constructor"
+            }
+            _ => "chained:other",
+        };
+    }
+    // Identity-ish methods pass their receiver's type straight through.
+    if matches!(name, b"freeze" | b"dup" | b"clone" | b"itself" | b"tap") {
+        return "chained:identity";
+    }
+    match call.receiver() {
+        None => "chained:implicit",
+        Some(Node::SelfNode { .. }) => "chained:self",
+        Some(Node::ConstantReadNode { .. } | Node::ConstantPathNode { .. }) => "chained:constant",
+        Some(Node::InstanceVariableReadNode { .. }) => "chained:ivar",
+        Some(Node::LocalVariableReadNode { .. }) => "chained:local",
+        Some(Node::CallNode { .. }) => "chained:deeper",
+        _ => "chained:other",
     }
 }
 
 #[derive(Default)]
 struct Calls {
     seen: Vec<(String, &'static str)>,
+    /// How each method definition's return value classifies.
+    returns: Vec<&'static str>,
+    /// The name of the *inner* call of a chained receiver. A bucket dominated
+    /// by spec DSL is not the same problem as one dominated by domain methods.
+    inner: Vec<String>,
 }
 
 impl<'pr> Visit<'pr> for Calls {
@@ -94,7 +226,18 @@ impl<'pr> Visit<'pr> for Calls {
             String::from_utf8_lossy(node.name().as_slice()).into_owned(),
             shape(node.receiver()),
         ));
+        if let Some(receiver) = node.receiver()
+            && let Some(inner) = receiver.as_call_node()
+        {
+            self.inner
+                .push(String::from_utf8_lossy(inner.name().as_slice()).into_owned());
+        }
         ruby_prism::visit_call_node(self, node);
+    }
+
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        self.returns.push(return_shape(node));
+        ruby_prism::visit_def_node(self, node);
     }
 }
 
@@ -120,11 +263,11 @@ fn measure(root: &Path) -> RepoReport {
             let len = src.len() as u64;
             let parsed = ruby_prism::parse(&src);
             if parsed.errors().count() > 0 {
-                return Some((len, true, Vec::new()));
+                return Some((len, true, Vec::new(), Vec::new(), Vec::new()));
             }
             let mut calls = Calls::default();
             calls.visit(&parsed.node());
-            Some((len, false, calls.seen))
+            Some((len, false, calls.seen, calls.returns, calls.inner))
         })
         .collect();
     let unreadable = attempted.iter().filter(|m| m.is_none()).count();
@@ -134,7 +277,26 @@ fn measure(root: &Path) -> RepoReport {
     let mut by_name: HashMap<String, Vec<&'static str>> = HashMap::new();
     let mut shapes: HashMap<String, usize> = HashMap::new();
     let mut sites = 0usize;
-    for (_, _, calls) in &per_file {
+    let mut returns: HashMap<String, usize> = HashMap::new();
+    let mut defs = 0usize;
+    let mut inner: HashMap<String, usize> = HashMap::new();
+    for (_, _, _, _, names) in &per_file {
+        for name in names {
+            *inner.entry(name.clone()).or_default() += 1;
+        }
+    }
+    let mut hot_inner: Vec<(String, usize)> = inner.into_iter().collect();
+    hot_inner.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    hot_inner.truncate(25);
+
+    for (_, _, _, shapes, _) in &per_file {
+        for shape in shapes {
+            *returns.entry((*shape).to_string()).or_default() += 1;
+            defs += 1;
+        }
+    }
+
+    for (_, _, calls, _, _) in &per_file {
         for (name, sh) in calls {
             by_name.entry(name.clone()).or_default().push(sh);
             *shapes.entry((*sh).to_string()).or_default() += 1;
@@ -170,12 +332,15 @@ fn measure(root: &Path) -> RepoReport {
         files: files.len(),
         files_measured: per_file.len(),
         files_unreadable: unreadable,
-        bytes: per_file.iter().map(|(n, _, _)| n).sum(),
+        bytes: per_file.iter().map(|(n, _, _, _, _)| n).sum(),
         parse_ms,
-        unparsed: per_file.iter().filter(|(_, bad, _)| *bad).count(),
+        unparsed: per_file.iter().filter(|(_, bad, _, _, _)| *bad).count(),
         call_sites: sites,
         distinct_names: by_name.len(),
         receiver_shapes: shapes,
+        method_definitions: defs,
+        return_shapes: returns,
+        chain_inner_names: hot_inner,
         hot_names: hot,
         hot_names_omitted: omitted,
         hot_names_min_sites: MIN_SITES,

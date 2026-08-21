@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+**Constructor chains resolve their receiver.** `Widget.new.display_name` now narrows by
+`type: Widget`, and identity methods (`freeze`, `dup`, `clone`, `itself`, `tap`) pass a type
+through, so `Widget.new.dup.display_name` resolves too. Anything else chained stays
+unresolved and is reported as residue — see D61 for the measurements that drew that line.
+
 **The hold-back notices are one line each.** The count of rules held back — unsafe, or
 needing a newer Ruby — is still unconditional, since a rule that did not run must never look
 like a rule that found nothing. The per-rule reasons moved behind `-e/--explain`: six lines
