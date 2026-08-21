@@ -12,6 +12,7 @@
 use super::compare::{self, Atom};
 use super::generated;
 use super::prepare::{Binding, Prepared};
+use crate::hierarchy::Hierarchy;
 use crate::rule::{Constraint, Scope};
 use ruby_prism::Node;
 use std::collections::HashMap;
@@ -289,11 +290,15 @@ pub(crate) fn satisfies(
     found: &Match<'_>,
     constraints: &HashMap<String, Constraint>,
     scope: &Scope,
+    hierarchy: &Hierarchy,
 ) -> bool {
-    if let Some(wanted) = &scope.inside
-        && !found.scope.iter().any(|s| s == wanted)
-    {
-        return false;
+    if let Some(wanted) = &scope.inside {
+        let reached = found.scope.iter().any(|s| {
+            s == wanted || (scope.subclasses.unwrap_or(false) && hierarchy.descends_from(s, wanted))
+        });
+        if !reached {
+            return false;
+        }
     }
     if let Some(wanted) = scope.singleton
         && found.singleton != wanted
@@ -333,7 +338,10 @@ pub(crate) fn satisfies(
             let Some(resolved) = resolved else {
                 return false;
             };
-            if resolved.class_name() != wanted.as_str() {
+            let matches_class = resolved.class_name() == wanted.as_str()
+                || (constraint.subclasses.unwrap_or(false)
+                    && hierarchy.descends_from(resolved.class_name(), wanted));
+            if !matches_class {
                 return false;
             }
             // `Account.foo` and `account.foo` are different methods, so a
@@ -644,12 +652,13 @@ end
                 name: Some(vec!["select".into(), "find_all".into()]),
                 receiver_type: None,
                 kind: None,
+                subclasses: None,
             },
         );
         let scope = Scope::default();
         let narrowed = hits
             .iter()
-            .filter(|m| satisfies(m, &constraints, &scope))
+            .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
             .count();
         assert_eq!(narrowed, 2, "reject is not a synonym for select");
     }
@@ -677,12 +686,13 @@ end
                 name: None,
                 receiver_type: Some("Account".into()),
                 kind: Some(Kind::Instance),
+                subclasses: None,
             },
         );
         let scope = Scope::default();
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &instances, &scope))
+                .filter(|m| satisfies(m, &instances, &scope, &Hierarchy::default()))
                 .count(),
             0
         );
@@ -694,13 +704,59 @@ end
                 name: None,
                 receiver_type: Some("Account".into()),
                 kind: Some(Kind::Class),
+                subclasses: None,
             },
         );
         let narrowed = hits
             .iter()
-            .filter(|m| satisfies(m, &classes, &scope))
+            .filter(|m| satisfies(m, &classes, &scope, &Hierarchy::default()))
             .count();
         assert_eq!(narrowed, 1, "only Account's class call, not Widget's");
+    }
+
+    /// D51: a rename must reach subclass call sites, or it ships a
+    /// NoMethodError. Off by default -- narrowing may only ever narrow -- and
+    /// on for a rename, where leaving one behind breaks the code.
+    #[test]
+    fn subclasses_are_admitted_only_when_asked_for() {
+        let prepared = prepare("$R.display_name").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let src = "premium = Premium.new\npremium.display_name\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = hits_for("", src, &parsed, &prepared, &p_node);
+        assert_eq!(hits.len(), 1);
+
+        let hierarchy = Hierarchy::from_source("class Premium < Account; end");
+        let scope = Scope::default();
+        let constrain = |subclasses| {
+            let mut c = HashMap::new();
+            c.insert(
+                "$R".to_string(),
+                Constraint {
+                    name: None,
+                    receiver_type: Some("Account".into()),
+                    kind: Some(Kind::Instance),
+                    subclasses,
+                },
+            );
+            c
+        };
+
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &constrain(Some(true)), &scope, &hierarchy))
+                .count(),
+            1,
+            "a Premium receiver should match Account once subclasses are admitted"
+        );
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &constrain(None), &scope, &hierarchy))
+                .count(),
+            0,
+            "and must not, by default"
+        );
     }
 
     /// An unresolvable receiver must *not* match. Narrowing may only ever
@@ -722,12 +778,13 @@ end
                 name: None,
                 receiver_type: Some("Account".into()),
                 kind: None,
+                subclasses: None,
             },
         );
         let scope = Scope::default();
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &constraints, &scope))
+                .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
                 .count(),
             0
         );
@@ -753,12 +810,13 @@ end
                 name: None,
                 receiver_type: Some("Account".into()),
                 kind: None,
+                subclasses: None,
             },
         );
         let scope = Scope::default();
         let narrowed = hits
             .iter()
-            .filter(|m| satisfies(m, &constraints, &scope))
+            .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
             .count();
         assert_eq!(narrowed, 1, "only the local assigned from Account.new");
     }
@@ -785,6 +843,7 @@ end
                     name: None,
                     receiver_type: Some("Account".into()),
                     kind,
+                    subclasses: None,
                 },
             );
             c
@@ -793,7 +852,7 @@ end
         let instances = constrain(Some(Kind::Instance));
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &instances, &scope))
+                .filter(|m| satisfies(m, &instances, &scope, &Hierarchy::default()))
                 .count(),
             1,
             "only account.display_name is an instance call"
@@ -802,7 +861,7 @@ end
         let classes = constrain(Some(Kind::Class));
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &classes, &scope))
+                .filter(|m| satisfies(m, &classes, &scope, &Hierarchy::default()))
                 .count(),
             1,
             "only Account.display_name is a class call"
@@ -811,7 +870,7 @@ end
         // Default is instance, matching Ruby's `Account#display_name`.
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &constrain(None), &scope))
+                .filter(|m| satisfies(m, &constrain(None), &scope, &Hierarchy::default()))
                 .count(),
             1
         );
@@ -847,10 +906,11 @@ end
         let singleton = Scope {
             inside: Some("Account".into()),
             singleton: Some(true),
+            subclasses: None,
         };
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &HashMap::new(), &singleton))
+                .filter(|m| satisfies(m, &HashMap::new(), &singleton, &Hierarchy::default()))
                 .count(),
             1
         );
@@ -858,10 +918,11 @@ end
         let instance = Scope {
             inside: Some("Account".into()),
             singleton: Some(false),
+            subclasses: None,
         };
         assert_eq!(
             hits.iter()
-                .filter(|m| satisfies(m, &HashMap::new(), &instance))
+                .filter(|m| satisfies(m, &HashMap::new(), &instance, &Hierarchy::default()))
                 .count(),
             1
         );
@@ -883,10 +944,11 @@ end
         let scope = Scope {
             inside: Some("Account".into()),
             singleton: None,
+            subclasses: None,
         };
         let narrowed = hits
             .iter()
-            .filter(|m| satisfies(m, &HashMap::new(), &scope))
+            .filter(|m| satisfies(m, &HashMap::new(), &scope, &Hierarchy::default()))
             .count();
         assert_eq!(narrowed, 1, "only the call inside Account");
     }
@@ -909,10 +971,14 @@ end
                 name: Some(vec!["x".into()]),
                 receiver_type: None,
                 kind: None,
+                subclasses: None,
             },
         );
         let scope = Scope::default();
-        assert!(hits.iter().all(|m| !satisfies(m, &constraints, &scope)));
+        assert!(
+            hits.iter()
+                .all(|m| !satisfies(m, &constraints, &scope, &Hierarchy::default()))
+        );
     }
 
     /// Nested matches are reported: find is observation (D15).

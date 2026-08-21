@@ -523,6 +523,19 @@ fn cmd_apply(
     scoped.extend(common.path.iter().cloned());
     let files = source::ruby_files(&scoped, common.include_vendored);
 
+    // Built per run rather than cached: a full rails parse is under 200ms
+    // (Phase 0 measurement (d)), so there is no staleness to manage.
+    let hierarchy = if rules.iter().any(|r| {
+        r.scope.subclasses.unwrap_or(false)
+            || r.constraints
+                .values()
+                .any(|c| c.subclasses.unwrap_or(false))
+    }) {
+        crate::hierarchy::Hierarchy::from_files(&files)
+    } else {
+        crate::hierarchy::Hierarchy::default()
+    };
+
     // Each file is independent: one refusal declines that file and is reported,
     // rather than aborting work already proven safe elsewhere (DESIGN.md §4).
     struct Outcome {
@@ -564,7 +577,14 @@ fn cmd_apply(
                         Some(p_root) => {
                             let hits: Vec<_> = matcher::search(&p_root, &parsed.node(), prepared)
                                 .into_iter()
-                                .filter(|m| matcher::satisfies(m, &rule.constraints, &rule.scope))
+                                .filter(|m| {
+                                    matcher::satisfies(
+                                        m,
+                                        &rule.constraints,
+                                        &rule.scope,
+                                        &hierarchy,
+                                    )
+                                })
                                 .collect();
                             if hits.is_empty() {
                                 Ok(None)

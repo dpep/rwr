@@ -6,6 +6,8 @@
 //! implement and `docs/decisions.md` for why each piece is shaped as it is.
 
 pub mod cli;
+#[allow(dead_code)]
+pub(crate) mod hierarchy;
 pub(crate) mod pattern;
 #[allow(dead_code)]
 pub(crate) mod residue;

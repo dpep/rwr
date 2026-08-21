@@ -53,6 +53,13 @@ pub(crate) struct Constraint {
     /// `Account#display_name` notation and the commoner case.
     #[serde(default)]
     pub kind: Option<Kind>,
+
+    /// Admit receivers whose class descends from `type:` (D51).
+    ///
+    /// Off by default, because narrowing must only ever narrow. On for a
+    /// rename, where a subclass call site left behind is a `NoMethodError`.
+    #[serde(default)]
+    pub subclasses: Option<bool>,
 }
 
 /// Which of a class's two method tables a constraint means.
@@ -90,6 +97,11 @@ pub(crate) struct Scope {
     /// rename could not reach its implicit-self calls.
     #[serde(default)]
     pub singleton: Option<bool>,
+
+    /// Admit classes descending from `inside:` (D51), so a rename reaches an
+    /// override's definition as well as the original's.
+    #[serde(default)]
+    pub subclasses: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -150,9 +162,13 @@ impl MethodRename {
     pub(crate) fn expand(&self) -> Vec<Rule> {
         let (class, name, kind) = self.parts();
         let new = &self.rename;
+        // A rename covers the hierarchy: reaching subclass call sites without
+        // renaming an override's definition would ship a NoMethodError, and
+        // renaming the definition without the call sites would too.
         let scope = || Scope {
             inside: class.map(str::to_string),
             singleton: None,
+            subclasses: Some(true),
         };
         let receiver = || {
             let mut c = HashMap::new();
@@ -162,6 +178,7 @@ impl MethodRename {
                     name: None,
                     receiver_type: class.map(str::to_string),
                     kind: Some(kind),
+                    subclasses: Some(true),
                 },
             );
             c
@@ -206,6 +223,7 @@ impl MethodRename {
                 scope: Scope {
                     inside: class.map(str::to_string),
                     singleton: Some(kind == Kind::Class),
+                    subclasses: Some(true),
                 },
             });
         }

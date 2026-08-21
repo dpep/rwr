@@ -913,10 +913,34 @@ rewrote 2 site(s)
 That is the design working as intended - do what can be proven, refuse the rest, and account
 for it - rather than a gap papered over.
 
-**Roadmap:** a class-hierarchy index. Walk every file recording `class X < Y`, then let
-`type: Account` optionally admit descendants (`type: Account, subclasses: true`) and let a
-rename see overrides. It needs the cross-file index Phase 1 deliberately avoided, which is why
-it belongs to Phase 2's later half rather than to this pass.
+**Resolved by D52.** The class-hierarchy index is built.
 
-*Reverses if:* measurement on a real monolith shows subclass call sites are rare enough that
-the residue report is a sufficient permanent answer.
+## D52 - Class hierarchy, built per run
+**Decided.** Implements the roadmap item D51 recorded, and closes the gap that produced
+demonstrably broken code: renaming `Account#display_name` left `premium.display_name` behind
+and shipped a `NoMethodError`.
+
+`src/hierarchy` walks every Ruby file collecting `class X < Y`, giving `descends_from` and
+`descendants_of`. Two constraints consume it:
+
+- `where: { $R: { type: Account, subclasses: true } }` admits receivers whose class descends
+  from Account, reaching subclass call sites.
+- `scope: { inside: Account, subclasses: true }` admits descendant classes, reaching an
+  **override's definition** as well as the original's.
+
+**Both halves are needed together.** Reaching subclass call sites without renaming an
+override's definition breaks the code, and renaming the definition without the call sites
+breaks it the other way. The method notation (D50) therefore sets both, because that is what a
+rename means.
+
+**Off by default.** Narrowing may only ever narrow (D49's principle), so a bare `type:`
+constraint stays exact. A rename opts in; an ad-hoc query does not.
+
+**Built per run, not cached.** Phase 0 measurement (d) found a full rails parse takes under
+200ms, so there is no staleness to manage and D5 still holds -- the index that Phase 1
+deliberately avoided turns out to be affordable precisely because parsing is cheap. It is
+built only when a rule actually asks for subclasses, so an ad-hoc query pays nothing.
+
+A superclass named through a path (`class Premium < Billing::Account`) resolves by its final
+name, matching what a `type:` constraint names. Cycles -- impossible in valid Ruby, possible
+in a half-written file the walk reads -- terminate rather than hang.
