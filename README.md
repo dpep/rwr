@@ -48,6 +48,17 @@ rwr is not a RuboCop replacement. RuboCop owns the standing community rule corpu
 one-off migrations that do not deserve a cop class, and for rules RuboCop cannot express
 because its patterns are purely syntactic.
 
+## Gathering data from another machine
+
+`rwr-phase0` emits a JSON report of aggregates -- counts, timings, receiver distributions --
+with no source text or paths, so Phase 0 can be measured on codebases that cannot be shared.
+See [docs/data-collection.md](docs/data-collection.md).
+
+```sh
+cargo install --git https://github.com/dpep/rwr
+rwr-phase0 --label monolith ~/path/to/monolith > phase0-monolith.json
+```
+
 ## License
 
 MIT
