@@ -13,3 +13,6 @@
 // before anything depends on it. Drop this allow when the matcher lands.
 #[allow(dead_code)]
 pub(crate) mod metavar;
+
+#[allow(dead_code)]
+pub(crate) mod prepare;

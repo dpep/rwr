@@ -737,3 +737,72 @@ times across six unresolvable shapes is not.
 
 This also sharpens the Phase 0 (a) residue spike: it should pick targets by *shape diversity*,
 not by picking one rare and one common name.
+
+## D36 - The comparator is generated from Prism's schema; locations never compare
+**Decided** after an independent staff-engineer review rejected the first proposal.
+
+**What was rejected.** "Two nodes are equal iff same variant, same children, and equal
+*interstitial source* (bytes not covered by a child, whitespace-normalised)." It promised zero
+per-node-type code and free concrete-syntax sensitivity. It was wrong twice over:
+
+- **It contradicts decisions already recorded.** DESIGN.md section 2 says `and`/`&&` and
+  rocket-vs-shorthand are distinguishable *by a `where:` predicate* - core equality is
+  tree-equality and spelling is opt-in. Interstitial equality inverts that, making spelling
+  mandatory with no way to opt out. It also reintroduces exactly the textual comparison D16
+  rejected as "Comby's known mistake", at the heart of node equality: `1_000` != `1000`,
+  `"x"` != `'x'`, `foo a` != `foo(a)`.
+- **Two decisive failures.** Trailing commas: `foo(a, b,)` vs `foo(a, b)` differ only in
+  interstitial text that whitespace normalisation does not touch, so every multiline literal
+  silently fails to match - and trailing commas are on the author's wanted-rules list.
+  Heredocs are worse and in the worse direction: per D14 a heredoc node's range is
+  `opening_loc` only, so interstitial comparison never sees the bodies and two calls with
+  *different* heredoc content compare **equal**. A silent false match is the worst outcome the
+  design admits.
+
+**What replaces it.** Two nodes are equal iff **same variant, equal atoms, and pairwise-equal
+children** - where an atom is a name, value, or semantic flag. **Locations never participate.**
+
+`ruby-prism` vendors `config.json`, the machine-readable schema Prism's own `build.rs`
+consumes. Field census across all 151 nodes: 190 child fields, **228 location fields**, 67
+`constant` fields (where `CallNode.name` hides - the trap that started this), 18 value fields,
+15 flag families. Only 66 of 151 node types carry atoms at all.
+
+**So the comparator is generated from that schema, not hand-written**, and drift is defined out
+of existence twice:
+- A new Prism *variant* fails a non-exhaustive match -> **compile error**.
+- A new *field* on an existing variant - the genuinely silent case - fails a **parity test**
+  that reads the vendored `config.json` and asserts every field of every node is classified as
+  child, atom, or ignored-location. Refuse-rather-than-guess, applied at the meta level.
+
+**Atom policy** (the part deserving judgement - a table, not a codebase):
+
+| field kind | rule |
+|---|---|
+| `constant*` | compare **resolved bytes**, never ids - pattern and target come from different parses with different constant pools |
+| `string` | compare **unescaped values**, so `"x"` == `'x'` and **heredoc bodies compare correctly with zero heredoc-specific code** - the case that killed interstitial becomes free |
+| `integer` / `double` | value compare: `1_000` == `1000`, `0x10` == `16` (base is spelling) |
+| flags | per-family semantic mask: ignore parse artifacts (`VARIABLE_CALL`, so `foo` == `foo()`), compare semantic bits (regex `i`/`m`/`x`) |
+| `location*` | never compared. `AndNode::operator_loc` and friends stay `where:` predicates, as section 2 promised |
+
+**One comparator, three consumers**, for conceptual integrity: matching, D16's repeated-metavariable
+`ast_eq`, and section 7's reparse-verify. If each grows its own equality they drift, and the
+verify step stops guarding the matcher. The equality semantics are a **public contract** and
+belong documented in one place.
+
+Performance falls out: discriminant plus root atom rejects nearly every candidate in O(1), so
+matching is O(target nodes).
+
+## D18 amended - repair is per-placeholder, not per-pattern
+D18 proposed parsing with lowercase placeholders and retrying capitalised. That cannot serve a
+pattern needing both: `class $C; [1].each { |$P| $P }; end` requires an uppercase class name and
+rejects an uppercase block parameter.
+
+So the retry is per-placeholder: on a parse error, flip the case of the placeholder nearest the
+error offset and try again, bounded by the placeholder count. Patterns are tiny, the loop is
+cheap, and it stays deterministic. Implemented in `src/pattern/prepare.rs`.
+
+**A hazard repair cannot see.** `Foo::bar` is a method call and `Foo::Bar` is a constant, so
+`Foo::$C` parses under *either* casing and the placeholder's case silently decides what the
+pattern means. There is no parse error to react to. The matcher must therefore treat a
+placeholder as a wildcard by name rather than trusting the node type it landed on - pinned by
+`scope_resolution_parses_under_either_casing`.
