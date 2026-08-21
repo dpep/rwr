@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**`.rb` is not the whole language.** `.rake`, `.ru`, `.gemspec`, `.jbuilder`, `Rakefile`,
+`Gemfile`, `Vagrantfile` and friends are searched now. Discourse keeps 11,854 lines of Ruby
+in files rwr walked past — a rename silently skipped them, and the residue report claimed
+completeness without having read them.
+
+**Reports say what they did not read.** ERB and Haml embed Ruby that rwr does not parse, and
+a Rails app keeps a large share of its call sites there. Any report making a completeness
+claim now names the count of template files it skipped (Q11).
+
 **Sorbet signatures resolve chained receivers.** Where a repository has `sig { returns(X) }`,
 rwr reads it as a return type, so `parser.document.name` narrows by `type:` — the case D61
 measured as unreachable from syntax alone. It needs no Sorbet, no RBI parser and no new file

@@ -36,10 +36,87 @@ fn is_excluded(path: &Path, root: &Path) -> bool {
     EXCLUDED_FILES.iter().any(|f| shown.ends_with(f))
 }
 
-/// Ruby files under `roots`, gitignore-aware.
+/// Extensions that hold Ruby source.
 ///
-/// An empty `roots` means the current directory, matching rg.
-pub(crate) fn ruby_files(roots: &[String], include_vendored: bool) -> Vec<PathBuf> {
+/// `.rb` is not the whole language: discourse carries 11,854 lines of Ruby in
+/// `.rake` files, a Gemfile and a gemspec, none of which rwr opened. A rename
+/// silently skipped them *and* the residue report claimed completeness without
+/// having read them, which is the worse half (Q11).
+const RUBY_EXTENSIONS: &[&str] = &[
+    "rb", "rake", "ru", "gemspec", "jbuilder", "jb", "thor", "podspec", "rbw", "arb", "builder",
+    "rabl", "opal",
+];
+
+/// Files that hold Ruby but are named rather than suffixed.
+const RUBY_FILENAMES: &[&str] = &[
+    "Rakefile",
+    "rakefile",
+    "Gemfile",
+    "Guardfile",
+    "Capfile",
+    "Appraisals",
+    "Berksfile",
+    "Brewfile",
+    "Buildfile",
+    "Cheffile",
+    "Dangerfile",
+    "Fastfile",
+    "Jarfile",
+    "Mavenfile",
+    "Podfile",
+    "Puppetfile",
+    "Schemafile",
+    "Snapfile",
+    "Steepfile",
+    "Thorfile",
+    "Vagrantfile",
+    ".irbrc",
+    ".pryrc",
+    ".simplecov",
+];
+
+/// Template extensions that embed Ruby rwr does not read.
+///
+/// Counted rather than parsed. The residue report's whole claim is "here is
+/// what I could not account for", and a Rails app keeps a large share of its
+/// call sites in ERB and Haml -- so a report that silently omits them
+/// over-claims exactly where the product's credibility lives (Q11).
+const TEMPLATE_EXTENSIONS: &[&str] = &["erb", "haml", "slim", "rhtml", "erubi", "liquid"];
+
+/// Whether a path is a template embedding Ruby rwr cannot read.
+pub(crate) fn is_template(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| TEMPLATE_EXTENSIONS.contains(&e))
+}
+
+/// Whether a path holds Ruby source.
+///
+/// Deliberately narrower than RuboCop's default include list, which also claims
+/// `.spec`, `.schema` and `.god` -- extensions that are Ruby in some projects
+/// and something else entirely in others. A file rwr cannot parse is skipped,
+/// so a wrong guess here is quiet rather than loud, which is the argument for
+/// keeping the list to what is unambiguous.
+pub(crate) fn is_ruby(path: &Path) -> bool {
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| RUBY_EXTENSIONS.contains(&e))
+    {
+        return true;
+    }
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| RUBY_FILENAMES.contains(&n))
+}
+
+/// Ruby files under `roots`, gitignore-aware, and how many templates were
+/// walked past.
+///
+/// An empty `roots` means the current directory, matching rg. The templates are
+/// counted in the same pass, because a second walk to answer "what did you not
+/// look at" would cost as much as the first.
+pub(crate) fn walk(roots: &[String], include_vendored: bool) -> (Vec<PathBuf>, usize) {
     let roots: Vec<&str> = if roots.is_empty() {
         vec!["."]
     } else {
@@ -54,19 +131,26 @@ pub(crate) fn ruby_files(roots: &[String], include_vendored: bool) -> Vec<PathBu
     // Parallel walk: with a literal prefilter making parsing cheap, file
     // discovery becomes the dominant cost on a large repository.
     let found = Arc::new(Mutex::new(Vec::new()));
+    let templates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let owned_roots: Vec<String> = roots.iter().map(|r| (*r).to_string()).collect();
 
     builder.build_parallel().run(|| {
         let found = Arc::clone(&found);
+        let templates = Arc::clone(&templates);
         let roots = owned_roots.clone();
         Box::new(move |entry| {
             if let Ok(entry) = entry {
                 let path = entry.into_path();
-                let keep = path.extension().is_some_and(|x| x == "rb")
-                    && (include_vendored
-                        || !roots.iter().any(|r| is_excluded(&path, Path::new(r))));
-                if keep && let Ok(mut sink) = found.lock() {
-                    sink.push(path);
+                let wanted =
+                    !include_vendored && roots.iter().any(|r| is_excluded(&path, Path::new(r)));
+                if !wanted {
+                    if is_ruby(&path) {
+                        if let Ok(mut sink) = found.lock() {
+                            sink.push(path);
+                        }
+                    } else if is_template(&path) {
+                        templates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             }
             ignore::WalkState::Continue
@@ -78,7 +162,7 @@ pub(crate) fn ruby_files(roots: &[String], include_vendored: bool) -> Vec<PathBu
         .unwrap_or_default();
     // Sorted so output is deterministic regardless of walk order.
     files.sort();
-    files
+    (files, templates.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// A file's bytes, mapped where that avoids a copy.
@@ -157,6 +241,40 @@ pub(crate) fn line_at(source: &[u8], offset: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `.rb` is not the whole language. Discourse keeps 11,854 lines of Ruby in
+    /// `.rake` files, a Gemfile and a gemspec; a rename skipped every one, and
+    /// the residue report claimed completeness without having read them.
+    #[test]
+    fn ruby_is_more_than_the_rb_extension() {
+        for name in [
+            "a.rb",
+            "lib/tasks/db.rake",
+            "config.ru",
+            "thing.gemspec",
+            "Rakefile",
+            "Gemfile",
+            "Vagrantfile",
+            "views/show.jbuilder",
+        ] {
+            assert!(is_ruby(Path::new(name)), "{name}");
+        }
+        for name in ["a.py", "README.md", "schema.sql", "app/views/show.html.erb"] {
+            assert!(!is_ruby(Path::new(name)), "{name}");
+        }
+    }
+
+    /// A template embeds Ruby but is not Ruby, so it is counted rather than
+    /// parsed -- the residue report's claim has to say what it did not read.
+    #[test]
+    fn templates_are_recognised_but_not_claimed_as_ruby() {
+        for name in ["show.html.erb", "index.haml", "form.slim"] {
+            assert!(is_template(Path::new(name)), "{name}");
+            assert!(!is_ruby(Path::new(name)), "{name}");
+        }
+        // A jbuilder view *is* Ruby, so it belongs to the other list.
+        assert!(!is_template(Path::new("show.json.jbuilder")));
+    }
 
     #[test]
     fn line_and_column_are_one_based() {

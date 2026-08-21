@@ -481,6 +481,50 @@ fn diff_outside_a_repository_is_an_error() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
 
+/// The residue report claims to account for everything, so it has to say what
+/// it never read. A Rails app keeps a large share of its call sites in ERB and
+/// Haml (Q11).
+#[test]
+fn templates_are_reported_as_unread() {
+    let dir = fixture("class Account\n  def display_name; 1; end\nend\n");
+    std::fs::write(
+        dir.path().join("show.html.erb"),
+        "<%= account.display_name %>\n",
+    )
+    .expect("write");
+    std::fs::write(dir.path().join("index.haml"), "= account.display_name\n").expect("write");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(&rule, "method: Account#display_name\nrename: full_name\n").expect("write");
+
+    let out = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(err.contains("2 template file(s)"), "{err}");
+    assert!(err.contains("not searched"), "{err}");
+}
+
+/// A `.rake` file is Ruby, and was invisible until it was not.
+#[test]
+fn rake_files_are_searched() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("db.rake"),
+        "task :x do\n  return nil\nend\n",
+    )
+    .expect("write");
+
+    let out = rwr(&["return nil", dir.path().to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("db.rake"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// No arguments is a usage error, not a silent no-op.
 #[test]
 fn bare_invocation_explains_itself() {

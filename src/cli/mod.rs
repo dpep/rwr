@@ -403,7 +403,17 @@ fn report_unsafe(changed: &[Changed], rules: &[rule::Rule]) {
 /// Symbols and strings are metaprogramming reaches -- genuine blind spots.
 /// Calls and definitions are usually a different method that happens to share
 /// the name, which only receiver resolution can rule out.
-fn report_residue(residues: &[Residue]) {
+fn report_residue(residues: &[Residue], templates: usize) {
+    // The templates note stands alone: a rule that accounted for everything in
+    // Ruby still did not look at ERB, and saying so only when residue happens to
+    // be non-empty would make the blind spot appear and vanish for reasons
+    // unrelated to it.
+    if templates > 0 {
+        eprintln!(
+            "\nnote: {templates} template file(s) were not searched. rwr reads Ruby, \
+             and .erb/.haml embed it -- so this account covers Ruby only (Q11)."
+        );
+    }
     if residues.is_empty() {
         return;
     }
@@ -484,15 +494,13 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
 
     let mut scoped: Vec<String> = paths.to_vec();
     scoped.extend(common.path.iter().cloned());
-    let files = profile::span_noted(
+    let (files, templates) = profile::span_noted(
         "walk",
         || {
-            only_changed(
-                source::ruby_files(&scoped, common.include_vendored),
-                changed.as_ref(),
-            )
+            let (found, templates) = source::walk(&scoped, common.include_vendored);
+            (only_changed(found, changed.as_ref()), templates)
         },
-        |f| format!("{} files", f.len()),
+        |(f, t)| format!("{} files, {t} template(s) skipped", f.len()),
     );
 
     // Residue is collected across the parallel walk, so it needs a shared sink.
@@ -630,7 +638,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
             for f in &found {
                 println!("{}:{}:{}: {}", f.file, f.line, f.col, f.text);
             }
-            report_residue(&residues);
+            report_residue(&residues, templates);
         }
         _ => {
             if emit_rows(out, &found).is_some() {
@@ -812,15 +820,13 @@ fn cmd_apply(
 
     let mut scoped: Vec<String> = paths.to_vec();
     scoped.extend(common.path.iter().cloned());
-    let files = profile::span_noted(
+    let (files, templates) = profile::span_noted(
         "walk",
         || {
-            only_changed(
-                source::ruby_files(&scoped, common.include_vendored),
-                changed.as_ref(),
-            )
+            let (found, templates) = source::walk(&scoped, common.include_vendored);
+            (only_changed(found, changed.as_ref()), templates)
         },
-        |f| format!("{} files", f.len()),
+        |(f, t)| format!("{} files, {t} template(s) skipped", f.len()),
     );
 
     // Read once and shared between the hierarchy and the scan. Each phase
@@ -1130,7 +1136,7 @@ fn cmd_apply(
             }
             report_by_rule(&changed);
             report_unsafe(&changed, &rules);
-            report_residue(&left_over);
+            report_residue(&left_over, templates);
         }
         _ => {
             if emit_rows(out, &changed).is_some() {

@@ -60,19 +60,6 @@ Open: is there any *syntactic* guard worth having in Phase 1 — refuse when a b
 name matches across more than N distinct receiver shapes? Or is honest degradation
 (ship Phase 1 as explicitly-unsafe-without-review) the better answer?
 
-## Q11 — Non-Ruby templates are invisible, so residue over-claims *(new)*
-
-ERB, Haml, Slim, and jbuilder are not parsed, so a rename's residue report claims "here is
-everything left" while silently ignoring a large fraction of a Rails app's call sites.
-
-Options: a lexical fallback residue class for non-Ruby files (grep-grade, clearly labeled as
-such), extracting Ruby from ERB, or explicitly scoping the completeness claim to `.rb` and
-saying so in every report. The last is cheapest and most honest; the first is probably what
-users actually want.
-
-Unresolved, but the *claim* must be narrowed before v0.1 either way — an over-claim here
-directly undermines the differentiator.
-
 ## Q12 - RuboCop positioning: resolved as complementary, personal-corpus-first
 
 **Corrected premise.** This originally recorded concrete-syntax transformations as impossible
@@ -223,3 +210,32 @@ inferable from the same repository's syntax. It needed no Sorbet and no RBI pars
 Still open, and deliberately: **RBS** (`sig/*.rbs`), which is a genuinely different grammar
 rather than Ruby, and **RBI files for gems**, which would reach typed receivers from
 dependencies rather than from the repository's own classes.
+
+## Q11 — Non-Ruby templates are invisible, so residue over-claims — **closed**
+
+The question turned out to be two, and only one of them was about templates.
+
+**Half of it was not templates at all: it was Ruby rwr refused to open.** `.rb` is not the
+whole language. Discourse keeps **11,854 lines** of Ruby in `.rake` files, a Gemfile and a
+gemspec; rails keeps 3,102; mastodon 2,616. rwr walked past every one — so a rename skipped
+them *and* the residue report claimed completeness without having read them, which is the
+worse half. Fixed: `.rake`, `.ru`, `.gemspec`, `.jbuilder`, `Rakefile`, `Gemfile`,
+`Vagrantfile` and the rest are Ruby now, and the list is deliberately narrower than
+RuboCop's, which also claims `.spec` and `.schema` — extensions that are Ruby in some
+projects and something else in others.
+
+**The templates half is answered by narrowing the claim, which was option (a).** Every
+report that makes a completeness claim now says what it did not read:
+
+```
+note: 356 template file(s) were not searched. rwr reads Ruby, and .erb/.haml embed it
+      -- so this account covers Ruby only (Q11).
+```
+
+356 on mastodon, 106 on discourse. The note stands alone rather than riding on the residue
+list: a rule that accounted for everything in Ruby still did not look at ERB, and a blind
+spot that appears and vanishes with unrelated results is not a report.
+
+Option (b) — grep-grade residue inside templates — was judged "probably what users actually
+want", and may still be. It is a different feature from an honest claim, and shipping the
+honest claim first means it can be added without anyone having been misled meanwhile.
