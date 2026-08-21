@@ -1,0 +1,5 @@
+match: '{**$BEFORE, $K: $V, **$AFTER}'
+where:
+  $K:
+    same_name_as: $V
+rewrite: '{**$BEFORE, $K:, **$AFTER}'

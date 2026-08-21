@@ -1,0 +1,14 @@
+name: rename across three levels of inheritance
+family: semantic
+source: D52 under load
+notes: >
+  D51 recorded a rename that shipped a NoMethodError because a subclass call
+  site was left behind. This checks the fix at depth: the hierarchy is walked
+  transitively, an override two levels down is renamed, and a class outside the
+  hierarchy that happens to share the method name is not.
+predicates_required:
+  - D52 class hierarchy, transitively
+competitors:
+  ast-grep: inexpressible
+  comby: inexpressible
+  ruby-lsp: bare-name matching would rewrite the unrelated class too

@@ -1,0 +1,2 @@
+match: $R.legacy_name
+rewrite: $R.modern_name

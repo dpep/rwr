@@ -320,7 +320,7 @@ pub(crate) fn plan(
     pattern_prepared: &Prepared,
     template: &str,
     source: &[u8],
-) -> Result<Vec<Edit>, Refusal> {
+) -> Result<Planned, Refusal> {
     // The template is prepared and parsed once so its tree can be aligned
     // against the pattern's. Placeholder ids differ between the two, but both
     // resolve to the same metavariable names, which is what alignment keys on.
@@ -375,12 +375,18 @@ pub(crate) fn plan(
     // Outermost first: a wider edit that contains a narrower one wins, and the
     // contained match is dropped rather than applied against stale offsets.
     edits.sort_by_key(|e| (e.start, std::cmp::Reverse(e.end)));
+    let mut dropped = 0usize;
 
     let mut kept: Vec<Edit> = Vec::new();
     for edit in edits {
         match kept.last() {
             Some(previous) if edit.start < previous.end => {
                 if edit.end <= previous.end {
+                    // Contained in a wider edit. Dropping it is correct -- its
+                    // offsets are stale the moment the outer edit applies -- but
+                    // the caller must be told, or a rule that needed two passes
+                    // looks like one that finished (D15).
+                    dropped += 1;
                     continue;
                 }
                 return Err(Refusal::Overlap {
@@ -391,7 +397,19 @@ pub(crate) fn plan(
             _ => kept.push(edit),
         }
     }
-    Ok(kept)
+    Ok(Planned {
+        edits: kept,
+        dropped,
+    })
+}
+
+/// Edits to apply, and how many matches were dropped as contained.
+#[derive(Debug)]
+pub(crate) struct Planned {
+    pub edits: Vec<Edit>,
+    /// Matches skipped because a wider edit covered them. Non-zero means a
+    /// rerun will make further progress -- the retryable outcome (exit 4).
+    pub dropped: usize,
 }
 
 /// Apply edits to source. Edits must be disjoint and sorted, as [`plan`] leaves
@@ -560,8 +578,8 @@ mod tests {
         assert_eq!(parsed.errors().count(), 0, "source does not parse");
         let hits = matcher::search(&p_root, &parsed.node(), &prepared);
 
-        let edits = plan(&hits, &p_root, &prepared, template, source.as_bytes())?;
-        let out = apply(source.as_bytes(), &edits);
+        let planned = plan(&hits, &p_root, &prepared, template, source.as_bytes())?;
+        let out = apply(source.as_bytes(), &planned.edits);
         verify(&out)?;
         Ok(out)
     }

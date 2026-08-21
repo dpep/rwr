@@ -1,0 +1,16 @@
+name: rename reaches calls but not metaprogramming
+family: semantic
+source: derived from measurement (a) - the differentiator under load
+notes: >
+  The entry that tests the *claim*, not the mechanism. Ruby dispatches through
+  literal symbols, so a rename that rewrites every syntactic call still leaves
+  `delegate`, `attr_reader` and a `send` behind. rwr rewrites what it can prove
+  and *reports the rest* -- and this fixture is deliberately built so the
+  reported residue is the difference between working code and a NoMethodError.
+
+  Scored on the rewrite; the residue report is asserted by
+  `cli_e2e::a_rename_reports_what_it_could_not_account_for`.
+competitors:
+  ast-grep: inexpressible - no receiver narrowing, and no notion of residue at all
+  comby: inexpressible
+  ruby-lsp: finds references by bare name, reports no blind spots

@@ -1,0 +1,23 @@
+name: hash rocket and redundant pair -> shorthand
+family: syntactic
+source: author's wanted-rules list - Style/HashSyntax
+notes: >
+  Exercises two things at once. The rocket and the label parse to the same node,
+  so one pattern covers both spellings -- spelling is opt-in, not baked into
+  equality. And `{foo: foo}` -> `{foo:}` needs name equality across *kinds*: a
+  symbol key against a variable read, which AST equality cannot express.
+predicates_required:
+  - cross-capture name equality (same_name_as)
+  - double-splat sequence placeholders, to reach one pair among many
+known_limitation: >
+  A hash with *two* redundant pairs -- `{name: name, size: size}` -- only has
+  the first rewritten, and a rerun does not find the second. Constraints are
+  checked after a structural match rather than during it (a deliberate
+  separation: a constraint may not change what matched, only whether it counts),
+  so when a node admits several bindings and only a later one satisfies the
+  constraint, backtracking never reaches it. The fixture therefore carries one
+  redundant pair per hash. Fixing this means threading constraints into
+  matching so a failed constraint drives backtracking.
+competitors:
+  ast-grep: inexpressible - no cross-capture relation
+  comby: inexpressible

@@ -14,13 +14,18 @@ and the incumbents fail on the corpus in ways that are reproducible rather than 
 > Stop if ast-grep achieves >=95% recall at 100% precision on >=8 of 10 transformations, **and**
 > fewer than 3 transformations require a constraint ast-grep/Comby cannot express.
 
-| entry | rwr | ast-grep | comby |
-|---|---|---|---|
-| 001 return-nil | match | match | **corrupts** — rewrites a heredoc body, and turns `return nil_value` into `return_value` |
-| 002 perf-detect | match | matched, rewrote non-minimally | inexpressible |
-| 004 sorted-array | match | inexpressible | inexpressible |
-| 004 refuses-shared-line | refuses, exit 5 | — | — |
-| 007 receiver-rename | match | **inexpressible** | **inexpressible** |
+| entry | tests | rwr | ast-grep | comby |
+|---|---|---|---|---|
+| 001 return-nil | the simplest possible rule | match | match | **corrupts** — rewrites a heredoc body, and turns `return nil_value` into `return_value` |
+| 002 perf-detect | method-name alternation; shape-changing rewrite | match | matched, rewrote non-minimally | inexpressible |
+| 003 hash-shorthand | cross-capture name equality | match | inexpressible | inexpressible |
+| 004 sorted-array | sequence transforms, comment attachment | match | inexpressible | inexpressible |
+| 004 refuses-shared-line | refusing on an ambiguous comment | refuses, exit 5 | — | — |
+| 006 metaprogramming-residue | the differentiator under load | match | inexpressible | inexpressible |
+| 007 receiver-rename | receiver narrowing | match | **inexpressible** | **inexpressible** |
+| 008 heredoc-survival | D14 in every position a rename touches | match | — | comby truncates `def…end` on heredocs |
+| 009 modern-syntax | pattern matching, endless methods, safe navigation | match | tree-sitter grammar — exactly what D1 doubts | — |
+| 010 deep-inheritance | three levels, an override, an unrelated namesake | match | inexpressible | inexpressible |
 
 Neither half of the criterion is met. ast-grep matches correctly on 001 and 002 but cannot
 express 004 or 007, and its 002 rewrite collapses a multiline chain and rewrites a `do ... end`
@@ -58,8 +63,11 @@ exit 5 with the source untouched.
 
 Stated plainly, because a conclusion that hides its weaknesses is not evidence.
 
-- **The corpus is 4 entries, not the 10 the plan called for.** The four cover the syntactic and
-  semantic partitions and the refusal path, but a wider corpus would test more shapes.
+- ~~The corpus is 4 entries, not the 10 the plan called for.~~ **Addressed** -- nine entries
+  now, each testing something specific rather than padding a count: metaprogramming residue,
+  heredocs in every position a rename touches, modern syntax (pattern matching, endless
+  methods, safe navigation, rightward assignment), three levels of inheritance with an
+  override, and cross-capture name equality. See `corpus/`.
 - **Measurement (a) never ran against hand-verified ground truth.** Residue was measured for
   *volume and class* on rails, not for *recall* against renames a person had actually done.
   Its pass bar — "catches the dynamic reaches a human found" — remains unverified.

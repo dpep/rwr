@@ -623,6 +623,7 @@ fn cmd_apply(
         rewritten: Option<String>,
         refusal: Option<String>,
         residue: Vec<Residue>,
+        deferred: usize,
     }
 
     // The class a rule set is about, used to scope its own residue report.
@@ -659,11 +660,15 @@ fn cmd_apply(
             let file = path.display().to_string();
             let mut current = original.clone();
             let mut total = 0usize;
+            // Matches a wider edit covered. Non-zero means a rerun makes
+            // further progress, which is the retryable outcome rather than a
+            // failure (D15).
+            let mut deferred = 0usize;
 
             for (rule, prepared) in rules.iter().zip(&prepareds) {
                 // Scoped so every borrow of `current` ends before it is
                 // replaced with this rule's output.
-                let step: Result<Option<(String, usize)>, String> = {
+                let step: Result<Option<(String, usize, usize)>, String> = {
                     let parsed = ruby_prism::parse(&current);
                     if parsed.errors().count() > 0 {
                         return None;
@@ -690,11 +695,15 @@ fn cmd_apply(
                                 let template = rule.rewrite.as_deref().unwrap_or_default();
                                 match rewrite::plan(&hits, &p_root, prepared, template, &current) {
                                     Err(r) => Err(format!("{r:?}")),
-                                    Ok(edits) => {
-                                        let text = rewrite::apply(&current, &edits);
+                                    Ok(planned) => {
+                                        let text = rewrite::apply(&current, &planned.edits);
                                         match rewrite::verify(&text) {
                                             Err(r) => Err(format!("{r:?}")),
-                                            Ok(()) => Ok(Some((text, edits.len()))),
+                                            Ok(()) => Ok(Some((
+                                                text,
+                                                planned.edits.len(),
+                                                planned.dropped,
+                                            ))),
                                         }
                                     }
                                 }
@@ -711,11 +720,13 @@ fn cmd_apply(
                             rewritten: None,
                             refusal: Some(refusal),
                             residue: Vec::new(),
+                            deferred: 0,
                         });
                     }
                     Ok(None) => {}
-                    Ok(Some((text, n))) => {
+                    Ok(Some((text, n, skipped))) => {
                         total += n;
+                        deferred += skipped;
                         current = text.into_bytes();
                     }
                 }
@@ -768,6 +779,7 @@ fn cmd_apply(
                 rewritten: Some(String::from_utf8_lossy(&current).into_owned()),
                 refusal: None,
                 residue,
+                deferred,
             })
         })
         .collect();
@@ -819,8 +831,18 @@ fn cmd_apply(
     }
 
     profile::report();
+    let deferred: usize = outcomes.iter().map(|o| o.deferred).sum();
+    if deferred > 0 {
+        eprintln!(
+            "rwr: {deferred} further match(es) sat inside a rewritten range; rerun to apply them"
+        );
+    }
+
     if refused {
         return Exit::Refused.into();
+    }
+    if deferred > 0 && write {
+        return Exit::Retryable.into();
     }
     // `check` is enforcement polarity: nothing to change is success, and
     // something to change is the signal a hook or CI acts on (D22). `rewrite`

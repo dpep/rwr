@@ -1,0 +1,14 @@
+name: rewriting around and through heredocs
+family: syntactic
+source: D14 under load - rubocop's own source carries 18,370 heredoc occurrences
+notes: >
+  A heredoc's content is *discontiguous*: the `<<~SQL` token sits inline while
+  the body follows the enclosing line. A rewriter that splices by a node's own
+  range detaches the body -- and the result still parses, so no downstream check
+  catches it. This fixture puts heredocs in every position a rename touches.
+predicates_required:
+  - D14 effective_range
+  - structural diff, so a capture that does not move is never spliced
+competitors:
+  comby: known to truncate `def ... end` when a heredoc body contains `end`
+  semgrep: its Ruby grammar excludes heredoc bodies from the CST entirely

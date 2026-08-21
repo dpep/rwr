@@ -1,0 +1,2 @@
+match: $R.run_query($A)
+rewrite: $R.execute($A)

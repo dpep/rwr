@@ -155,3 +155,25 @@ only part no plausible LSP exposure covers.
 A general rule *is* derivable: `effective_range()` = transitive closure over descendants
 unioning heredoc `closing_loc`, at splice time. The enforcement matters more than the rule —
 never expose raw `.location` from the capture API.
+
+## Q13 - Post-hoc constraints miss alternative bindings *(new)*
+
+`satisfies` runs after a structural match, deliberately: a constraint may not change *what*
+matched, only whether it counts. The cost, found by corpus 003, is real.
+
+`{name: name, size: size}` against `{**$B, $K: $V, **$A}` with `$K: { same_name_as: $V }`
+rewrites only the first pair. `search` reports **one match per node**, backtracking binds
+`$K` to `name`, and `same_name_as` rejects it afterwards -- so the `size` binding, which would
+have satisfied the constraint, is never tried. A rerun does not help, because the same first
+binding is chosen again.
+
+**Fixing it means threading constraints into matching**, so a failed constraint drives
+backtracking rather than discarding a completed match. That couples two things the current
+design keeps apart, and the coupling has a real benefit here and a real cost in clarity.
+
+**Why it is recorded rather than fixed:** the failure is a clean under-match -- rwr rewrites
+less than it could and never wrongly -- and the reproducing case is small. But it is not
+exotic: `{name: name, size: size}` is ordinary Ruby, and any rule combining a sequence
+metavariable with a constraint on a sibling capture hits it.
+
+Reproducing case: `corpus/003-hash-shorthand`, `known_limitation` in its `meta.yml`.

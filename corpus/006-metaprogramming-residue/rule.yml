@@ -1,0 +1,2 @@
+method: Account#display_name
+rename: full_name

@@ -1,0 +1,11 @@
+name: rewriting amongst modern Ruby syntax
+family: syntactic
+source: D1 under load - `ruby` itself carries 574 pattern matches and 595 endless methods
+notes: >
+  D1 chose Prism over tree-sitter on the argument that a community grammar
+  shapes *valid* Ruby differently and cannot report that it did. This fixture is
+  that argument made concrete: pattern matching, endless methods, safe
+  navigation, rightward assignment and a one-line pattern match all surround the
+  code being rewritten, and none of them may be disturbed.
+competitors:
+  ast-grep: tree-sitter's Ruby grammar; correctness here is exactly what D1 doubts

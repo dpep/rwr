@@ -52,15 +52,32 @@ fn apply(entry: &Path, fixture: &Path) -> (Option<i32>, String) {
     let target = scratch.path().join(fixture.file_name().expect("named"));
     fs::copy(fixture, &target).expect("copy fixture");
 
-    let status = Command::new(env!("CARGO_BIN_EXE_rwr"))
-        .arg("rewrite")
-        .arg(entry.join("rule.yml"))
-        .arg(scratch.path())
-        .output()
-        .expect("rwr runs");
+    // Applied to a fixpoint, because a real caller is a loop. rwr deliberately
+    // does not iterate internally -- `foo($A) -> foo(bar($A))` matches its own
+    // output and diverges -- so convergence is the caller's job, and two things
+    // make a second pass necessary: a match contained in a wider edit (exit 4),
+    // and a node with several possible bindings, which `search` reports once.
+    // Bounded, so a rule that never converges fails here rather than hanging.
+    let mut code = None;
+    let mut previous = fs::read_to_string(&target).expect("read");
+    for pass in 0..8 {
+        let run = Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .arg("rewrite")
+            .arg(entry.join("rule.yml"))
+            .arg(scratch.path())
+            .output()
+            .expect("rwr runs");
+        code = run.status.code();
+        let now = fs::read_to_string(&target).expect("read");
+        if now == previous {
+            break;
+        }
+        previous = now;
+        assert!(pass < 7, "rule did not converge within 8 passes");
+    }
 
     let produced = fs::read_to_string(&target).expect("read result");
-    (status.status.code(), produced)
+    (code, produced)
 }
 
 /// Every fixture with an expected output must be transformed into it exactly.
