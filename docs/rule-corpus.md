@@ -108,3 +108,90 @@ New design decisions needed:
 Note none of the case studies' other flagged predicates (capture node-kind, block-param
 arity) appear here. Real wanted-rules produced a different predicate set than invented ones —
 which is the argument for seeding Phase 0 from this file.
+
+---
+
+# Target rules backlog
+
+The author's stated categories, expanded into concrete cop names with a verdict each. Cop
+names are from memory of RuboCop's catalogue and **should be verified against the installed
+version** before any rule is written — the semantics matter more than the name, and several of
+these have `EnforcedStyle` options that change direction.
+
+Legend: **clean** ports with existing machinery · **predicate** needs a new `where:` predicate ·
+**machinery** needs a decided-but-unbuilt capability · **out** is out of scope.
+
+## return
+
+| Cop | Verdict | Note |
+|---|---|---|
+| `Style/ReturnNil` | clean | Default `EnforcedStyle` enforces `return nil`; the author wants the opposite direction (`return`). Corpus 001. |
+| `Style/RedundantReturn` | clean | Trailing `return x` -> `x`. Same shape, no new machinery. |
+
+## Performance (rubocop-performance)
+
+The best-fitting family. Most are pure method-chain rewrites.
+
+| Cop | Verdict | Note |
+|---|---|---|
+| `Performance/Detect` | predicate | `select {}.first` -> `detect {}`. Needs method-name alternation (`select`/`find_all`). Corpus 002. |
+| `Performance/Count` | predicate | `select {}.size` -> `count {}`. Same alternation. |
+| `Performance/MapCompact` | clean | `map {}.compact` -> `filter_map {}`. |
+| `Performance/FlatMap` | clean | `map {}.flatten` -> `flat_map {}`. |
+| `Performance/ReverseEach` | clean | `reverse.each` -> `reverse_each`. |
+| `Performance/Sum` | clean | `inject(:+)` -> `sum`. |
+| `Performance/StringReplacement` | **semantic** | `gsub` with a single-char string -> `tr`. Only valid when the receiver is a String — this is receiver narrowing applied to a rule someone actually wants, and a better Phase 2 justification than any invented example. |
+
+## Hash
+
+| Cop | Verdict | Note |
+|---|---|---|
+| `Style/HashSyntax` (`ruby19`) | clean | `:a => 1` -> `a: 1`. `AssocNode::operator_loc()` is `Some` for the rocket, `None` for the shorthand — already pinned by a test. |
+| `Style/HashSyntax` (`enforce_shorthand`) | predicate | `{foo: foo}` -> `{foo:}` (Ruby 3.1+). Needs name equality across capture *kinds* — a symbol key against a local-variable or method-call value. D16's AST equality does not apply, since the nodes are not equal. |
+
+## Trailing commas
+
+| Cop | Verdict | Note |
+|---|---|---|
+| `Style/TrailingCommaInArguments` | predicate | |
+| `Style/TrailingCommaInArrayLiteral` | predicate | |
+| `Style/TrailingCommaInHashLiteral` | predicate | |
+
+All three need the same two things: **inter-node source inspection** (the comma is not a node —
+it lives in the gap between the last element's end and the closing delimiter) and a **multiline
+test** (RuboCop's `comma`/`consistent_comma` styles apply only to multiline literals; derivable
+from locations, so cheap).
+
+The edit itself is anchored — insert before the closing delimiter — so this is not the
+non-anchored-insertion case that is genuinely out of reach.
+
+## Sorted literals
+
+| Rule | Verdict | Note |
+|---|---|---|
+| alphabetise array / list / hash-key literals | machinery | No standard cop; this is a custom rule, which is part of the point. Needs D33 sequence transforms, D35 comment attachment, and D14 `effective_range` under movement. Corpus 004 — the hardest entry, deliberately. |
+
+## Layout — out of scope
+
+| Cop family | Verdict | Note |
+|---|---|---|
+| `Layout/*` (indentation, alignment) | **out** | Principle 7: rwr does not own style. D34 draws the line — rwr *repairs* indentation of regions it rewrote, because otherwise the minimal-diff promise is broken by damage rwr caused, and shells out for anything more. syntax_tree is the natural target, sharing Prism lineage. |
+
+---
+
+## What this backlog implies
+
+**Build order for `where:` predicates**, ranked by how many target rules each unblocks:
+
+1. **Method-name alternation** — unblocks `Performance/Detect` and `Performance/Count`, and was
+   independently flagged by the case studies. Clear first.
+2. **Inter-node source inspection** — unblocks all three trailing-comma cops at once. Best
+   ratio of rules-unblocked to predicate.
+3. **Multiline test** — trivial (compare start and end line), pairs with (2).
+4. **Cross-capture name equality** — unblocks one cop (`enforce_shorthand`), but it is the
+   author's stated favourite, so not last.
+
+**A note on direction.** Several of these cops are configurable and RuboCop's default may be
+the *opposite* of what is wanted — `Style/ReturnNil` is the clearest case. rwr rules encode a
+direction explicitly, which is a small ergonomic win worth noting: there is no `EnforcedStyle`
+to misread, because the rule *is* the direction.
