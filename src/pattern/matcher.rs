@@ -105,6 +105,12 @@ fn bind<'pr>(env: &mut Env<'pr>, key: &str, value: Bound<'pr>) -> bool {
         (Some(Bound::Many(a)), Bound::Many(b)) => {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| compare::node_eq(x, y))
         }
+        // A metavariable can land in a name position and a node position in
+        // one pattern -- `{ |$P| $P.active? }` binds `$P` as a parameter name,
+        // then meets it again as an expression. Equate the two by identifier,
+        // which is what rename rules want.
+        (Some(Bound::Name(a)), Bound::One(n)) => bare_name(n).as_deref() == Some(a.as_slice()),
+        (Some(Bound::One(n)), Bound::Name(b)) => bare_name(n).as_deref() == Some(b.as_slice()),
         _ => false,
     }
 }
@@ -350,6 +356,25 @@ end
     #[test]
     fn metavariables_match_method_names() {
         assert_eq!(matches("x.$M", "x.foo; x.bar; y.foo"), 2);
+    }
+
+    /// A metavariable may bind in a name position and be met again as an
+    /// expression. `{ |$P| $P.active? }` is the natural way to write this and
+    /// would otherwise silently match nothing.
+    #[test]
+    fn a_metavariable_spans_name_and_node_positions() {
+        assert_eq!(matches("x.each { |$P| $P.go }", "x.each { |a| a.go }"), 1);
+        assert_eq!(matches("x.each { |$P| $P.go }", "x.each { |a| b.go }"), 0);
+    }
+
+    /// Brace and do/end blocks are the same structure, so one pattern matches
+    /// both -- something a text or template tool has to special-case.
+    #[test]
+    fn brace_and_do_end_blocks_are_one_structure() {
+        assert_eq!(
+            matches("x.each { |$P| $B }", "x.each do |a|\n  go(a)\nend"),
+            1
+        );
     }
 
     /// Nested matches are reported: find is observation (D15).

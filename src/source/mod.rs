@@ -11,18 +11,28 @@
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
 
-/// Paths skipped unless `--include-vendored` is given.
-const EXCLUDED: &[&str] = &[
-    "vendor/",
-    "node_modules/",
-    "db/schema.rb",
-    "db/structure.sql",
-    "/tmp/",
-];
+/// Directory names skipped unless `--include-vendored` is given, matched as
+/// whole path components rather than substrings.
+///
+/// Substring matching is a trap: an earlier version listed `/tmp/` to skip a
+/// Rails app's tmp directory and silently excluded every file under the system
+/// temp directory too. A skipped file that is never reported is precisely the
+/// failure this design exists to avoid.
+const EXCLUDED_DIRS: &[&str] = &["vendor", "node_modules", "tmp", "log"];
 
-fn is_excluded(path: &Path) -> bool {
-    let s = path.to_string_lossy().replace('\\', "/");
-    EXCLUDED.iter().any(|e| s.contains(e))
+/// Specific generated files, matched by their trailing path.
+const EXCLUDED_FILES: &[&str] = &["db/schema.rb", "db/structure.sql"];
+
+fn is_excluded(path: &Path, root: &Path) -> bool {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    if relative
+        .components()
+        .any(|c| EXCLUDED_DIRS.contains(&c.as_os_str().to_string_lossy().as_ref()))
+    {
+        return true;
+    }
+    let shown = relative.to_string_lossy().replace('\\', "/");
+    EXCLUDED_FILES.iter().any(|f| shown.ends_with(f))
 }
 
 /// Ruby files under `roots`, gitignore-aware.
@@ -45,7 +55,7 @@ pub(crate) fn ruby_files(roots: &[String], include_vendored: bool) -> Vec<PathBu
         .filter_map(Result::ok)
         .map(ignore::DirEntry::into_path)
         .filter(|p| p.extension().is_some_and(|x| x == "rb"))
-        .filter(|p| include_vendored || !is_excluded(p))
+        .filter(|p| include_vendored || !roots.iter().any(|r| is_excluded(p, Path::new(r))))
         .collect();
     files.sort();
     files
@@ -100,9 +110,21 @@ mod tests {
 
     #[test]
     fn vendored_paths_are_excluded_by_default() {
-        assert!(is_excluded(Path::new("vendor/gems/foo.rb")));
-        assert!(is_excluded(Path::new("db/schema.rb")));
-        assert!(!is_excluded(Path::new("app/models/account.rb")));
+        let root = Path::new(".");
+        assert!(is_excluded(Path::new("./vendor/gems/foo.rb"), root));
+        assert!(is_excluded(Path::new("./tmp/cache/x.rb"), root));
+        assert!(is_excluded(Path::new("./db/schema.rb"), root));
+        assert!(!is_excluded(Path::new("./app/models/account.rb"), root));
+    }
+
+    /// The bug this rule replaced: a substring match on `/tmp/` silently
+    /// excluded everything under the system temp directory, so files simply
+    /// vanished from every search.
+    #[test]
+    fn exclusions_match_components_relative_to_the_root() {
+        let root = Path::new("/var/folders/xyz/T/rwr-fixture");
+        let file = Path::new("/var/folders/xyz/T/rwr-fixture/thing.rb");
+        assert!(!is_excluded(file, root));
     }
 
     /// Decision D1 rests on Prism *reporting* what it could not parse, rather
