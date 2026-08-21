@@ -92,7 +92,6 @@ rwr/
   rules/         ← the shipped rule pack, loaded as a directory (D54)
   claude/        ← the Claude skill and its install doc
   testbed/       ← a Ruby app with marked ground truth, for Q1's recall
-  testbed/       ← a Ruby app with marked ground truth, for Q1's recall
   docs/          ← design, decisions, open questions, research
   tests/         ← e2e over the built binary
 ```
