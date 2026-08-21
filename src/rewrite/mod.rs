@@ -13,6 +13,7 @@
 #[allow(dead_code)]
 pub(crate) mod sequence;
 
+use crate::pattern::compare::Atom;
 use crate::pattern::generated;
 use crate::pattern::matcher::{self, Bound, Env, Match};
 use crate::pattern::metavar::{self, Arity};
@@ -120,6 +121,96 @@ fn captured_text<'a>(bound: &Bound<'_>, source: &'a [u8]) -> Result<Option<&'a [
 ///
 /// The captured subtrees keep their exact formatting; the template governs
 /// everything around them.
+/// Whether two nodes' atoms mean the same thing.
+///
+/// A metavariable substitutes to a *different placeholder identifier* in the
+/// pattern and the template -- `$P` may be `rwr_mv_2` in one and `rwr_mv_1` in
+/// the other -- so comparing atom bytes reports a difference where there is
+/// none, and alignment gives up on every pattern with a metavariable in a name
+/// position. Placeholders are compared by the metavariable they stand for.
+fn atoms_correspond(
+    pattern: &Node<'_>,
+    template: &Node<'_>,
+    prepared: &Prepared,
+    t_prepared: &Prepared,
+) -> bool {
+    let (p_atoms, t_atoms) = (generated::atoms(pattern), generated::atoms(template));
+    if p_atoms.len() != t_atoms.len() {
+        return false;
+    }
+    p_atoms.iter().zip(&t_atoms).all(|(p, t)| match (p, t) {
+        (Atom::Name(pn), Atom::Name(tn)) => {
+            let meta = |bytes: &[u8], prep: &Prepared| {
+                std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(|s| prep.bindings.get(s))
+                    .and_then(|b| b.name.clone())
+            };
+            match (meta(pn, prepared), meta(tn, t_prepared)) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => pn == tn,
+                // A placeholder on one side only is a genuine difference.
+                _ => false,
+            }
+        }
+        _ => p == t,
+    })
+}
+
+/// Align a template against one of the pattern's children, deleting whatever
+/// surrounded it in the target.
+///
+/// Conservative: it takes the first child that aligns, and alignment already
+/// requires matching shape and corresponding metavariables, so an accidental
+/// match is unlikely. Failing returns `None` and the caller replaces the whole
+/// span -- correct, merely non-minimal.
+fn unwrap_to_subtree(
+    p_kids: &[Node<'_>],
+    template: &Node<'_>,
+    x_kids: &[Node<'_>],
+    target: &Node<'_>,
+    prepared: &Prepared,
+    t_prepared: &Prepared,
+    template_src: &[u8],
+) -> Option<Vec<Edit>> {
+    if p_kids.len() != x_kids.len() {
+        return None;
+    }
+    for (p_child, x_child) in p_kids.iter().zip(x_kids) {
+        let Some(mut edits) = structural_diff(
+            p_child,
+            template,
+            x_child,
+            prepared,
+            t_prepared,
+            template_src,
+        ) else {
+            continue;
+        };
+        let (outer_start, outer_end) = effective_range(target);
+        let (inner_start, inner_end) = effective_range(x_child);
+        if outer_start > inner_start || inner_end > outer_end {
+            continue;
+        }
+        if outer_start < inner_start {
+            edits.push(Edit {
+                start: outer_start,
+                end: inner_start,
+                text: String::new(),
+            });
+        }
+        if inner_end < outer_end {
+            edits.push(Edit {
+                start: inner_end,
+                end: outer_end,
+                text: String::new(),
+            });
+        }
+        return Some(edits);
+    }
+    None
+}
+
 /// A container's span between its delimiters, for sequence transforms.
 fn inner_span(node: &Node<'_>) -> Option<(usize, usize)> {
     let (open, close) = match node {
@@ -241,6 +332,7 @@ pub(crate) fn plan(
                 root,
                 &m.node,
                 pattern_prepared,
+                tp,
                 tp.source.as_bytes(),
             ),
             _ => None,
@@ -345,10 +437,14 @@ fn structural_diff(
     template: &Node<'_>,
     target: &Node<'_>,
     prepared: &Prepared,
+    t_prepared: &Prepared,
     template_src: &[u8],
 ) -> Option<Vec<Edit>> {
+    // Each side resolves placeholders through its *own* mapping: the pattern
+    // and template are prepared separately, so `rwr_mv_1` may be `$SEL` in one
+    // and `$P` in the other. Sharing one mapping silently misaligned them.
     let p_meta = matcher::placeholder_name(pattern, prepared);
-    let t_meta = matcher::placeholder_name(template, prepared);
+    let t_meta = matcher::placeholder_name(template, t_prepared);
 
     // The same metavariable on both sides: this subtree is carried across
     // untouched, so emit nothing and let the original bytes stand.
@@ -361,18 +457,34 @@ fn structural_diff(
         return None;
     }
 
-    if std::mem::discriminant(pattern) != std::mem::discriminant(template)
-        || std::mem::discriminant(pattern) != std::mem::discriminant(target)
-    {
-        return None;
-    }
-
     let (p_kids, t_kids, x_kids) = (
         generated::children(pattern),
         generated::children(template),
         generated::children(target),
     );
-    if p_kids.len() != t_kids.len() || p_kids.len() != x_kids.len() {
+
+    // Shapes differ. Before giving up, check whether the template corresponds to
+    // a *subtree* of the pattern -- which is what a rewrite that unwraps looks
+    // like. `$R.select { .. }.first -> $R.detect { .. }` drops an enclosing
+    // call, so the template aligns with the pattern's receiver, and the edit is
+    // that subtree's own differences plus deleting what surrounded it.
+    if std::mem::discriminant(pattern) != std::mem::discriminant(template)
+        || p_kids.len() != t_kids.len()
+    {
+        return unwrap_to_subtree(
+            &p_kids,
+            template,
+            &x_kids,
+            target,
+            prepared,
+            t_prepared,
+            template_src,
+        );
+    }
+
+    if std::mem::discriminant(pattern) != std::mem::discriminant(target)
+        || p_kids.len() != x_kids.len()
+    {
         return None;
     }
 
@@ -380,7 +492,7 @@ fn structural_diff(
 
     // Atoms differing between pattern and template are the interesting case: a
     // method rename is exactly this, and it is one small edit over the name.
-    if generated::atoms(pattern) != generated::atoms(template) {
+    if !atoms_correspond(pattern, template, prepared, t_prepared) {
         let (from, to) = (name_span(target)?, name_text(template, template_src)?);
         edits.push(Edit {
             start: from.0,
@@ -390,7 +502,14 @@ fn structural_diff(
     }
 
     for ((p, t), x) in p_kids.iter().zip(&t_kids).zip(&x_kids) {
-        edits.extend(structural_diff(p, t, x, prepared, template_src)?);
+        edits.extend(structural_diff(
+            p,
+            t,
+            x,
+            prepared,
+            t_prepared,
+            template_src,
+        )?);
     }
     Some(edits)
 }
@@ -514,6 +633,32 @@ mod tests {
         let out = rewrite("foo($A)", "bar($A)", "foo(foo(1))\n").unwrap();
         assert_eq!(out, "bar(bar(1))\n");
         verify(&out).expect("still parses");
+    }
+
+    /// A rewrite that *unwraps* -- the template corresponds to a subtree of the
+    /// pattern -- still edits minimally. `.first` is deleted and `select`
+    /// renamed, so the chain's layout and the block's spelling survive.
+    #[test]
+    fn a_shape_changing_rewrite_keeps_its_layout() {
+        let src = "x = accounts\n  .select { |a| a.b }\n  .first\n";
+        let out = rewrite("$R.select { |$P| $B }.first", "$R.detect { |$P| $B }", src).unwrap();
+        assert_eq!(out, "x = accounts\n  .detect { |a| a.b }\n");
+    }
+
+    /// A `do ... end` block survives a rewrite whose template is written with
+    /// braces, because an unchanged subtree is never re-rendered.
+    #[test]
+    fn block_spelling_survives_a_rewrite() {
+        let src = "accounts.select do |a|\n  a.b\nend.first\n";
+        let out = rewrite("$R.select { |$P| $B }.first", "$R.detect { |$P| $B }", src).unwrap();
+        assert!(
+            out.contains("do |a|"),
+            "block was re-rendered as braces: {out}"
+        );
+        assert!(
+            !out.contains(".first"),
+            "the outer call was not dropped: {out}"
+        );
     }
 
     /// The whole point of structural diffing: layout the rule does not mention

@@ -369,17 +369,48 @@ rather than competing.
 No cross-file index was needed for any of it. Measurement (b) predicted ~59% from lexical
 scope plus constants, and local inference adds to that.
 
-## Corpus scoreboard
+## Corpus scoreboard — **complete**
 
 | entry | rwr | ast-grep | comby |
 |---|---|---|---|
 | 001 return-nil | **match** | match | **corrupts** (heredoc body, `nil_value`) |
-| 002 perf-detect | diff — shape-changing rewrite falls back | matched, rewrote non-minimally | inexpressible |
-| 004 sorted-array | diff — D33 sequence transforms unbuilt | inexpressible | inexpressible |
+| 002 perf-detect | **match** | matched, rewrote non-minimally | inexpressible |
+| 004 sorted-array | **match** | inexpressible | inexpressible |
+| 004 refuses-shared-line | **refuses, exit 5** | — | — |
 | 007 receiver-rename | **match** | **inexpressible** | **inexpressible** |
 
-Two of four, and the two that fail need features that are decided but unbuilt (D33 sequence
-transforms, D35 comment attachment) rather than anything the design got wrong.
+Every entry passes, including the refusal.
+
+### What the last two needed
+
+**002 exposed three bugs in structural diffing**, each of which silently disabled minimal
+editing rather than announcing itself:
+
+1. *The template had no place to correspond to.* `$R.select { .. }.first -> $R.detect { .. }`
+   drops an enclosing call, so the trees diverge at the root. Alignment now tries the
+   pattern's children: if the template corresponds to a **subtree**, the edit is that
+   subtree's own differences plus deleting what surrounded it.
+2. *Both trees resolved placeholders through the pattern's mapping.* Pattern and template are
+   prepared separately, so `rwr_mv_1` was `$SEL` in one and `$P` in the other -- silently
+   misaligning them.
+3. *Atoms were compared by bytes.* A metavariable substitutes to a different placeholder
+   identifier on each side, so `$P` versus `$P` read as a difference, and alignment gave up on
+   **every pattern with a metavariable in a name position**. This was the one actually
+   blocking 002.
+
+The result is what section 3C asked for: `.first` deleted, `select` renamed, and the chain's
+layout and the block's `do ... end` spelling untouched.
+
+**004 needed the container's inner span**, not just a floor. Reproducing the whitespace the
+author put between the delimiters and the elements is what keeps a one-per-line array
+one-per-line instead of collapsing onto the template's brackets.
+
+### The minimal-diff claim now holds
+
+An earlier revision of this document recorded that "rwr's edge at the syntax layer is
+rewriting, not matching" was a *design intent, not a shipped property*, because rwr collapsed
+multiline chains exactly as ast-grep does. That is no longer true. On 002, ast-grep finds
+every correct site and rewrites non-minimally; rwr finds them and edits only what changed.
 
 ## Still outstanding
 
