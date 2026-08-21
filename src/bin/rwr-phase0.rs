@@ -33,7 +33,12 @@ struct Report {
 struct RepoReport {
     /// The corpus directory's own name only -- never its full path.
     name: String,
+    /// Ruby files walked. `files_measured` is how many were actually read; the
+    /// two differ when a file cannot be opened, and a report that showed only
+    /// the second made those disappear.
     files: usize,
+    files_measured: usize,
+    files_unreadable: usize,
     bytes: u64,
     parse_ms: u128,
     unparsed: usize,
@@ -44,6 +49,11 @@ struct RepoReport {
     /// are. This is the input to measurement (b): a name whose sites carry many
     /// receiver shapes is one a bare-name rename damages.
     hot_names: Vec<NameReport>,
+    /// What `hot_names` left out, so a truncated list cannot be read as a whole
+    /// one. Names below `hot_names_min_sites` are not counted as omitted --
+    /// they were never candidates.
+    hot_names_omitted: usize,
+    hot_names_min_sites: usize,
 }
 
 #[derive(Serialize)]
@@ -98,10 +108,15 @@ fn measure(root: &Path) -> RepoReport {
         .collect();
 
     let start = Instant::now();
-    let per_file: Vec<FileMeasurement> = files
+    let attempted: Vec<Option<FileMeasurement>> = files
         .par_iter()
-        .filter_map(|path| {
-            let src = std::fs::read(path).ok()?;
+        .map(|path| {
+            // A file that cannot be read is counted, not skipped: dropping it
+            // shrank the denominator silently, which is the one thing an
+            // aggregate report must never do.
+            let Ok(src) = std::fs::read(path) else {
+                return None;
+            };
             let len = src.len() as u64;
             let parsed = ruby_prism::parse(&src);
             if parsed.errors().count() > 0 {
@@ -112,6 +127,8 @@ fn measure(root: &Path) -> RepoReport {
             Some((len, false, calls.seen))
         })
         .collect();
+    let unreadable = attempted.iter().filter(|m| m.is_none()).count();
+    let per_file: Vec<FileMeasurement> = attempted.into_iter().flatten().collect();
     let parse_ms = start.elapsed().as_millis();
 
     let mut by_name: HashMap<String, Vec<&'static str>> = HashMap::new();
@@ -125,9 +142,11 @@ fn measure(root: &Path) -> RepoReport {
         }
     }
 
+    const MIN_SITES: usize = 25;
+    const SHOWN: usize = 60;
     let mut hot: Vec<NameReport> = by_name
         .iter()
-        .filter(|(_, v)| v.len() >= 25)
+        .filter(|(_, v)| v.len() >= MIN_SITES)
         .map(|(name, v)| {
             let pct = |what: &str| {
                 u32::try_from(v.iter().filter(|s| **s == what).count() * 100 / v.len())
@@ -143,13 +162,14 @@ fn measure(root: &Path) -> RepoReport {
         })
         .collect();
     hot.sort_by_key(|n| std::cmp::Reverse(n.sites));
-    hot.truncate(60);
+    let omitted = hot.len().saturating_sub(SHOWN);
+    hot.truncate(SHOWN);
 
     RepoReport {
-        name: root
-            .file_name()
-            .map_or_else(|| "corpus".into(), |n| n.to_string_lossy().into_owned()),
-        files: per_file.len(),
+        name: repo_name(root),
+        files: files.len(),
+        files_measured: per_file.len(),
+        files_unreadable: unreadable,
         bytes: per_file.iter().map(|(n, _, _)| n).sum(),
         parse_ms,
         unparsed: per_file.iter().filter(|(_, bad, _)| *bad).count(),
@@ -157,8 +177,26 @@ fn measure(root: &Path) -> RepoReport {
         distinct_names: by_name.len(),
         receiver_shapes: shapes,
         hot_names: hot,
+        hot_names_omitted: omitted,
+        hot_names_min_sites: MIN_SITES,
     }
 }
+
+/// The corpus directory's own name, and never more of the path than that.
+///
+/// `.` and `..` have no file name of their own, so they are resolved first --
+/// a run labelled `discourse` that reported its repo as `corpus` was naming the
+/// fallback rather than the corpus.
+fn repo_name(root: &Path) -> String {
+    let resolved = root.canonicalize();
+    let path = resolved.as_deref().unwrap_or(root);
+    path.file_name()
+        .map_or_else(|| "corpus".into(), |n| n.to_string_lossy().into_owned())
+}
+
+const USAGE: &str = "rwr-phase0 [--label NAME] PATH...\n\n\
+     Emits a JSON report of aggregates only -- counts, timings and\n\
+     per-identifier statistics. No source text or paths are included.";
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -166,16 +204,29 @@ fn main() {
     let mut roots: Vec<PathBuf> = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--label" => label = args.next().unwrap_or_default(),
-            "-h" | "--help" => {
-                eprintln!(
-                    "rwr-phase0 [--label NAME] PATH...\n\n\
-                     Emits a JSON report of aggregates only -- counts, timings and\n\
-                     per-identifier statistics. No source text or paths are included."
-                );
+            "--label" => match args.next() {
+                Some(value) => label = value,
+                None => {
+                    eprintln!("rwr-phase0: --label needs a name");
+                    std::process::exit(2);
+                }
+            },
+            "-V" | "--version" => {
+                println!("rwr-phase0 {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
-            _ => roots.push(PathBuf::from(arg)),
+            "-h" | "--help" => {
+                eprintln!("{USAGE}");
+                return;
+            }
+            // An unrecognised flag used to be taken as a *path*, which then
+            // failed the is-a-directory test and vanished -- so a typo produced
+            // a clean-looking report measuring nothing.
+            other if other.starts_with('-') => {
+                eprintln!("rwr-phase0: unknown option {other}\n\n{USAGE}");
+                std::process::exit(2);
+            }
+            other => roots.push(PathBuf::from(other)),
         }
     }
     if roots.is_empty() {
@@ -183,14 +234,24 @@ fn main() {
         std::process::exit(2);
     }
 
-    let repos: Vec<RepoReport> = roots
-        .iter()
-        .filter(|r| r.is_dir())
-        .map(|r| measure(r))
-        .collect();
+    // Refuse rather than measure nothing. A path that is not a directory --
+    // an unexpanded `~`, a typo, a file -- silently produced `"repos": []`,
+    // which reads exactly like a corpus with no Ruby in it.
+    let missing: Vec<&PathBuf> = roots.iter().filter(|r| !r.is_dir()).collect();
+    if !missing.is_empty() {
+        for path in &missing {
+            eprintln!("rwr-phase0: not a directory: {}", path.display());
+        }
+        std::process::exit(2);
+    }
+
+    let repos: Vec<RepoReport> = roots.iter().map(|r| measure(r)).collect();
 
     let report = Report {
-        schema: 1,
+        // 2: `files` counts files *walked* where it used to count files read,
+        // and the report carries `files_measured`, `files_unreadable` and the
+        // `hot_names` cap alongside it.
+        schema: 2,
         rwr_version: env!("CARGO_PKG_VERSION"),
         label,
         generated_at_unix: SystemTime::now()

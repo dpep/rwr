@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**`rwr-phase0` refuses instead of reporting a clean nothing.** An unrecognised option was
+taken as a path, and any path that was not a directory — a quoted `~` the shell never
+expanded, a typo, a file — was filtered away in silence. All three produced a valid-looking
+report with `"repos": []` and no diagnostic. Each now names what was wrong and exits 2.
+
+The report itself accounts for what it walked: `files` counts files walked (it counted files
+*read*, so an unreadable file shrank the denominator invisibly), alongside `files_measured`,
+`files_unreadable`, and `hot_names_omitted`/`hot_names_min_sites` for the two caps `hot_names`
+applies. `schema` is now 2. A repo given as `.` reports its own directory name rather than the
+`corpus` fallback.
+
 **The rule pack is compiled into the binary.** `rwr check all`, `rwr check performance`,
 `rwr check style/return-nil` work from any directory — `cargo install` copies the binary and
 nothing else, so a pack that lived only in the repo was not shipped. A real path still wins
