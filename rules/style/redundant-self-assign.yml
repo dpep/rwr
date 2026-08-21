@@ -1,0 +1,3 @@
+description: '`x = x + n` is `x += n`.'
+match: $V = $V + $N
+rewrite: $V += $N

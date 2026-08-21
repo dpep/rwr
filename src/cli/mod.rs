@@ -104,6 +104,14 @@ pub(crate) struct Common {
     #[arg(short = 'e', long, global = true)]
     explain: bool,
 
+    /// Include rules that can change behaviour, printing why for each.
+    ///
+    /// Ruby is dynamically typed, so most interesting rewrites have an input
+    /// that breaks them. Those rules are held back by default and the run says
+    /// how many, rather than reporting a zero that reads like a clean tree.
+    #[arg(long = "unsafe", global = true)]
+    unsafe_rules: bool,
+
     /// Report where the time went, as a phase table on stderr.
     ///
     /// `RWR_PROFILE` in the environment enables it too, so a shipped binary can
@@ -305,6 +313,31 @@ fn report_by_rule(changed: &[Changed]) {
     println!();
     for (id, n) in &totals {
         println!("  {id:<width$}  {n} site(s)");
+    }
+}
+
+/// Say why each unsafe rule that actually fired is unsafe.
+///
+/// At the moment of the edit, not in a config file -- the caveat is only useful
+/// where the diff is.
+fn report_unsafe(changed: &[Changed], rules: &[rule::Rule]) {
+    let fired: Vec<&str> = changed
+        .iter()
+        .flat_map(|c| &c.rules)
+        .map(|h| h.rule.as_str())
+        .collect();
+    let mut said: Vec<&str> = Vec::new();
+    for r in rules {
+        let (Some(id), Some(why)) = (r.id.as_deref(), r.unsafe_because.as_deref()) else {
+            continue;
+        };
+        if fired.contains(&id) && !said.contains(&id) {
+            if said.is_empty() {
+                println!("\nunsafe rule(s) applied:");
+            }
+            said.push(id);
+            println!("  {id}: {why}");
+        }
     }
 }
 
@@ -575,6 +608,31 @@ fn cmd_apply(
             return Exit::PatternError.into();
         }
     };
+
+    // Rules that can change behaviour are held back unless asked for -- and the
+    // holding back is *reported*, because a zero that means "not run" reads
+    // exactly like a zero that means "already clean" (D57).
+    let (rules, held): (Vec<rule::Rule>, Vec<rule::Rule>) = if common.unsafe_rules {
+        (rules, Vec::new())
+    } else {
+        rules.into_iter().partition(|r| r.unsafe_because.is_none())
+    };
+    if !held.is_empty() {
+        eprintln!(
+            "rwr: {} rule(s) held back as unsafe; pass --unsafe to include them:",
+            held.len()
+        );
+        for r in &held {
+            eprintln!(
+                "  {}: {}",
+                r.id.as_deref().unwrap_or("(unnamed)"),
+                r.unsafe_because.as_deref().unwrap_or_default()
+            );
+        }
+    }
+    if rules.is_empty() {
+        return Exit::Ok.into();
+    }
     if rules.iter().any(|r| r.rewrite.is_none()) {
         eprintln!("rwr: {}", rule::RuleError::NoTemplate);
         return Exit::PatternError.into();
@@ -584,7 +642,7 @@ fn cmd_apply(
     // definition and the call sites are different shapes.
     let mut prepareds = Vec::with_capacity(rules.len());
     for r in &rules {
-        match prepare::prepare(&r.pattern) {
+        match prepare::prepare_with(&r.pattern, &r.constant_captures()) {
             Ok(p) => {
                 // Scoped so the parse's borrow of `p` ends before it moves.
                 let single = {
@@ -740,7 +798,14 @@ fn cmd_apply(
                                 Ok(None)
                             } else {
                                 let template = rule.rewrite.as_deref().unwrap_or_default();
-                                match rewrite::plan(&hits, &p_root, prepared, template, &current) {
+                                match rewrite::plan(
+                                    &hits,
+                                    &p_root,
+                                    prepared,
+                                    template,
+                                    &current,
+                                    &rule.constant_captures(),
+                                ) {
                                     Err(r) => Err(format!("{r:?}")),
                                     Ok(planned) => {
                                         let text = rewrite::apply(&current, &planned.edits);
@@ -882,6 +947,7 @@ fn cmd_apply(
                 println!("{}: {verb} {} site(s)", c.file, c.sites);
             }
             report_by_rule(&changed);
+            report_unsafe(&changed, &rules);
             report_residue(&left_over);
         }
         _ => {
@@ -954,6 +1020,7 @@ mod tests {
             path: vec![],
             include_vendored: false,
             explain: false,
+            unsafe_rules: false,
             profile: false,
         };
         assert_eq!(c.output(), Output::Ndjson);

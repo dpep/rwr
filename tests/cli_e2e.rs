@@ -117,9 +117,33 @@ fn the_rewrite_verb_writes() {
     assert_eq!(after, "def a\n  return\nend\n");
 }
 
+/// A find-only rule cannot be applied, and the error says what is missing.
 #[test]
-fn writing_requires_the_rewrite_verb() {
-    assert!(stderr(&rwr(&["rewrite", "rule.yml"])).contains("rewrite"));
+fn applying_requires_a_replacement() {
+    let dir = fixture("def a\n  return nil\nend\n");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(&rule, "match: return nil\n").expect("write");
+
+    let err = stderr(&rwr(&["rewrite", rule.to_str().unwrap()]));
+    assert!(err.contains("rewrite"), "{err}");
+}
+
+/// A rule argument that is neither a path nor a built-in names what it tried,
+/// rather than reporting the *next* problem it would have hit.
+#[test]
+fn an_unknown_rule_lists_the_built_ins() {
+    let err = stderr(&rwr(&["check", "no-such-rule"]));
+    assert!(err.contains("no-such-rule"), "{err}");
+    assert!(err.contains("style/return-nil"), "{err}");
+}
+
+/// The pack is compiled in, so an installed binary can run it from anywhere --
+/// there is no `rules/` next to the executable.
+#[test]
+fn the_built_in_pack_resolves_by_name() {
+    let dir = fixture("def a\n  return nil\nend\n");
+    let out = rwr(&["check", "style/return-nil", dir.path().to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
 }
 
 /// `check` inverts polarity deliberately (D22): a clean tree is success, so a
@@ -201,7 +225,13 @@ fn the_shipped_pack_names_the_rule_that_fired() {
     );
     let pack = concat!(env!("CARGO_MANIFEST_DIR"), "/rules");
 
-    let out = rwr(&["check", pack, dir.path().to_str().unwrap(), "-j"]);
+    let out = rwr(&[
+        "check",
+        pack,
+        dir.path().to_str().unwrap(),
+        "-j",
+        "--unsafe",
+    ]);
     let text = String::from_utf8_lossy(&out.stdout);
     let rows: serde_json::Value = serde_json::from_str(&text).expect("json");
     let rules = &rows[0]["rules"];
@@ -239,6 +269,40 @@ fn a_site_counts_once_however_many_edits_it_takes() {
     let text = String::from_utf8_lossy(&out.stdout);
     let rows: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(rows[0]["sites"], 1, "{text}");
+}
+
+/// A rule held back for being unsafe must not look like a rule that found
+/// nothing: the run says how many were skipped and why (D57).
+#[test]
+fn held_back_rules_are_reported_not_silent() {
+    let dir = fixture("a = xs.inject(:+)\n");
+
+    let quiet = rwr(&["check", "performance/sum", dir.path().to_str().unwrap()]);
+    let err = stderr(&quiet);
+    assert!(err.contains("held back"), "{err}");
+    assert!(err.contains("--unsafe"), "{err}");
+    assert!(
+        err.contains("empty collection"),
+        "the reason, not just a count: {err}"
+    );
+    assert_eq!(
+        quiet.status.code(),
+        Some(0),
+        "nothing ran, so nothing to do"
+    );
+
+    let asked = rwr(&[
+        "check",
+        "performance/sum",
+        dir.path().to_str().unwrap(),
+        "--unsafe",
+    ]);
+    assert_eq!(asked.status.code(), Some(1), "{}", stderr(&asked));
+    let text = String::from_utf8_lossy(&asked.stdout);
+    assert!(
+        text.contains("empty collection"),
+        "the caveat prints next to the diff: {text}"
+    );
 }
 
 /// No arguments is a usage error, not a silent no-op.

@@ -325,11 +325,15 @@ pub(crate) fn plan(
     pattern_prepared: &Prepared,
     template: &str,
     source: &[u8],
+    constants: &[String],
 ) -> Result<Planned, Refusal> {
     // The template is prepared and parsed once so its tree can be aligned
     // against the pattern's. Placeholder ids differ between the two, but both
     // resolve to the same metavariable names, which is what alignment keys on.
-    let t_prepared = prepare::prepare(template).ok();
+    // Seeded identically to the pattern, or the two trees would not align:
+    // `$C = [...]` is a constant write on one side and a local write on the
+    // other, and the diff would see a shape change that is not there.
+    let t_prepared = prepare::prepare_with(template, constants).ok();
     let t_parsed = t_prepared
         .as_ref()
         .map(|p| ruby_prism::parse(p.source.as_bytes()));
@@ -735,7 +739,7 @@ mod tests {
             &matcher::Criteria::none(),
         );
 
-        let planned = plan(&hits, &p_root, &prepared, template, source.as_bytes())?;
+        let planned = plan(&hits, &p_root, &prepared, template, source.as_bytes(), &[])?;
         let out = apply(source.as_bytes(), &planned.edits);
         verify(&out)?;
         Ok(out)

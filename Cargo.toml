@@ -5,6 +5,10 @@ edition = "2024"
 description = "Ruby structural search and rewrites"
 license = "MIT"
 repository = "https://github.com/dpep/rwr"
+build = "build.rs"
+# The rule pack is compiled in, but ship the sources too: they are the
+# documentation for writing your own.
+include = ["src/**", "build.rs", "rules/**", "README.md", "LICENSE*", "CHANGELOG.md"]
 
 [[bin]]
 name = "rwr"

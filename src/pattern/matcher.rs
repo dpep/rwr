@@ -13,7 +13,7 @@ use super::compare::{self, Atom};
 use super::generated;
 use super::prepare::{Binding, Prepared};
 use crate::hierarchy::Hierarchy;
-use crate::rule::{Constraint, Scope};
+use crate::rule::{Constraint, NodeKind, Scope};
 use ruby_prism::Node;
 use std::collections::HashMap;
 
@@ -434,6 +434,23 @@ pub(crate) fn verdict(
             }
         }
 
+        if let Some(wanted) = constraint.is
+            && !is_kind(bound, wanted)
+        {
+            return Verdict::BadBinding(short);
+        }
+
+        if let Some(wanted) = constraint.length {
+            // Counted in characters rather than bytes: `tr` maps characters, so
+            // a two-byte `é` is still one of them.
+            let Some(content) = literal_content(bound) else {
+                return Verdict::BadBinding(short);
+            };
+            if content.chars().count() != wanted {
+                return Verdict::BadBinding(short);
+            }
+        }
+
         if let Some(wanted) = &constraint.receiver_type {
             let Bound::One(node) = bound else {
                 return Verdict::BadBinding(short);
@@ -462,6 +479,52 @@ pub(crate) fn verdict(
         }
     }
     Verdict::Ok
+}
+
+/// Whether a binding is of the kind a constraint asked for.
+///
+/// A capture in a *name* position -- `$C` in `$C = [...]`, `$M` in `$R.$M` --
+/// binds an identifier rather than a node, because Prism carries those as atoms
+/// on the parent. There is no node to classify, so the identifier's own spelling
+/// answers the only question that can be asked of it: Ruby constants start with
+/// an uppercase letter and nothing else does.
+fn is_kind(bound: &Bound<'_>, wanted: NodeKind) -> bool {
+    let node = match bound {
+        Bound::One(node) => node,
+        Bound::Name(bytes) => {
+            return wanted == NodeKind::Constant
+                && bytes.first().is_some_and(u8::is_ascii_uppercase);
+        }
+        Bound::Many(_) => return false,
+    };
+    match wanted {
+        NodeKind::Constant => matches!(
+            node,
+            Node::ConstantReadNode { .. } | Node::ConstantPathNode { .. }
+        ),
+        NodeKind::Symbol => matches!(node, Node::SymbolNode { .. }),
+        // An interpolated string is a different node, which is what keeps
+        // `gsub("#{a}", "b")` out of a rule that assumes a literal.
+        NodeKind::String => matches!(node, Node::StringNode { .. }),
+        NodeKind::Integer => matches!(node, Node::IntegerNode { .. }),
+        NodeKind::Array => matches!(node, Node::ArrayNode { .. }),
+        NodeKind::Hash => matches!(node, Node::HashNode { .. }),
+    }
+}
+
+/// The text a literal carries, for the bindings where that question has an
+/// answer.
+fn literal_content(bound: &Bound<'_>) -> Option<String> {
+    let bytes = match bound {
+        Bound::Name(bytes) => bytes.clone(),
+        Bound::One(node) => match node {
+            Node::StringNode { .. } => node.as_string_node()?.unescaped().to_vec(),
+            Node::SymbolNode { .. } => node.as_symbol_node()?.unescaped().to_vec(),
+            _ => return None,
+        },
+        Bound::Many(_) => return None,
+    };
+    String::from_utf8(bytes).ok()
 }
 
 /// The identifier a binding names, across node kinds.
@@ -768,9 +831,29 @@ fn walk<'pr>(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::pattern::prepare::prepare;
     use crate::rule::Kind;
+
+    /// How many sites a whole rule -- pattern plus `where:` -- matches.
+    fn applied(rule_yaml: &str, source: &str) -> usize {
+        let rule: crate::rule::Rule = serde_yaml::from_str(rule_yaml).expect("rule parses");
+        let prepared =
+            crate::pattern::prepare::prepare_with(&rule.pattern, &rule.constant_captures())
+                .expect("pattern prepares");
+        let p_result = ruby_prism::parse(prepared.source.as_bytes());
+        let p_root = pattern_root(&p_result.node()).expect("single-statement pattern");
+        let t_result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(t_result.errors().count(), 0, "target does not parse");
+        let hierarchy = Hierarchy::default();
+        let criteria = Criteria {
+            constraints: &rule.constraints,
+            scope: &rule.scope,
+            hierarchy: &hierarchy,
+        };
+        search(&p_root, &t_result.node(), &prepared, &criteria).len()
+    }
 
     fn matches(pattern: &str, source: &str) -> usize {
         let prepared = prepare(pattern).expect("pattern prepares");
@@ -1364,5 +1447,27 @@ end
     #[test]
     fn search_is_reentrant() {
         assert_eq!(matches("foo($A)", "foo(foo(1))"), 2);
+    }
+
+    /// `gsub` -> `tr` is only valid character-for-character, so the predicate
+    /// that makes it safe is the length -- not the shape, which is identical.
+    #[test]
+    fn length_separates_tr_from_gsub() {
+        let rule = "match: $R.gsub($FROM, $TO)\nwhere:\n  $FROM:\n    is: string\n    length: 1\n  $TO:\n    is: string\n    length: 1\nrewrite: $R.tr($FROM, $TO)\n";
+        assert_eq!(applied(rule, "a.gsub(\"-\", \"_\")\n"), 1);
+        assert_eq!(applied(rule, "a.gsub(\"ab\", \"cd\")\n"), 0);
+        assert_eq!(applied(rule, "a.gsub(/x/, \"y\")\n"), 0);
+        // An interpolated string is a different node, so `is: string` excludes
+        // it even though its content might be one character at runtime.
+        assert_eq!(applied(rule, "a.gsub(\"#{v}\", \"y\")\n"), 0);
+    }
+
+    /// `is: constant` also picks the placeholder casing, because `FOO = 1` and
+    /// `foo = 1` both parse and the case-repair loop only fires on a failure.
+    #[test]
+    fn is_constant_reaches_a_constant_assignment() {
+        let rule = "match: $C = [*$ITEMS]\nwhere:\n  $C:\n    is: constant\nrewrite: $C = [*$ITEMS.sort]\n";
+        assert_eq!(applied(rule, "FOO = [:b, :a]\n"), 1);
+        assert_eq!(applied(rule, "foo = [:b, :a]\n"), 0);
     }
 }

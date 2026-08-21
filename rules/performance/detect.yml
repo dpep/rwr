@@ -5,6 +5,8 @@
 # filtering rows. Narrow with a `where:` receiver type on `$R` when running this
 # over a Rails app; rwr reports the sites it could not resolve as residue.
 description: '`select { }.first` builds the whole array to take one element; `detect` stops at the first match.'
+unsafe: >-
+  `select` on an ActiveRecord relation names columns rather than filtering rows, and `detect` short-circuits, so a block with side effects runs fewer times.
 match: $R.$SEL { |$P| $B }.first
 where:
   $SEL:

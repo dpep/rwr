@@ -1,0 +1,9 @@
+# `compact` drops nil; `filter_map` drops nil *and* false. Requiring the block
+# to end in a predicate call is not something rwr can check, so this ships only
+# for `map { }.compact` -- and the caveat stands: a block that can return false
+# changes behaviour. RuboCop ships the same cop as an unsafe autocorrect.
+description: '`map { }.compact` builds an intermediate array; `filter_map` does not. Unsafe if the block can return false.'
+unsafe: >-
+  `compact` drops nil; `filter_map` drops nil and false. A block that can return false changes behaviour.
+match: $R.map { |$P| $B }.compact
+rewrite: $R.filter_map { |$P| $B }

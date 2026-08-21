@@ -1063,3 +1063,66 @@ the assoc whole.
 
 *Reverses if:* nothing plausible. The escape hatch is unchanged -- anything that still fails
 to align falls back to whole-node replacement, and `verify` reparses either way.
+
+## D57 - No per-rule options; `unsafe:` carries the caveat instead
+**Decided**, and it is the deliberate divergence from RuboCop's configuration model.
+
+RuboCop configures a cop because a cop is Ruby code the user cannot edit: `EnforcedStyle`,
+`AllowedMethods`, `Max` all exist to parameterise something opaque. An rwr rule is four lines
+of YAML. The rule **is** the option -- there is no direction to configure because the rule
+encodes one outright, and the way to get the other direction is to copy the file and swap
+`match` with `rewrite`. Adding an options layer would mean a schema, defaults, and a merge
+order per rule: reimplementing `.rubocop.yml` to configure something already declarative.
+
+What genuinely cannot live in the rule body is **whether the rewrite can change behaviour**,
+because that is a property of Ruby rather than of the pattern. `inject(:+)` returns nil for
+an empty collection where `sum` returns 0. `select` on an `ActiveRecord::Relation` names
+columns rather than filtering rows. `tr` gives `^` and `\` special meaning that `gsub` does
+not. Each is a real input that breaks a rule that matched correctly.
+
+So a rule carries `unsafe: <reason>`. **Presence means unsafe and the value is the reason** --
+there is no boolean to set without saying what for, which is the design's whole point.
+Unsafe rules are held back unless `--unsafe` is passed, and three things follow:
+
+- **The holding back is reported.** A rule that was not run produces the same zero as a rule
+  that found nothing, and those must not look alike -- the same failure as `performance/count`
+  matching only `.size` and reading as a clean codebase.
+- **The reason prints when the rule fires**, next to the diff. RuboCop has this information
+  as `SafeAutoCorrect: false`, in a config file nobody reads at the moment of the edit.
+- **Selection stays the filesystem.** A family is a directory, so turning a subset on needs no
+  second mechanism.
+
+**This is where receiver narrowing pays.** Half the caveats above are "unless the receiver is
+an ActiveRecord relation", which a `where: { $R: { type: Array } }` answers outright. The
+unsafe marker is the honest default *until* the rule is narrowed, not a permanent property.
+
+*Reverses if:* a rule ever needs a genuinely numeric or list-valued parameter that cannot be
+spelled as a distinct rule -- a `Max:` threshold, say. Nothing in the corpus wants one.
+
+## D58 - Two literal predicates: `is:` and `length:`
+**Decided.** Both were forced by rules someone wanted, and each unblocks more than its
+requester.
+
+`is: constant|symbol|string|integer|array|hash` constrains a capture's node kind. `length: N`
+constrains a string or symbol literal's content in *characters*. Together they are what makes
+`gsub` -> `tr` safe rather than plausible: `tr` maps character by character, so the rewrite is
+valid only for one-character string literals, and `is: string` additionally keeps an
+interpolated `"#{x}"` out, since interpolation is a different node.
+
+**`is: constant` also seeds the substitution, and had to.** The case-repair loop in D18 flips
+a placeholder only when the parse *fails*, which cannot help where both casings parse and
+mean different things: `rwr_mv_1 = [1]` is a local-variable write and `RwrMv1 = [1]` a
+constant write. A pattern for the latter silently became one for the former, matching every
+local assignment and no constant. A rule that says `is: constant` has already answered the
+question, so the declaration seeds the substitution rather than a second mechanism being
+invented for it.
+
+**A capture in name position binds an identifier, not a node.** `$C` in `$C = [...]` and `$M`
+in `$R.$M` are atoms Prism carries on the parent, so there is no node to classify. For those
+the identifier's own spelling answers the only question available -- Ruby constants start
+uppercase and nothing else does. Pinned by
+`matcher::tests::is_constant_reaches_a_constant_assignment`.
+
+*Reverses if:* the predicate set grows past what a closed enum can carry, at which point it
+wants a general value-matching language -- which should be resisted, since it is how a
+structural tool turns into a regex engine.

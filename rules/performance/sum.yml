@@ -1,0 +1,8 @@
+description: '`inject(:+)` is `sum`, which has a fast path for numerics.'
+unsafe: >-
+  `inject(:+)` returns nil for an empty collection; `sum` returns 0.
+match: $R.$RED(:+)
+where:
+  $RED:
+    name: [inject, reduce]
+rewrite: $R.sum

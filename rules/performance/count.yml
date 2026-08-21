@@ -1,6 +1,8 @@
 # Carries the same ActiveRecord caveat as `detect`. `$AGG` is alternated
 # because `size` and `length` are synonyms on Array and a rule must match both.
 description: '`select { }.size` allocates the filtered array only to measure it.'
+unsafe: >-
+  `select` on an ActiveRecord relation names columns rather than filtering rows.
 match: $R.$SEL { |$P| $B }.$AGG
 where:
   $SEL:

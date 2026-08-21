@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+**The rule pack is compiled into the binary.** `rwr check all`, `rwr check performance`,
+`rwr check style/return-nil` work from any directory — `cargo install` copies the binary and
+nothing else, so a pack that lived only in the repo was not shipped. A real path still wins
+over a built-in name.
+
+**Four new rules**, plus `sorted-constant-array` and `string-replacement` (`gsub` → `tr`).
+Two new `where:` predicates make them safe rather than plausible: `is:` constrains a
+capture's node kind and `length:` its literal content in characters. `is: constant` also
+picks the placeholder casing, which is what lets a pattern reach `FOO = [...]` at all —
+before, `$C = [...]` silently meant a *local* assignment, since both casings parse.
+
+**Rules that can change behaviour say so, and are held back by default.** A rule may carry
+`unsafe: <reason>`; those need `--unsafe`, the run reports how many it skipped and why, and
+a reason prints next to the diff when its rule fires. There are no per-rule options — the
+rule is four lines of YAML, so the rule *is* the option (D57).
+
 **A shipped rule pack.** `rwr check rules` runs every rule under a directory,
 `rwr check rules/performance` runs one family. A run reports which rule
 accounted for what, since a total across five rules is not reviewable. Rules

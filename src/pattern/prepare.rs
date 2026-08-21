@@ -75,8 +75,29 @@ impl Case {
 /// Rewrite `pattern` into parseable Ruby, replacing metavariables with
 /// placeholder identifiers.
 pub(crate) fn prepare(pattern: &str) -> Result<Prepared, PrepareError> {
+    prepare_with(pattern, &[])
+}
+
+/// As [`prepare`], seeding the named metavariables with constant casing.
+///
+/// The case-repair loop flips a placeholder only when the parse *fails*, which
+/// cannot help where both casings parse and mean different things:
+/// `rwr_mv_1 = [1]` is a local-variable write and `RwrMv1 = [1]` a constant
+/// write, so a pattern for the latter silently became one for the former. A rule
+/// that says `where: { $C: { is: constant } }` has already answered the
+/// question, so the declaration seeds the substitution rather than a second
+/// mechanism being invented for it.
+pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepared, PrepareError> {
     let vars = metavar::scan(pattern);
-    let mut cases = vec![Case::Lower; vars.len()];
+    let mut cases: Vec<Case> = vars
+        .iter()
+        .map(|v| match &v.name {
+            Some(name) if constants.iter().any(|c| c.trim_start_matches('$') == name) => {
+                Case::Upper
+            }
+            _ => Case::Lower,
+        })
+        .collect();
 
     // One flip per placeholder is enough to reach any reachable assignment,
     // plus a final attempt to observe the result.

@@ -34,6 +34,20 @@ pub(crate) struct Rule {
     /// Constraints on the match as a whole.
     #[serde(default)]
     pub scope: Scope,
+
+    /// Why this rule can change behaviour, when it can.
+    ///
+    /// Present means unsafe, and the value is the reason -- there is no boolean
+    /// to set without saying what for. Ruby is dynamically typed, so most
+    /// interesting rewrites have an input that breaks them: `inject(:+)` returns
+    /// nil on an empty collection where `sum` returns 0, and `select` on an
+    /// ActiveRecord relation names columns rather than filtering rows.
+    ///
+    /// RuboCop carries the same information as `SafeAutoCorrect: false`, in a
+    /// config file nobody reads at the moment of the edit. Here it is a
+    /// sentence, printed when the rule fires.
+    #[serde(default, rename = "unsafe")]
+    pub unsafe_because: Option<String>,
 }
 
 /// What a capture must satisfy beyond matching structurally.
@@ -73,6 +87,23 @@ pub(crate) struct Constraint {
     #[serde(default)]
     pub subclasses: Option<bool>,
 
+    /// The capture must be this kind of node.
+    ///
+    /// The predicate a *literal* rule needs. Sorting array elements is only
+    /// wanted where order is presentation rather than meaning, which in practice
+    /// means a constant; `gsub` -> `tr` is only valid for string literals. Both
+    /// are shape questions the pattern language cannot ask, because the same
+    /// syntax position accepts several node kinds.
+    #[serde(default)]
+    pub is: Option<NodeKind>,
+
+    /// The capture's literal content must be exactly this many characters.
+    ///
+    /// `tr` maps character by character, so `gsub("ab", "cd")` is not `tr` -- the
+    /// rewrite is valid only when both arguments are one character long.
+    #[serde(default)]
+    pub length: Option<usize>,
+
     /// This capture must name the same identifier as another.
     ///
     /// `{foo: foo}` -> `{foo:}` needs a symbol key compared against a
@@ -80,6 +111,27 @@ pub(crate) struct Constraint {
     /// kinds, so D16's AST equality does not apply.
     #[serde(default)]
     pub same_name_as: Option<String>,
+}
+
+/// A node kind a capture may be constrained to.
+///
+/// Deliberately a closed set: an unknown value is a rule bug and must be a
+/// diagnostic rather than a constraint that quietly never matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum NodeKind {
+    /// `FOO`, `Foo::Bar` -- a constant read or its enclosing path.
+    Constant,
+    /// `:foo`
+    Symbol,
+    /// `"foo"`, `'foo'` -- a plain literal, not an interpolated one.
+    String,
+    /// `1`, `0xff`
+    Integer,
+    /// `[1, 2]`
+    Array,
+    /// `{a: 1}`
+    Hash,
 }
 
 /// Which of a class's two method tables a constraint means.
@@ -140,6 +192,11 @@ pub(crate) enum RuleError {
     EmptyPack {
         path: String,
     },
+    /// Neither a path nor anything in the built-in pack.
+    NoSuchRule {
+        name: String,
+        known: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for RuleError {
@@ -150,6 +207,11 @@ impl std::fmt::Display for RuleError {
             RuleError::EmptyPack { path } => {
                 write!(f, "no .yml or .yaml rule files under {path}")
             }
+            RuleError::NoSuchRule { name, known } => write!(
+                f,
+                "no such file, directory, or built-in rule: {name}\n  try one of: {}",
+                known.join(", ")
+            ),
             RuleError::NoTemplate => write!(
                 f,
                 "a replacement is required — pass -r/--replace, or give a rule file with a `rewrite:` key"
@@ -258,6 +320,20 @@ impl MethodRename {
     }
 }
 
+impl Rule {
+    /// Captures the rule declares to be constants.
+    ///
+    /// Fed to the substitution, which cannot otherwise tell `FOO = 1` from
+    /// `foo = 1`: both casings parse, so the case-repair loop never fires.
+    pub(crate) fn constant_captures(&self) -> Vec<String> {
+        self.constraints
+            .iter()
+            .filter(|(_, c)| c.is == Some(NodeKind::Constant))
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+}
+
 /// Resolve the `RULE` argument into one or more rules.
 ///
 /// A rule file may hold a single rule or a list of them. A complete rename
@@ -277,13 +353,65 @@ pub(crate) fn load_all(rule: &str, replace: Option<&str>) -> Result<Vec<Rule>, R
         return load_pack(path);
     }
     if !path.is_file() {
-        return Err(RuleError::NoTemplate);
+        // Not a path, so it may name part of the built-in pack. A real path
+        // always wins: resolving the other way round would mean a rule shipped
+        // in a later version could quietly shadow the caller's own directory.
+        return builtin(rule);
     }
     let id = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| rule.to_string());
     load_file(path, &id)
+}
+
+/// The rule pack compiled into the binary, as `(id, yaml)` in path order.
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/builtin_rules.rs"));
+}
+
+/// Rules from the built-in pack selected by `name`.
+///
+/// `all` is everything; a family name is every rule under it (`performance`);
+/// a full id is one rule (`performance/detect`). The pack has to be compiled in
+/// rather than read from disk: `cargo install` copies the binary alone, so a
+/// pack that lives only in the repo is not shipped.
+fn builtin(name: &str) -> Result<Vec<Rule>, RuleError> {
+    let selected: Vec<&(&str, &str)> = embedded::BUILTIN
+        .iter()
+        .filter(|(id, _)| {
+            name == "all"
+                || *id == name
+                || id.strip_prefix(name).is_some_and(|r| r.starts_with('/'))
+        })
+        .collect();
+
+    if selected.is_empty() {
+        return Err(RuleError::NoSuchRule {
+            name: name.to_string(),
+            known: families(),
+        });
+    }
+
+    let mut rules = Vec::new();
+    for (id, yaml) in selected {
+        rules.extend(parse(yaml, id, id)?);
+    }
+    Ok(rules)
+}
+
+/// What a caller may ask for: `all`, each family, and each full id.
+fn families() -> Vec<String> {
+    let mut out = vec!["all".to_string()];
+    for (id, _) in embedded::BUILTIN {
+        if let Some((family, _)) = id.split_once('/')
+            && !out.iter().any(|k| k == family)
+        {
+            out.push(family.to_string());
+        }
+    }
+    out.extend(embedded::BUILTIN.iter().map(|(id, _)| (*id).to_string()));
+    out
 }
 
 /// Every rule in one file, each stamped with `id` unless it named itself.
@@ -293,18 +421,25 @@ fn load_file(path: &Path, id: &str) -> Result<Vec<Rule>, RuleError> {
         path: name.clone(),
         message: e.to_string(),
     })?;
+    parse(&raw, id, &name)
+}
 
+/// Rules from one YAML document, each stamped with `id` unless it named itself.
+///
+/// `origin` names the source in an error, which is a path for a file on disk and
+/// a rule id for the built-in pack.
+fn parse(raw: &str, id: &str, origin: &str) -> Result<Vec<Rule>, RuleError> {
     // The method-notation shorthand expands to a rule set.
-    let mut rules = if let Ok(rename) = serde_yaml::from_str::<MethodRename>(&raw) {
+    let mut rules = if let Ok(rename) = serde_yaml::from_str::<MethodRename>(raw) {
         rename.expand()
-    } else if let Ok(rules) = serde_yaml::from_str::<Vec<Rule>>(&raw) {
+    } else if let Ok(rules) = serde_yaml::from_str::<Vec<Rule>>(raw) {
         // A sequence is a rule set; a mapping is one rule. Trying the sequence
         // first keeps the single-rule spelling unchanged.
         rules
     } else {
         vec![
-            serde_yaml::from_str::<Rule>(&raw).map_err(|e| RuleError::Malformed {
-                path: name,
+            serde_yaml::from_str::<Rule>(raw).map_err(|e| RuleError::Malformed {
+                path: origin.to_string(),
                 message: e.to_string(),
             })?,
         ]

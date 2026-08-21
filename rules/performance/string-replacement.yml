@@ -1,0 +1,16 @@
+# `tr` maps character by character, so this is valid only when both arguments
+# are one-character string literals -- `gsub("ab", "cd")` is a different
+# operation. `length: 1` is what makes the rule safe rather than plausible, and
+# `is: string` keeps an interpolated `"#{x}"` out.
+description: '`gsub` with single-character literals is `tr`, which needs no regex engine.'
+unsafe: >-
+  `tr` gives `^` and `\` special meaning, so a one-character `^` or backslash is not a literal there as it is in `gsub`.
+match: $R.gsub($FROM, $TO)
+where:
+  $FROM:
+    is: string
+    length: 1
+  $TO:
+    is: string
+    length: 1
+rewrite: $R.tr($FROM, $TO)
