@@ -234,7 +234,7 @@ fn the_shipped_pack_names_the_rule_that_fired() {
     ]);
     let text = String::from_utf8_lossy(&out.stdout);
     let report: serde_json::Value = serde_json::from_str(&text).expect("json");
-    let rules = &report[0]["changed"][0]["rules"];
+    let rules = &report["changed"][0]["rules"];
     let named: Vec<&str> = rules
         .as_array()
         .expect("rules array")
@@ -268,7 +268,7 @@ fn a_site_counts_once_however_many_edits_it_takes() {
     ]);
     let text = String::from_utf8_lossy(&out.stdout);
     let report: serde_json::Value = serde_json::from_str(&text).expect("json");
-    assert_eq!(report[0]["changed"][0]["sites"], 1, "{text}");
+    assert_eq!(report["changed"][0]["sites"], 1, "{text}");
 }
 
 /// A rule held back for being unsafe must not look like a rule that found
@@ -562,6 +562,29 @@ fn a_rename_across_two_classes_warns() {
         "{}",
         stderr(&scoped)
     );
+}
+
+/// A machine consumer needs to know what produced the document it is parsing,
+/// especially across a shape change.
+#[test]
+fn structured_output_names_its_own_shape() {
+    let dir = fixture("def a\n  return nil\nend\n");
+    for args in [
+        vec![
+            "check",
+            "style/return-nil",
+            dir.path().to_str().unwrap(),
+            "-j",
+        ],
+        vec!["return nil", dir.path().to_str().unwrap(), "-j"],
+    ] {
+        let out = rwr(&args);
+        let text = String::from_utf8_lossy(&out.stdout);
+        let doc: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert!(doc.is_object(), "a document, not a list of one: {text}");
+        assert_eq!(doc["schema"], 2, "{text}");
+        assert_eq!(doc["rwr_version"], env!("CARGO_PKG_VERSION"), "{text}");
+    }
 }
 
 /// No arguments is a usage error, not a silent no-op.

@@ -317,6 +317,28 @@ pub fn run() -> ExitCode {
 
 /// Emit a row set: `--json` one pretty array, `--ndjson` one compact object
 /// per line (D23). Returns `Some(exit)` only on a serialisation failure.
+/// Emit one JSON document, rather than a list of them.
+///
+/// `-j` is a document and `-J` a stream, so a single report is an object under
+/// the first and one line under the second. Serialising it through the row path
+/// wrapped it in a one-element array, which every consumer then had to index
+/// past for no reason.
+fn emit_document<T: Serialize>(out: Output, value: &T) -> Option<ExitCode> {
+    let rendered = match out {
+        Output::Json => serde_json::to_string_pretty(value),
+        Output::Ndjson => serde_json::to_string(value),
+        Output::Text => return None,
+    };
+    match rendered {
+        Ok(text) => println!("{text}"),
+        Err(e) => {
+            eprintln!("rwr: {e}");
+            return Some(Exit::Error.into());
+        }
+    }
+    None
+}
+
 fn emit_rows<T: Serialize>(out: Output, rows: &[T]) -> Option<ExitCode> {
     match out {
         Output::Json => match serde_json::to_string_pretty(rows) {
@@ -508,6 +530,14 @@ struct Residue {
     col: usize,
     context: residue::Context,
     text: String,
+}
+
+/// What a `find` run has to say, for machine consumers.
+#[derive(Debug, Serialize)]
+struct Matches<'a> {
+    schema: u32,
+    rwr_version: &'static str,
+    matches: &'a [Found],
 }
 
 #[derive(Debug, Serialize)]
@@ -702,7 +732,22 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
             report_residue(&residues, templates);
         }
         _ => {
-            if emit_rows(out, &found).is_some() {
+            // `-j` is one document, so it carries what produced it. `-J` is a
+            // row per line by definition and cannot: a consumer choosing it has
+            // chosen a stream over a document.
+            let emitted = if out == Output::Json {
+                emit_document(
+                    out,
+                    &Matches {
+                        schema: REPORT_SCHEMA,
+                        rwr_version: env!("CARGO_PKG_VERSION"),
+                        matches: &found,
+                    },
+                )
+            } else {
+                emit_rows(out, &found)
+            };
+            if emitted.is_some() {
                 return Exit::Error.into();
             }
         }
@@ -730,6 +775,15 @@ struct Changed {
     rules: Vec<RuleHits>,
 }
 
+/// The output contract's version, bumped when the shape changes.
+///
+/// Paired with `rwr_version` for the same reason `rwr-phase0` carries both: a
+/// consumer needs to know what produced a document it is parsing, and the
+/// schema number is what it can branch on without a version comparison.
+///
+/// 1 was a bare array of changed files, with no account of residue at all.
+const REPORT_SCHEMA: u32 = 2;
+
 /// Everything a `check` or `rewrite` run has to say, for machine consumers.
 ///
 /// A single object rather than a bare array of changes: the changes alone are
@@ -737,6 +791,8 @@ struct Changed {
 /// half that flatters the tool.
 #[derive(Debug, Serialize)]
 struct Report<'a> {
+    schema: u32,
+    rwr_version: &'static str,
     changed: &'a [Changed],
     /// Occurrences the rule could not account for. Present and empty when the
     /// rule is name-anchored and found none; absent means it made no claim.
@@ -1269,11 +1325,13 @@ fn cmd_apply(
             // an agent runs `-j` and was getting the edits with no account of what
             // they missed at all (D7, principle 3).
             let report = Report {
+                schema: REPORT_SCHEMA,
+                rwr_version: env!("CARGO_PKG_VERSION"),
                 changed: &changed,
                 residue: &left_over,
                 templates_skipped: if claims_completeness { templates } else { 0 },
             };
-            if emit_rows(out, std::slice::from_ref(&report)).is_some() {
+            if emit_document(out, &report).is_some() {
                 return Exit::Error.into();
             }
         }

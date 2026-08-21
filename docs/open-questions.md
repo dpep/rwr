@@ -5,12 +5,6 @@ survey and recorded as decisions; kept here with their resolutions for continuit
 
 ---
 
-## Q7 — Perf targets are unfalsifiable until Phase 0
-
-No latency numbers are set because none are measured. Phase 0 must produce cold parse (both
-corpora), single-file reparse, repo-wide query, and rewrite+verify. Targets get set *after*
-those land — picking numbers now would be a guess wearing the clothes of a requirement.
-
 ## Q8 — Are Coccinelle-style isomorphisms viable, or a known trap? *(new)*
 
 Named, individually disableable, position-typed equivalence rules — treating syntactically
@@ -288,3 +282,37 @@ it would make it miss sites.
 Residue reporting is worth its place in the product, and it is **not** worth trusting as a
 completeness guarantee on a common identifier. Both halves of that need saying, and the tool
 now says both.
+
+## Q7 — Perf targets are unfalsifiable until Phase 0 — **closed, targets set**
+
+The measurements exist now, so the targets are derived rather than picked. Five runs each,
+warm; the first run of each set is cold-cache and reported separately because it is a
+different question.
+
+| corpus | files | `find` one pattern | a rename | the 10-rule pack |
+|---|---|---|---|---|
+| mastodon | 3,269 | 39 ms | 37 ms | 178 ms |
+| rails | 3,321 | 64 ms | 69 ms | 348 ms |
+| discourse | 11,006 | 174 ms | 312 ms | 970 ms |
+
+Cold-cache first runs: 99 ms, 105 ms, 280 ms for `find`. The gap is page-in, not work.
+
+**Targets, as regression ceilings rather than aspirations** — roughly 1.5× the measured
+figure, so ordinary variance does not trip them and an order-of-magnitude regression does:
+
+- a single-pattern `find` over ~10k files: **under 250 ms** warm
+- a rename, which additionally builds the class hierarchy and reads signatures: **under
+  500 ms**
+- the whole shipped pack, ten rules: **under 1.5 s**
+
+**No timing assertion goes into CI, deliberately.** A wall-clock test is machine-dependent,
+and a suite that fails on a busy laptop teaches people to rerun until green — which is worse
+than no check, because it also destroys trust in the checks that mean something. The guard
+is this table plus `--profile`, run before a release. If a cheap deterministic proxy for the
+same thing turns up — files surviving the prefilter, say — it belongs in CI and this does
+not.
+
+**What the numbers say about the design.** Cost tracks how many files mention an identifier
+rather than repository size: discourse is 3.4× rails by file count and 2.7× by `find` time,
+while the pack, which cannot prefilter as sharply because ten rules contribute ten literal
+sets, scales closer to linear. That is the literal prefilter working as intended.

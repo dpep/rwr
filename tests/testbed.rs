@@ -80,7 +80,7 @@ fn run() -> (Vec<(PathBuf, usize, String)>, serde_json::Value) {
 
     let truth = ground_truth(&root);
     assert!(!truth.is_empty(), "the testbed carries no GT: markers");
-    (truth, report[0].clone())
+    (truth, report)
 }
 
 fn copy_tree(from: &Path, to: &Path) {
