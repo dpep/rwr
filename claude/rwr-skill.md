@@ -123,6 +123,11 @@ rewrite: $R.detect { |$P| $B }
 | `is: constant\|symbol\|string\|integer\|array\|hash` | the capture's node kind |
 | `length: N` | a string/symbol literal's content, in characters |
 
+`type:` resolves a receiver from a constructor (`Widget.new.foo`), a local or
+ivar assigned from one, a constant, `self`, and — where the repo has Sorbet
+signatures — whatever `sig { returns(X) }` says. A receiver it cannot resolve
+does **not** match, so `type:` only ever narrows; the misses show up as residue.
+
 And `scope:` constrains the match as a whole — `inside: Account`,
 `singleton: true`, `subclasses: true`.
 
@@ -132,6 +137,39 @@ the last one's output. Point `rwr` at a directory to run all of them.
 There are **no per-rule options** — a rule is four lines of YAML, so the rule
 *is* the option. Want the opposite direction? Copy the file and swap `match`
 with `rewrite`.
+
+## Scoping to a change
+
+For a pre-commit hook or a pull-request gate, restrict the run to lines the
+change touched — otherwise a rule with two thousand pre-existing sites fails a
+change that added three:
+
+```sh
+rwr check all --diff          # uncommitted work
+rwr check all --diff main     # what this branch introduces (main...HEAD)
+```
+
+Works with `find`, `check` and `rewrite`.
+
+## Safety signals to actually read
+
+Three things rwr says that are worth acting on rather than skimming:
+
+**`warning: rewrote receivers of N different classes`.** `Account#display_name`
+and `Company#display_name` are different methods. The rule renamed both. Add a
+`type:` constraint unless that was really meant.
+
+**`N rule(s) held back as unsafe`.** Those rewrites can change behaviour. `-e`
+prints why for each; `--unsafe` runs them anyway. Read the reasons before
+passing it.
+
+**`N template file(s) were not searched`.** ERB and Haml embed Ruby that rwr
+does not parse, so the completeness claim covers `.rb` and friends only. In a
+Rails app a real share of call sites lives there and needs checking by hand.
+
+Rules whose output needs a newer Ruby than the codebase targets are also held
+back — detected from `.ruby-version`, a Gemfile `ruby` line, or a gemspec's
+`required_ruby_version`, and overridable with `--ruby X.Y`.
 
 ## Exit codes
 
@@ -156,6 +194,8 @@ converge if it did.
 
 - `--profile` reports where the time went. A whole Rails app is ~1.5s.
 - Generated and vendored code is skipped; `--include-vendored` overrides.
+- Ruby means more than `.rb`: `.rake`, `.ru`, `.gemspec`, `.jbuilder`,
+  `Rakefile`, `Gemfile` and friends are searched too.
 - `-e/--explain` says which constraint rejected a candidate and how a residue
   occurrence was classified — reach for it when a rule matches less than you
   expected.
