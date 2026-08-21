@@ -579,3 +579,24 @@ condemned a feature that is free.
 
 The prefilter earns its own note: filtering on `sig` rather than `sig ` parsed 1,584 Discourse
 files to find nothing, 46% of that run. "sig" is inside "design", "assign" and "signature".
+
+### An unplanned validation: two repos where every signature is fiction
+
+Scanning the local corpus for Sorbet projects, `grep -l "sig {"` reports four files in
+`accord` and five in `rubocop`. rwr extracts **zero signatures from either**.
+
+That is not a gap. Every one of those `sig` blocks is inside a heredoc — `<<~RBI` holding a
+spec's *expected output* in accord, `expect_no_offenses(<<~RUBY)` holding example code in
+rubocop. They describe classes that do not exist.
+
+A text-based signature extractor would have indexed all of them and then narrowed real call
+sites by fictional types. rwr reads the parse tree, so a heredoc body is not code — the same
+property that makes `rwr 'return nil'` find 22 sites on rails where ripgrep reports 40, doing
+work here that was never designed for it.
+
+| repo | files matching `sig {` | signatures rwr extracts |
+|---|---|---|
+| graph_weaver | 16 | 79 |
+| sorbet-uuid | 2 | 13 |
+| accord | 4 | **0** — all heredoc |
+| rubocop | 5 | **0** — all heredoc |
