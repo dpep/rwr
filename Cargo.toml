@@ -1,0 +1,27 @@
+[package]
+name = "rwr"
+version = "0.0.1"
+edition = "2024"
+description = "Ruby structural search and rewrite — rg/sed for Ruby programs, not Ruby text."
+license = "MIT"
+repository = "https://github.com/dpep/rwr"
+
+[[bin]]
+name = "rwr"
+path = "src/main.rs"
+
+# Allow-by-default upstream. `pub` on an item inside a private module is
+# reachable from nowhere, yet `pub` is exactly what makes the dead_code lint
+# skip an item — so it costs API surface and buys blindness.
+[lints.rust]
+unreachable_pub = "warn"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+ignore = "0.4"
+rayon = "1"
+ruby-prism = "1"
