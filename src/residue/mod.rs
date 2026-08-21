@@ -114,7 +114,7 @@ pub(crate) fn anchors(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
 /// Whether a node stands for whatever it matched, rather than for itself.
 fn is_metavariable(node: &Node<'_>, prepared: &Prepared) -> bool {
     matcher::placeholder_name(node, prepared).is_some()
-        || matcher::is_splat_placeholder(node, prepared)
+        || matcher::splat_placeholder_name(node, prepared).is_some()
 }
 
 /// Occurrences of `anchors` that fall outside every matched range.

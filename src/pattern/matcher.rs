@@ -105,9 +105,10 @@ fn placeholder<'a>(node: &Node<'_>, bindings: &'a HashMap<String, Binding>) -> O
     bindings.get_key_value(name).map(|(k, _)| k.as_str())
 }
 
-/// A sequence placeholder, i.e. `*$NAME` — a splat wrapping a placeholder.
-pub(crate) fn is_splat_placeholder(node: &Node<'_>, prepared: &Prepared) -> bool {
-    splat_placeholder(node, &prepared.bindings).is_some()
+/// The metavariable a sequence placeholder stands for, i.e. `*$NAME` -> `$NAME`.
+pub(crate) fn splat_placeholder_name(node: &Node<'_>, prepared: &Prepared) -> Option<String> {
+    let key = splat_placeholder(node, &prepared.bindings)?;
+    prepared.bindings.get(key).and_then(|b| b.name.clone())
 }
 
 /// A sequence placeholder, i.e. `*$NAME` — a splat wrapping a placeholder.

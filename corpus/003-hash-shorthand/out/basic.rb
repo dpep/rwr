@@ -2,11 +2,19 @@
 
 class Widget
   def payload(name, size)
-    {name:, size:, kind: "widget"}
+    { name:, size:, kind: "widget" }
   end
 
   def rocket(total)
-    {total:}
+    { total: }
+  end
+
+  def nested(type_filters)
+    render(
+      extras: {
+        type_filters:,
+      },
+    )
   end
 
   def unrelated(count)

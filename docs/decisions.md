@@ -1029,3 +1029,37 @@ sites are what a human reviews.
 
 *Reverses if:* nothing plausible. Edit counts remain available internally where the
 conflict-resolution logic needs them.
+
+## D56 - The structural diff aligns across sequence placeholders, and localizes per child
+**Decided**, by a bug found in the field rather than in a test.
+
+Two gaps in `structural_diff` made it give up far more often than it needed to, and giving
+up means whole-node replacement -- correct, but it re-imposes the template's layout on
+everything it covers.
+
+**Sequence placeholders were not aligned.** A pattern child list containing `*$REST` or
+`**$REST` is not the same length as the target's, so the diff bailed on length alone. Every
+rule using a sequence placeholder therefore lost minimal diffs. `align()` now walks the two
+lists together, consuming as many target children as the environment says each sequence
+captured, and requiring the same sequence at the same position in the template.
+
+**A diverging child aborted the whole node.** The recursion propagated `None` upward, so one
+changed leaf re-rendered its entire ancestor. A child that cannot be diffed is now replaced
+*in place*: its template counterpart is restored from placeholder spelling back to `$NAME`,
+rendered against the environment, and spliced over that child's `effective_range`. Siblings
+keep their bytes.
+
+**Why this mattered more than it looks.** Hash shorthand is the highest-volume rule in the
+shipped pack -- 1,759 sites on Discourse -- and it is spelled with double-splat sequence
+placeholders. Before this, every multiline hash came back on one line with its trailing comma
+gone. rwr was breaking principle 6 and D53's own line about not owning style, on the rule
+most likely to be run. The corpus fixture had encoded that output as *expected*, which is the
+part worth remembering: a test written after the behaviour confirms the behaviour.
+
+**One trap.** `ImplicitNode` -- the value half of `{foo:}` -- borrows the *key's* location
+rather than having one of its own, so a zero-width check does not catch it and localizing
+onto it writes the key over the value. It is excluded by node kind, and the parent handles
+the assoc whole.
+
+*Reverses if:* nothing plausible. The escape hatch is unchanged -- anything that still fails
+to align falls back to whole-node replacement, and `verify` reparses either way.

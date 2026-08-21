@@ -6,6 +6,12 @@ notes: >
   so one pattern covers both spellings -- spelling is opt-in, not baked into
   equality. And `{foo: foo}` -> `{foo:}` needs name equality across *kinds*: a
   symbol key against a variable read, which AST equality cannot express.
+notes_on_layout: >
+  The multiline entry is the minimal-diff regression. Before sequence-aware
+  alignment, `{**$BEFORE, $K: $V, **$AFTER}` fell through to whole-node
+  replacement, so every multiline hash came back on one line with its trailing
+  comma gone -- rwr breaking its own promise not to own style, on the rule with
+  the most sites to change.
 predicates_required:
   - cross-capture name equality (same_name_as)
   - double-splat sequence placeholders, to reach one pair among many

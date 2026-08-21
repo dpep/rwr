@@ -11,6 +11,11 @@ was deliberately left out.
 `--help` had promised "a rule file or directory of them" since 0.1.0; only a
 file worked.
 
+**Minimal diffs now survive sequence placeholders.** Any rule spelled with `*$REST` or
+`**$REST` fell through to whole-node replacement, so hash shorthand returned multiline
+hashes on a single line with their trailing commas removed. It now edits the one pair that
+changed and leaves the layout alone (D56).
+
 **Residue is reported for name-anchored rules only, as D7 always said.** A rule about a
 *shape* — `select { }.first` -> `detect { }` — anchored on the chain's method names and
 reported every `.first` in the repo. On Discourse that was 3,752 occurrences, which buried

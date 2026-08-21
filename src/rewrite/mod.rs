@@ -164,6 +164,7 @@ fn atoms_correspond(
 /// requires matching shape and corresponding metavariables, so an accidental
 /// match is unlikely. Failing returns `None` and the caller replaces the whole
 /// span -- correct, merely non-minimal.
+#[allow(clippy::too_many_arguments)]
 fn unwrap_to_subtree(
     p_kids: &[Node<'_>],
     template: &Node<'_>,
@@ -172,6 +173,8 @@ fn unwrap_to_subtree(
     prepared: &Prepared,
     t_prepared: &Prepared,
     template_src: &[u8],
+    env: &Env<'_>,
+    source: &[u8],
 ) -> Option<Vec<Edit>> {
     if p_kids.len() != x_kids.len() {
         return None;
@@ -184,6 +187,8 @@ fn unwrap_to_subtree(
             prepared,
             t_prepared,
             template_src,
+            env,
+            source,
         ) else {
             continue;
         };
@@ -345,6 +350,8 @@ pub(crate) fn plan(
                 pattern_prepared,
                 tp,
                 tp.source.as_bytes(),
+                &m.env,
+                source,
             ),
             _ => None,
         };
@@ -476,6 +483,7 @@ pub(crate) fn verify(rewritten: &str) -> Result<(), Refusal> {
 /// in atoms. That covers renames, the largest rule family. A shape-changing
 /// rewrite -- `$R.select { .. }.first` -> `$R.detect { .. }`, which drops an
 /// enclosing call -- still falls back to full replacement.
+#[allow(clippy::too_many_arguments)]
 fn structural_diff(
     pattern: &Node<'_>,
     template: &Node<'_>,
@@ -483,6 +491,8 @@ fn structural_diff(
     prepared: &Prepared,
     t_prepared: &Prepared,
     template_src: &[u8],
+    env: &Env<'_>,
+    source: &[u8],
 ) -> Option<Vec<Edit>> {
     // Each side resolves placeholders through its *own* mapping: the pattern
     // and template are prepared separately, so `rwr_mv_1` may be `$SEL` in one
@@ -523,14 +533,20 @@ fn structural_diff(
             prepared,
             t_prepared,
             template_src,
+            env,
+            source,
         );
     }
 
-    if std::mem::discriminant(pattern) != std::mem::discriminant(target)
-        || p_kids.len() != x_kids.len()
-    {
+    if std::mem::discriminant(pattern) != std::mem::discriminant(target) {
         return None;
     }
+
+    // A sequence placeholder stands for a *run* of target children, so the two
+    // child lists need not be the same length. Without this, every rule using
+    // `*$REST` or `**$REST` fell straight through to whole-node replacement --
+    // which is how hash shorthand reflowed multiline hashes onto one line.
+    let aligned = align(&p_kids, &t_kids, &x_kids, prepared, t_prepared, env)?;
 
     let mut edits = Vec::new();
 
@@ -545,17 +561,136 @@ fn structural_diff(
         });
     }
 
-    for ((p, t), x) in p_kids.iter().zip(&t_kids).zip(&x_kids) {
-        edits.extend(structural_diff(
-            p,
-            t,
-            x,
-            prepared,
-            t_prepared,
-            template_src,
-        )?);
+    for (p, t, x) in aligned {
+        match structural_diff(p, t, x, prepared, t_prepared, template_src, env, source) {
+            Some(found) => edits.extend(found),
+            // This child diverges. Replacing *it* is still minimal -- every
+            // sibling keeps its bytes -- so localize here rather than propagate
+            // the failure up and re-render the whole node.
+            None => edits.push(localized(t, x, t_prepared, template_src, env, source)?),
+        }
     }
     Some(edits)
+}
+
+/// Pair pattern children with template and target children, one triple per
+/// position that needs diffing.
+///
+/// A sequence placeholder matched on both sides is carried across untouched and
+/// yields no triple; it only advances the target cursor by however many nodes it
+/// captured. Anything else is one-to-one.
+#[allow(clippy::type_complexity)]
+fn align<'a, 'pr>(
+    p_kids: &'a [Node<'pr>],
+    t_kids: &'a [Node<'pr>],
+    x_kids: &'a [Node<'pr>],
+    prepared: &Prepared,
+    t_prepared: &Prepared,
+    env: &Env<'_>,
+) -> Option<Vec<(&'a Node<'pr>, &'a Node<'pr>, &'a Node<'pr>)>> {
+    if p_kids.len() != t_kids.len() {
+        return None;
+    }
+    let mut triples = Vec::with_capacity(p_kids.len());
+    let mut cursor = 0;
+    for (p, t) in p_kids.iter().zip(t_kids) {
+        match matcher::splat_placeholder_name(p, prepared) {
+            Some(name) => {
+                // The same sequence must sit at the same position in the
+                // template, or the rule is reordering and there is no
+                // correspondence to edit through.
+                if matcher::splat_placeholder_name(t, t_prepared).as_deref() != Some(&name) {
+                    return None;
+                }
+                match env.get(&name) {
+                    Some(Bound::Many(nodes)) => cursor += nodes.len(),
+                    _ => return None,
+                }
+            }
+            None => {
+                triples.push((p, t, x_kids.get(cursor)?));
+                cursor += 1;
+            }
+        }
+    }
+    // Every target child must be accounted for; a leftover means the alignment
+    // is a guess rather than a correspondence.
+    (cursor == x_kids.len()).then_some(triples)
+}
+
+/// Replace one target node with its corresponding template node, rendered.
+///
+/// The template is held in *prepared* form -- metavariables already substituted
+/// for placeholder identifiers -- so it is restored to `$NAME` spelling before
+/// rendering, which is what [`render`] understands.
+fn localized(
+    template: &Node<'_>,
+    target: &Node<'_>,
+    t_prepared: &Prepared,
+    template_src: &[u8],
+    env: &Env<'_>,
+    source: &[u8],
+) -> Option<Edit> {
+    // The value half of `{foo:}` is an ImplicitNode, which borrows the *key's*
+    // location rather than having one of its own -- so it has no text to
+    // localize to, and rendering its span writes the key over the value. The
+    // parent handles the assoc as a whole instead.
+    if matches!(template, Node::ImplicitNode { .. }) {
+        return None;
+    }
+    let loc = template.location();
+    let fragment = template_src.get(loc.start_offset()..loc.end_offset())?;
+    if fragment.is_empty() {
+        return None;
+    }
+    let restored = restore(std::str::from_utf8(fragment).ok()?, t_prepared)?;
+    let (start, end) = effective_range(target);
+    let text = render(
+        &restored,
+        env,
+        source,
+        inner_span(target).unwrap_or((start, end)),
+    )
+    .ok()?;
+    Some(Edit { start, end, text })
+}
+
+/// Turn placeholder identifiers back into `$NAME` metavariable spelling.
+///
+/// `None` when a placeholder is anonymous (`_`), since there is no name to write
+/// and nothing in the environment to substitute for it.
+fn restore(fragment: &str, prepared: &Prepared) -> Option<String> {
+    let mut out = String::with_capacity(fragment.len());
+    let bytes = fragment.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !is_ident_start(bytes[i]) {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && is_ident_byte(bytes[i]) {
+            i += 1;
+        }
+        let word = &fragment[start..i];
+        match prepared.bindings.get(word) {
+            None => out.push_str(word),
+            Some(binding) => {
+                out.push('$');
+                out.push_str(binding.name.as_ref()?);
+            }
+        }
+    }
+    Some(out)
+}
+
+fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// The span of the identifier a node is named by, when it has one that can be

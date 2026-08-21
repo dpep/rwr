@@ -9,6 +9,14 @@ class Widget
     { :total => total }
   end
 
+  def nested(type_filters)
+    render(
+      extras: {
+        type_filters: type_filters,
+      },
+    )
+  end
+
   def unrelated(count)
     { total: count }
   end
