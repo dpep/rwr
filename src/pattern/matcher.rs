@@ -357,7 +357,7 @@ pub(crate) fn satisfies(
             };
             // Unresolved means "not known to be this type", never "assume yes".
             let resolved = resolve_type(node, &found.scope, found.singleton).or_else(|| {
-                bare_name(node)
+                variable_name(node)
                     .and_then(|n| String::from_utf8(n).ok())
                     .and_then(|n| found.locals.get(&n).cloned())
                     .map(Receiver::Instance)
@@ -490,17 +490,63 @@ pub(crate) fn search<'pr>(
     out
 }
 
-/// The class a local is assigned from, when the assignment says so outright.
+/// The class a variable is assigned from, when the assignment says so outright.
+///
+/// Covers locals and instance variables alike. Instance variables are 5.7% of
+/// rails call receivers and overwhelmingly assigned once in `initialize`, which
+/// is exactly the shape this reads.
 fn assigned_class(node: &Node<'_>) -> Option<(String, String)> {
-    let write = node.as_local_variable_write_node()?;
-    let call = write.value().as_call_node()?;
+    let (name, value) = match node {
+        Node::LocalVariableWriteNode { .. } => {
+            let write = node.as_local_variable_write_node()?;
+            (write.name().as_slice().to_vec(), write.value())
+        }
+        Node::InstanceVariableWriteNode { .. } => {
+            let write = node.as_instance_variable_write_node()?;
+            (write.name().as_slice().to_vec(), write.value())
+        }
+        _ => return None,
+    };
+
+    let call = value.as_call_node()?;
     if call.name().as_slice() != b"new" {
         return None;
     }
     // `X.new` yields an *instance*, whatever the receiver's own kind was.
     let class = resolve_type(&call.receiver()?, &[], false)?;
-    let name = String::from_utf8(write.name().as_slice().to_vec()).ok()?;
-    Some((name, class.class_name().to_string()))
+    Some((
+        String::from_utf8(name).ok()?,
+        class.class_name().to_string(),
+    ))
+}
+
+/// Seed every instance-variable assignment in a class body.
+fn collect_ivars(class: &Node<'_>, locals: &mut HashMap<String, String>) {
+    let mut stack = vec![generated::dup(class)];
+    while let Some(node) = stack.pop() {
+        if matches!(node, Node::InstanceVariableWriteNode { .. })
+            && let Some((name, class)) = assigned_class(&node)
+        {
+            locals.insert(name, class);
+        }
+        stack.extend(generated::children(&node));
+    }
+}
+
+/// The variable a receiver reads, for looking up an inferred class.
+///
+/// An instance variable read is not a `bare_name` -- it has no method call
+/// behind it -- so it needs its own accessor.
+fn variable_name(node: &Node<'_>) -> Option<Vec<u8>> {
+    match node {
+        Node::InstanceVariableReadNode { .. } => Some(
+            node.as_instance_variable_read_node()?
+                .name()
+                .as_slice()
+                .to_vec(),
+        ),
+        _ => bare_name(node),
+    }
 }
 
 fn walk<'pr>(
@@ -532,9 +578,24 @@ fn walk<'pr>(
     let entered = scope_name(target);
     if let Some(name) = &entered {
         scope.push(name.clone());
+        // Ruby does not care what order methods appear in, so neither should
+        // rwr: a class's instance-variable assignments are collected up front
+        // rather than discovered in source order, or `@account.foo` in a method
+        // written above `initialize` would not resolve.
+        collect_ivars(target, locals);
     }
-    // A method body is a fresh local scope, so bindings must not leak across.
-    let shadowed = matches!(target, Node::DefNode { .. }).then(|| std::mem::take(locals));
+    // A method body is a fresh *local* scope, so locals must not leak across it
+    // -- but an instance variable belongs to the class and is typically
+    // assigned in `initialize` and read from every other method, so those are
+    // carried through.
+    let shadowed = matches!(target, Node::DefNode { .. }).then(|| {
+        let carried: HashMap<String, String> = locals
+            .iter()
+            .filter(|(k, _)| k.starts_with('@'))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        std::mem::replace(locals, carried)
+    });
 
     // `def self.x` and `class << self` both put their bodies in singleton
     // context, which is what makes `self` mean the class rather than an
@@ -558,7 +619,17 @@ fn walk<'pr>(
     }
 
     if let Some(saved) = shadowed {
+        // Locals are discarded with the method that declared them, but an
+        // instance variable belongs to the class -- typically assigned in
+        // `initialize` and read from every other method -- so bindings learned
+        // inside a `def` propagate back out.
+        let learned: Vec<(String, String)> = locals
+            .iter()
+            .filter(|(k, _)| k.starts_with('@'))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         *locals = saved;
+        locals.extend(learned);
     }
     if entered.is_some() {
         scope.pop();
@@ -855,6 +926,66 @@ end
                 .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
                 .count(),
             0
+        );
+    }
+
+    /// Ruby does not care what order methods appear in. A read written above
+    /// the `initialize` that assigns the ivar must still resolve.
+    #[test]
+    fn instance_variables_resolve_regardless_of_method_order() {
+        let prepared = prepare("$R.display_name").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let src = "class Widget\n  def go\n    @account.display_name\n  end\n\n  def initialize\n    @account = Account.new\n  end\nend\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = hits_for("", src, &parsed, &prepared, &p_node);
+
+        let mut constraints = HashMap::new();
+        constraints.insert(
+            "$R".to_string(),
+            Constraint {
+                receiver_type: Some("Account".into()),
+                kind: Some(Kind::Instance),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &constraints, &Scope::default(), &Hierarchy::default()))
+                .count(),
+            1
+        );
+    }
+
+    /// Instance variables are 5.7% of rails call receivers and are
+    /// overwhelmingly assigned once in `initialize` and read from every other
+    /// method -- so unlike a local, an ivar's binding must survive a `def`.
+    #[test]
+    fn instance_variables_resolve_across_methods() {
+        let prepared = prepare("$R.display_name").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let src = "class Widget\n  def initialize\n    @account = Account.new\n    @other = Company.new\n  end\n\n  def go\n    @account.display_name\n  end\n\n  def stop\n    @other.display_name\n  end\nend\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = hits_for("", src, &parsed, &prepared, &p_node);
+        assert_eq!(hits.len(), 2, "both match structurally");
+
+        let mut constraints = HashMap::new();
+        constraints.insert(
+            "$R".to_string(),
+            Constraint {
+                receiver_type: Some("Account".into()),
+                kind: Some(Kind::Instance),
+                ..Default::default()
+            },
+        );
+        let scope = Scope::default();
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &constraints, &scope, &Hierarchy::default()))
+                .count(),
+            1,
+            "only the ivar assigned from Account.new"
         );
     }
 

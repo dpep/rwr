@@ -369,6 +369,34 @@ rather than competing.
 No cross-file index was needed for any of it. Measurement (b) predicted ~59% from lexical
 scope plus constants, and local inference adds to that.
 
+## Instance-variable receivers — built, and smaller than the bucket suggested
+
+Ivars are 5.7% of rails call receivers, and rwr now resolves those assigned from a
+constructor (`@account = Account.new`), carrying the binding across method boundaries and
+pre-collecting them per class so method order does not matter.
+
+**The realized gain is about 1% of call sites, not 5.7%**, and the difference is worth
+recording because the bucket size is the tempting number to quote:
+
+| | count |
+|---|---:|
+| ivar call receivers | 17,668 |
+| ivar assignments, any source | 5,423 |
+| ivar assignments from a constructor | **1,005** (~18%) |
+
+The rest are assigned from params, method calls, or conditionals, and stay unresolved --
+which means they stay *conservative*: a `type:` constraint declines them rather than guessing,
+and residue reports them.
+
+Two implementation notes, both bugs caught before they shipped. An ivar binding learned inside
+`initialize` was being discarded on leaving that method, because locals are scoped to a `def`
+and ivars are not. And a read written *above* the `initialize` that assigns it did not
+resolve, because the walk is in source order while Ruby does not care about method order --
+fixed by collecting a class's ivar assignments up front.
+
+Chained receivers (15.8%) remain the largest unresolved bucket and need real return-type
+inference rather than reading an assignment.
+
 ## Corpus scoreboard — **complete**
 
 | entry | rwr | ast-grep | comby |
