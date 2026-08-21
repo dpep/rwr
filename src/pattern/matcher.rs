@@ -121,9 +121,54 @@ fn splat_placeholder<'a>(
     placeholder(&inner, bindings)
 }
 
+/// How many times one node may be re-matched after a constraint rejection.
+///
+/// A backstop, not a budget: each retry forbids one more finite binding, so the
+/// loop terminates on its own. Real patterns rebind once or twice.
+const MAX_REBINDS: usize = 32;
+
+/// Bindings already rejected by a constraint, keyed by metavariable.
+///
+/// Constraints are checked after a structural match, deliberately: a constraint
+/// may not change *what* matched, only whether it counts. The cost is that a
+/// node admitting several bindings, where only a later one satisfies the
+/// constraint, was under-matched -- `{name: name, size: size}` bound `$K` to
+/// `name`, was rejected, and the `size` binding was never tried (Q13).
+///
+/// Rather than thread constraints through matching, a rejected binding is
+/// *forbidden* and the match retried, which forces backtracking to a different
+/// one. Terminating, because each retry forbids one more finite binding.
+pub(crate) type Forbidden = HashMap<String, Vec<String>>;
+
+/// A stable identity for a binding, so it can be excluded on retry.
+fn fingerprint(bound: &Bound<'_>) -> String {
+    match bound {
+        Bound::Name(bytes) => format!("n:{}", String::from_utf8_lossy(bytes)),
+        Bound::One(node) => {
+            let l = node.location();
+            format!("o:{}..{}", l.start_offset(), l.end_offset())
+        }
+        Bound::Many(nodes) => {
+            let spans: Vec<String> = nodes
+                .iter()
+                .map(|n| {
+                    let l = n.location();
+                    format!("{}..{}", l.start_offset(), l.end_offset())
+                })
+                .collect();
+            format!("m:{}", spans.join(","))
+        }
+    }
+}
+
 /// Bind `key`, enforcing D16: a repeated metavariable must match AST-equal
 /// nodes, never merely equal source text.
-fn bind<'pr>(env: &mut Env<'pr>, key: &str, value: Bound<'pr>) -> bool {
+fn bind<'pr>(env: &mut Env<'pr>, key: &str, value: Bound<'pr>, forbidden: &Forbidden) -> bool {
+    if let Some(rejected) = forbidden.get(key)
+        && rejected.contains(&fingerprint(&value))
+    {
+        return false;
+    }
     match (env.get(key), &value) {
         (None, _) => {
             env.insert(key.to_string(), value);
@@ -150,6 +195,7 @@ pub(crate) fn match_node<'pr>(
     target: &Node<'pr>,
     prepared: &Prepared,
     env: &mut Env<'pr>,
+    forbidden: &Forbidden,
 ) -> bool {
     // A bare placeholder is a wildcard: it matches any node, and binds unless
     // it is anonymous.
@@ -159,7 +205,7 @@ pub(crate) fn match_node<'pr>(
         // binding and D16's equality check would never fire.
         return match prepared.bindings.get(key).and_then(|b| b.name.clone()) {
             None => true,
-            Some(name) => bind(env, &name, Bound::One(generated::dup(target))),
+            Some(name) => bind(env, &name, Bound::One(generated::dup(target)), forbidden),
         };
     }
 
@@ -167,7 +213,7 @@ pub(crate) fn match_node<'pr>(
         return false;
     }
 
-    if !match_atoms(pattern, target, prepared, env) {
+    if !match_atoms(pattern, target, prepared, env, forbidden) {
         return false;
     }
 
@@ -176,6 +222,7 @@ pub(crate) fn match_node<'pr>(
         &generated::children(target),
         prepared,
         env,
+        forbidden,
     )
 }
 
@@ -186,6 +233,7 @@ fn match_atoms<'pr>(
     target: &Node<'pr>,
     prepared: &Prepared,
     env: &mut Env<'pr>,
+    forbidden: &Forbidden,
 ) -> bool {
     let (pa, ta) = (generated::atoms(pattern), generated::atoms(target));
     if pa.len() != ta.len() {
@@ -201,7 +249,7 @@ fn match_atoms<'pr>(
         {
             Some((_, binding)) => match &binding.name {
                 None => true,
-                Some(name) => bind(env, name, Bound::Name(tn.clone())),
+                Some(name) => bind(env, name, Bound::Name(tn.clone()), forbidden),
             },
             None => pn == tn,
         },
@@ -211,7 +259,7 @@ fn match_atoms<'pr>(
         {
             Some((_, binding)) => match &binding.name {
                 None => true,
-                Some(name) => bind(env, name, Bound::Name(tn.clone())),
+                Some(name) => bind(env, name, Bound::Name(tn.clone()), forbidden),
             },
             None => pn == tn,
         },
@@ -229,6 +277,7 @@ fn match_children<'pr>(
     target: &[Node<'pr>],
     prepared: &Prepared,
     env: &mut Env<'pr>,
+    forbidden: &Forbidden,
 ) -> bool {
     let Some((head, rest)) = pattern.split_first() else {
         return target.is_empty();
@@ -240,11 +289,11 @@ fn match_children<'pr>(
             let mut trial = env.clone();
             let absorbed: Vec<Node> = target[..take].iter().map(generated::dup).collect();
             if let Some(name) = &name
-                && !bind(&mut trial, name, Bound::Many(absorbed))
+                && !bind(&mut trial, name, Bound::Many(absorbed), forbidden)
             {
                 continue;
             }
-            if match_children(rest, &target[take..], prepared, &mut trial) {
+            if match_children(rest, &target[take..], prepared, &mut trial, forbidden) {
                 *env = trial;
                 return true;
             }
@@ -256,11 +305,13 @@ fn match_children<'pr>(
         // Target exhausted, pattern not. Prism gives `foo()` no arguments node
         // at all, so `foo(*$REST)` -- whose argument list can absorb nothing --
         // has one child the target lacks. Let such a subtree vanish.
-        return pattern.iter().all(|p| vanishes(p, prepared, env));
+        return pattern
+            .iter()
+            .all(|p| vanishes(p, prepared, env, forbidden));
     };
     let mut trial = env.clone();
-    if match_node(head, t_head, prepared, &mut trial)
-        && match_children(rest, t_rest, prepared, &mut trial)
+    if match_node(head, t_head, prepared, &mut trial, forbidden)
+        && match_children(rest, t_rest, prepared, &mut trial, forbidden)
     {
         *env = trial;
         return true;
@@ -273,11 +324,16 @@ fn match_children<'pr>(
 ///
 /// This exists because absence and emptiness are different in Prism: a call
 /// with no arguments has no arguments node, not an empty one.
-fn vanishes<'pr>(pattern: &Node<'_>, prepared: &Prepared, env: &mut Env<'pr>) -> bool {
+fn vanishes<'pr>(
+    pattern: &Node<'_>,
+    prepared: &Prepared,
+    env: &mut Env<'pr>,
+    forbidden: &Forbidden,
+) -> bool {
     if let Some(key) = splat_placeholder(pattern, &prepared.bindings) {
         return match prepared.bindings.get(key).and_then(|b| b.name.clone()) {
             None => true,
-            Some(name) => bind(env, &name, Bound::Many(Vec::new())),
+            Some(name) => bind(env, &name, Bound::Many(Vec::new()), forbidden),
         };
     }
     // A container with no atoms of its own vanishes if everything inside it does.
@@ -285,7 +341,7 @@ fn vanishes<'pr>(pattern: &Node<'_>, prepared: &Prepared, env: &mut Env<'pr>) ->
         && !generated::children(pattern).is_empty()
         && generated::children(pattern)
             .iter()
-            .all(|c| vanishes(c, prepared, env))
+            .all(|c| vanishes(c, prepared, env, forbidden))
 }
 
 /// The pattern's meaningful root, with Prism's `ProgramNode`/`StatementsNode`
@@ -303,32 +359,63 @@ pub(crate) fn pattern_root<'pr>(root: &Node<'pr>) -> Option<Node<'pr>> {
 /// Checked after a structural match rather than threaded through it: the
 /// bindings are already known by then, and keeping the two separate means a
 /// constraint can never change *what* matched, only whether it counts.
+/// Why a match was rejected, and whether a different binding could help.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    Ok,
+    /// The match is in the wrong place; no rebinding can fix that.
+    WrongScope,
+    /// This capture's binding failed a constraint. A different binding of the
+    /// same metavariable might satisfy it, so the match is worth retrying.
+    BadBinding(String),
+}
+
 pub(crate) fn satisfies(
     found: &Match<'_>,
     constraints: &HashMap<String, Constraint>,
     scope: &Scope,
     hierarchy: &Hierarchy,
 ) -> bool {
+    verdict(found, constraints, scope, hierarchy) == Verdict::Ok
+}
+
+pub(crate) fn verdict(
+    found: &Match<'_>,
+    constraints: &HashMap<String, Constraint>,
+    scope: &Scope,
+    hierarchy: &Hierarchy,
+) -> Verdict {
     if let Some(wanted) = &scope.inside {
         let reached = found.scope.iter().any(|s| {
             s == wanted || (scope.subclasses.unwrap_or(false) && hierarchy.descends_from(s, wanted))
         });
         if !reached {
-            return false;
+            return Verdict::WrongScope;
         }
     }
     if let Some(wanted) = scope.singleton
         && found.singleton != wanted
     {
-        return false;
+        return Verdict::WrongScope;
     }
 
-    constraints.iter().all(|(key, constraint)| {
-        let Some(bound) = found.env.get(key.trim_start_matches('$')) else {
+    for (key, constraint) in constraints {
+        let short = key.trim_start_matches('$').to_string();
+        let Some(bound) = found.env.get(&short) else {
             // A constraint naming a metavariable the pattern does not bind is a
-            // rule bug. Refuse the match rather than silently ignoring it.
-            return false;
+            // rule bug. Refuse rather than silently ignoring it.
+            return Verdict::WrongScope;
         };
+
+        if let Some(other) = &constraint.same_name_as {
+            let Some(other_bound) = found.env.get(other.trim_start_matches('$')) else {
+                return Verdict::WrongScope;
+            };
+            match (identifier_of(bound), identifier_of(other_bound)) {
+                (Some(a), Some(b)) if a == b => {}
+                _ => return Verdict::BadBinding(short),
+            }
+        }
 
         if let Some(allowed) = &constraint.name {
             let actual = match bound {
@@ -337,23 +424,13 @@ pub(crate) fn satisfies(
                 Bound::Many(_) => None,
             };
             if !actual.is_some_and(|a| allowed.iter().any(|n| n.as_bytes() == a.as_slice())) {
-                return false;
-            }
-        }
-
-        if let Some(other) = &constraint.same_name_as {
-            let Some(other_bound) = found.env.get(other.trim_start_matches('$')) else {
-                return false;
-            };
-            match (identifier_of(bound), identifier_of(other_bound)) {
-                (Some(a), Some(b)) if a == b => {}
-                _ => return false,
+                return Verdict::BadBinding(short);
             }
         }
 
         if let Some(wanted) = &constraint.receiver_type {
             let Bound::One(node) = bound else {
-                return false;
+                return Verdict::BadBinding(short);
             };
             // Unresolved means "not known to be this type", never "assume yes".
             let resolved = resolve_type(node, &found.scope, found.singleton).or_else(|| {
@@ -363,31 +440,104 @@ pub(crate) fn satisfies(
                     .map(Receiver::Instance)
             });
             let Some(resolved) = resolved else {
-                return false;
+                return Verdict::BadBinding(short);
             };
             let matches_class = resolved.class_name() == wanted.as_str()
                 || (constraint.subclasses.unwrap_or(false)
                     && hierarchy.descends_from(resolved.class_name(), wanted));
             if !matches_class {
-                return false;
+                return Verdict::BadBinding(short);
             }
             // `Account.foo` and `account.foo` are different methods, so a
-            // constraint must say which it means. Instance is the default,
-            // matching Ruby's `Account#foo`.
+            // constraint must say which it means.
             if resolved.is_instance() != constraint.wants_instance() {
-                return false;
+                return Verdict::BadBinding(short);
             }
         }
-        true
-    })
+    }
+    Verdict::Ok
+}
+
+/// The identifier a binding names, across node kinds.
+///
+/// A symbol key and a variable read are different nodes carrying the same name,
+/// which is exactly the correspondence `{foo: foo}` turns on.
+fn identifier_of(bound: &Bound<'_>) -> Option<Vec<u8>> {
+    match bound {
+        Bound::Name(bytes) => Some(bytes.clone()),
+        Bound::One(node) => match node {
+            Node::SymbolNode { .. } => Some(node.as_symbol_node()?.unescaped().to_vec()),
+            _ => bare_name(node),
+        },
+        Bound::Many(_) => None,
+    }
+}
+
+/// The class a variable is assigned from, when the assignment says so outright.
+///
+/// Covers locals and instance variables alike. Instance variables are 5.7% of
+/// rails call receivers and overwhelmingly assigned once in `initialize`.
+fn assigned_class(node: &Node<'_>) -> Option<(String, String)> {
+    let (name, value) = match node {
+        Node::LocalVariableWriteNode { .. } => {
+            let write = node.as_local_variable_write_node()?;
+            (write.name().as_slice().to_vec(), write.value())
+        }
+        Node::InstanceVariableWriteNode { .. } => {
+            let write = node.as_instance_variable_write_node()?;
+            (write.name().as_slice().to_vec(), write.value())
+        }
+        _ => return None,
+    };
+    let call = value.as_call_node()?;
+    if call.name().as_slice() != b"new" {
+        return None;
+    }
+    // `X.new` yields an *instance*, whatever the receiver's own kind was.
+    let class = resolve_type(&call.receiver()?, &[], false)?;
+    Some((
+        String::from_utf8(name).ok()?,
+        class.class_name().to_string(),
+    ))
+}
+
+/// Seed every instance-variable assignment in a class body.
+///
+/// Ruby does not care what order methods appear in, so neither should rwr: a
+/// read written above the `initialize` that assigns it must still resolve.
+fn collect_ivars(class: &Node<'_>, locals: &mut HashMap<String, String>) {
+    let mut stack = vec![generated::dup(class)];
+    while let Some(node) = stack.pop() {
+        if matches!(node, Node::InstanceVariableWriteNode { .. })
+            && let Some((name, class)) = assigned_class(&node)
+        {
+            locals.insert(name, class);
+        }
+        stack.extend(generated::children(&node));
+    }
+}
+
+/// The variable a receiver reads, for looking up an inferred class.
+///
+/// An instance variable read is not a `bare_name` -- it has no method call
+/// behind it -- so it needs its own accessor.
+fn variable_name(node: &Node<'_>) -> Option<Vec<u8>> {
+    match node {
+        Node::InstanceVariableReadNode { .. } => Some(
+            node.as_instance_variable_read_node()?
+                .name()
+                .as_slice()
+                .to_vec(),
+        ),
+        _ => bare_name(node),
+    }
 }
 
 /// Whether a receiver is the class object or an instance of it.
 ///
 /// `Account.display_name` and `account.display_name` name **different
-/// methods**. Collapsing them to "Account" made a rename of one rewrite the
-/// other -- a silent wrong edit, which is the failure the whole design exists
-/// to prevent.
+/// methods**. Collapsing them made a rename of one rewrite the other -- a
+/// silent wrong edit, which is the failure the whole design exists to prevent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Receiver {
     /// An instance, as in `Account#display_name`.
@@ -405,21 +555,6 @@ impl Receiver {
 
     pub(crate) fn is_instance(&self) -> bool {
         matches!(self, Receiver::Instance(_))
-    }
-}
-
-/// The identifier a binding names, across node kinds.
-///
-/// A symbol key and a variable read are different nodes carrying the same name,
-/// which is exactly the correspondence `{foo: foo}` turns on.
-fn identifier_of(bound: &Bound<'_>) -> Option<Vec<u8>> {
-    match bound {
-        Bound::Name(bytes) => Some(bytes.clone()),
-        Bound::One(node) => match node {
-            Node::SymbolNode { .. } => Some(node.as_symbol_node()?.unescaped().to_vec()),
-            _ => bare_name(node),
-        },
-        Bound::Many(_) => None,
     }
 }
 
@@ -470,131 +605,125 @@ fn scope_name(node: &Node<'_>) -> Option<String> {
 ///
 /// `find` is reentrant (D15): nested matches are reported, because find is
 /// observation and suppressing one would be a lie.
+/// What a rule requires of a match, beyond matching structurally.
+pub(crate) struct Criteria<'a> {
+    pub constraints: &'a HashMap<String, Constraint>,
+    pub scope: &'a Scope,
+    pub hierarchy: &'a Hierarchy,
+}
+
+impl Criteria<'_> {
+    /// Criteria that accept any structural match.
+    pub(crate) fn none() -> Criteria<'static> {
+        static EMPTY: std::sync::OnceLock<(HashMap<String, Constraint>, Scope, Hierarchy)> =
+            std::sync::OnceLock::new();
+        let (constraints, scope, hierarchy) =
+            EMPTY.get_or_init(|| (HashMap::new(), Scope::default(), Hierarchy::default()));
+        Criteria {
+            constraints,
+            scope,
+            hierarchy,
+        }
+    }
+}
+
 pub(crate) fn search<'pr>(
     pattern: &Node<'_>,
     target: &Node<'pr>,
     prepared: &Prepared,
+    criteria: &Criteria<'_>,
 ) -> Vec<Match<'pr>> {
-    let mut out = Vec::new();
-    let mut scope = Vec::new();
-    let mut locals = HashMap::new();
-    walk(
-        pattern,
-        target,
-        prepared,
-        &mut scope,
-        &mut locals,
-        false,
-        &mut out,
-    );
-    out
-}
-
-/// The class a variable is assigned from, when the assignment says so outright.
-///
-/// Covers locals and instance variables alike. Instance variables are 5.7% of
-/// rails call receivers and overwhelmingly assigned once in `initialize`, which
-/// is exactly the shape this reads.
-fn assigned_class(node: &Node<'_>) -> Option<(String, String)> {
-    let (name, value) = match node {
-        Node::LocalVariableWriteNode { .. } => {
-            let write = node.as_local_variable_write_node()?;
-            (write.name().as_slice().to_vec(), write.value())
-        }
-        Node::InstanceVariableWriteNode { .. } => {
-            let write = node.as_instance_variable_write_node()?;
-            (write.name().as_slice().to_vec(), write.value())
-        }
-        _ => return None,
+    let mut state = WalkState {
+        scope: Vec::new(),
+        locals: HashMap::new(),
+        singleton: false,
+        out: Vec::new(),
     };
-
-    let call = value.as_call_node()?;
-    if call.name().as_slice() != b"new" {
-        return None;
-    }
-    // `X.new` yields an *instance*, whatever the receiver's own kind was.
-    let class = resolve_type(&call.receiver()?, &[], false)?;
-    Some((
-        String::from_utf8(name).ok()?,
-        class.class_name().to_string(),
-    ))
+    walk(pattern, target, prepared, criteria, &mut state);
+    state.out
 }
 
-/// Seed every instance-variable assignment in a class body.
-fn collect_ivars(class: &Node<'_>, locals: &mut HashMap<String, String>) {
-    let mut stack = vec![generated::dup(class)];
-    while let Some(node) = stack.pop() {
-        if matches!(node, Node::InstanceVariableWriteNode { .. })
-            && let Some((name, class)) = assigned_class(&node)
-        {
-            locals.insert(name, class);
-        }
-        stack.extend(generated::children(&node));
-    }
-}
-
-/// The variable a receiver reads, for looking up an inferred class.
-///
-/// An instance variable read is not a `bare_name` -- it has no method call
-/// behind it -- so it needs its own accessor.
-fn variable_name(node: &Node<'_>) -> Option<Vec<u8>> {
-    match node {
-        Node::InstanceVariableReadNode { .. } => Some(
-            node.as_instance_variable_read_node()?
-                .name()
-                .as_slice()
-                .to_vec(),
-        ),
-        _ => bare_name(node),
-    }
+/// Everything the walk carries down the tree and mutates as it goes.
+struct WalkState<'pr> {
+    /// Enclosing class and module names, outermost first.
+    scope: Vec<String>,
+    /// Variables whose class is known from an assignment.
+    locals: HashMap<String, String>,
+    /// Inside `def self.x` or `class << self`, which decides what `self` means.
+    singleton: bool,
+    out: Vec<Match<'pr>>,
 }
 
 fn walk<'pr>(
     pattern: &Node<'_>,
     target: &Node<'pr>,
     prepared: &Prepared,
-    scope: &mut Vec<String>,
-    locals: &mut HashMap<String, String>,
-    singleton: bool,
-    out: &mut Vec<Match<'pr>>,
+    criteria: &Criteria<'_>,
+    state: &mut WalkState<'pr>,
 ) {
     // Recorded before matching so an assignment is visible to uses that follow
     // it in the same body, which is the order source is written in.
     if let Some((name, class)) = assigned_class(target) {
-        locals.insert(name, class);
+        state.locals.insert(name, class);
     }
 
-    let mut env = Env::new();
-    if match_node(pattern, target, prepared, &mut env) {
-        out.push(Match {
+    // Retry on a constraint failure rather than discarding the match: a node
+    // may admit several bindings, and only a later one may satisfy the rule
+    // (Q13). Forbidding the rejected binding forces backtracking to a different
+    // one, and terminates because bindings are finite.
+    let mut forbidden = Forbidden::new();
+    for _ in 0..MAX_REBINDS {
+        let mut env = Env::new();
+        if !match_node(pattern, target, prepared, &mut env, &forbidden) {
+            break;
+        }
+        let candidate = Match {
             node: generated::dup(target),
             env,
-            scope: scope.clone(),
-            singleton,
-            locals: locals.clone(),
-        });
+            scope: state.scope.clone(),
+            singleton: state.singleton,
+            locals: state.locals.clone(),
+        };
+        match verdict(
+            &candidate,
+            criteria.constraints,
+            criteria.scope,
+            criteria.hierarchy,
+        ) {
+            Verdict::Ok => {
+                state.out.push(candidate);
+                break;
+            }
+            // Wrong place, not wrong binding -- no rebinding can fix it.
+            Verdict::WrongScope => break,
+            Verdict::BadBinding(key) => match candidate.env.get(&key) {
+                Some(bound) => forbidden.entry(key).or_default().push(fingerprint(bound)),
+                None => break,
+            },
+        }
     }
 
     let entered = scope_name(target);
     if let Some(name) = &entered {
-        scope.push(name.clone());
+        state.scope.push(name.clone());
         // Ruby does not care what order methods appear in, so neither should
         // rwr: a class's instance-variable assignments are collected up front
         // rather than discovered in source order, or `@account.foo` in a method
         // written above `initialize` would not resolve.
-        collect_ivars(target, locals);
+        collect_ivars(target, &mut state.locals);
     }
     // A method body is a fresh *local* scope, so locals must not leak across it
     // -- but an instance variable belongs to the class and is typically
     // assigned in `initialize` and read from every other method, so those are
     // carried through.
     let shadowed = matches!(target, Node::DefNode { .. }).then(|| {
-        let carried: HashMap<String, String> = locals
+        let carried: HashMap<String, String> = state
+            .locals
             .iter()
             .filter(|(k, _)| k.starts_with('@'))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        std::mem::replace(locals, carried)
+        std::mem::replace(&mut state.locals, carried)
     });
 
     // `def self.x` and `class << self` both put their bodies in singleton
@@ -603,36 +732,31 @@ fn walk<'pr>(
     let inner_singleton = match target {
         Node::DefNode { .. } => target.as_def_node().is_some_and(|d| d.receiver().is_some()),
         Node::SingletonClassNode { .. } => true,
-        _ => singleton,
+        _ => state.singleton,
     };
 
+    let outer_singleton = std::mem::replace(&mut state.singleton, inner_singleton);
     for child in generated::children(target) {
-        walk(
-            pattern,
-            &child,
-            prepared,
-            scope,
-            locals,
-            inner_singleton,
-            out,
-        );
+        walk(pattern, &child, prepared, criteria, state);
     }
+    state.singleton = outer_singleton;
 
     if let Some(saved) = shadowed {
         // Locals are discarded with the method that declared them, but an
         // instance variable belongs to the class -- typically assigned in
         // `initialize` and read from every other method -- so bindings learned
         // inside a `def` propagate back out.
-        let learned: Vec<(String, String)> = locals
+        let learned: Vec<(String, String)> = state
+            .locals
             .iter()
             .filter(|(k, _)| k.starts_with('@'))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        *locals = saved;
-        locals.extend(learned);
+        state.locals = saved;
+        state.locals.extend(learned);
     }
     if entered.is_some() {
-        scope.pop();
+        state.scope.pop();
     }
 }
 
@@ -648,7 +772,7 @@ mod tests {
         let p_root = pattern_root(&p_result.node()).expect("single-statement pattern");
         let t_result = ruby_prism::parse(source.as_bytes());
         assert_eq!(t_result.errors().count(), 0, "target does not parse");
-        search(&p_root, &t_result.node(), &prepared).len()
+        search(&p_root, &t_result.node(), &prepared, &Criteria::none()).len()
     }
 
     #[test]
@@ -743,7 +867,7 @@ end
     ) -> Vec<Match<'a>> {
         let _ = (pattern, src);
         let p_root = pattern_root(p_node).expect("single expression");
-        search(&p_root, &parsed.node(), prepared)
+        search(&p_root, &parsed.node(), prepared, &Criteria::none())
     }
 
     /// Method-name alternation, the predicate ranked first in the backlog:
@@ -821,6 +945,43 @@ end
             .filter(|m| satisfies(m, &classes, &scope, &Hierarchy::default()))
             .count();
         assert_eq!(narrowed, 1, "only Account's class call, not Widget's");
+    }
+
+    /// Q13: a constraint rejection must drive backtracking, not discard the
+    /// match. Binding `$K` to an already-shortened `name:` fails
+    /// `same_name_as` -- an implicit value has no identifier -- and the `size`
+    /// pair, which would satisfy it, must still be found.
+    #[test]
+    fn a_rejected_binding_is_retried_not_abandoned() {
+        let prepared = prepare("{**$B, $K: $V, **$A}").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let p_root = pattern_root(&p_node).expect("single expression");
+
+        let mut constraints = HashMap::new();
+        constraints.insert(
+            "$K".to_string(),
+            Constraint {
+                same_name_as: Some("$V".into()),
+                ..Default::default()
+            },
+        );
+        let scope = Scope::default();
+        let hierarchy = Hierarchy::default();
+        let criteria = Criteria {
+            constraints: &constraints,
+            scope: &scope,
+            hierarchy: &hierarchy,
+        };
+
+        // `name:` is already shorthand and cannot satisfy the constraint, so the
+        // search must move on to `size: size` rather than reporting nothing.
+        let src = "x = {name:, size: size}\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        assert_eq!(
+            search(&p_root, &parsed.node(), &prepared, &criteria).len(),
+            1
+        );
     }
 
     /// `{foo: foo}` -> `{foo:}` turns on a symbol key and a variable read

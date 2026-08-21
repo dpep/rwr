@@ -9,15 +9,13 @@ notes: >
 predicates_required:
   - cross-capture name equality (same_name_as)
   - double-splat sequence placeholders, to reach one pair among many
-known_limitation: >
-  A hash with *two* redundant pairs -- `{name: name, size: size}` -- only has
-  the first rewritten, and a rerun does not find the second. Constraints are
-  checked after a structural match rather than during it (a deliberate
-  separation: a constraint may not change what matched, only whether it counts),
-  so when a node admits several bindings and only a later one satisfies the
-  constraint, backtracking never reaches it. The fixture therefore carries one
-  redundant pair per hash. Fixing this means threading constraints into
-  matching so a failed constraint drives backtracking.
+notes_on_passes: >
+  Two redundant pairs in one hash need two passes. `search` reports one match
+  per node, so the first pass binds `$K` to `name` and the second to `size` --
+  and the second only works because a constraint rejection now drives
+  backtracking (Q13): binding `$K` to the already-shortened `name:` fails
+  `same_name_as`, which forbids that binding and retries rather than giving up.
+  The corpus runner applies to a fixpoint, which is what a real caller does.
 competitors:
   ast-grep: inexpressible - no cross-capture relation
   comby: inexpressible

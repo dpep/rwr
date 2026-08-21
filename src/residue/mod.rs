@@ -174,7 +174,12 @@ mod tests {
         let anchors = anchors(&p_root, &prepared);
 
         let parsed = ruby_prism::parse(source.as_bytes());
-        let hits = matcher::search(&p_root, &parsed.node(), &prepared);
+        let hits = matcher::search(
+            &p_root,
+            &parsed.node(),
+            &prepared,
+            &matcher::Criteria::none(),
+        );
         let matched: Vec<(usize, usize)> = hits
             .iter()
             .map(|m| {

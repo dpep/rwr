@@ -409,7 +409,12 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
             let Some(p_root) = matcher::pattern_root(&p_node) else {
                 return Vec::new().into_iter();
             };
-            let hits = matcher::search(&p_root, &parsed.node(), &prepared);
+            let hits = matcher::search(
+                &p_root,
+                &parsed.node(),
+                &prepared,
+                &matcher::Criteria::none(),
+            );
 
             // The account of what the rule could not see (D7). Name-anchored
             // rules only: a pattern with no literal identifier has nothing to
@@ -678,17 +683,17 @@ fn cmd_apply(
                     match matcher::pattern_root(&p_node) {
                         None => Ok(None),
                         Some(p_root) => {
-                            let hits: Vec<_> = matcher::search(&p_root, &parsed.node(), prepared)
-                                .into_iter()
-                                .filter(|m| {
-                                    matcher::satisfies(
-                                        m,
-                                        &rule.constraints,
-                                        &rule.scope,
-                                        &hierarchy,
-                                    )
-                                })
-                                .collect();
+                            // Criteria are applied *inside* the search now, so a
+                            // constraint rejection drives backtracking to a
+                            // different binding rather than discarding the match
+                            // (Q13).
+                            let criteria = matcher::Criteria {
+                                constraints: &rule.constraints,
+                                scope: &rule.scope,
+                                hierarchy: &hierarchy,
+                            };
+                            let hits =
+                                matcher::search(&p_root, &parsed.node(), prepared, &criteria);
                             if hits.is_empty() {
                                 Ok(None)
                             } else {

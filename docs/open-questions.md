@@ -151,29 +151,33 @@ find-references on a 40k-file repo.
 not rebuild it. Phase 0 measurement (c) narrows to **receiver resolution for methods**, the
 only part no plausible LSP exposure covers.
 
+### Q13 - Post-hoc constraints missing alternative bindings -> **resolved**
+A constraint rejection now *forbids that binding and re-matches*, which forces backtracking to
+a different one, rather than discarding a completed match. Terminating, because each retry
+forbids one more finite binding; `MAX_REBINDS` is a backstop rather than a budget.
+
+`Criteria` moved inside `search`, so the search returns matches that satisfy the rule instead
+of the caller filtering afterwards. The separation the original design prized -- a constraint
+may not change *what* matched -- is preserved in substance: a constraint still cannot invent a
+match, only decline one and let the search look again.
+
+**The original framing was slightly wrong**, and the distinction matters. Two different things
+look alike:
+
+- *A rejected binding.* `{name:, size: size}` binds `$K` to `name:` first, which fails
+  `same_name_as` because an implicit value has no identifier. This is what the retry fixes,
+  and without it the second pass over a partly-shortened hash found nothing at all.
+- *Several **valid** bindings on one node.* `{name: name, size: size}` -- both pairs satisfy
+  the constraint, and `search` reports one match per node by design. That still needs a second
+  pass, and correctly so: rwr does not iterate internally because `foo($A) -> foo(bar($A))`
+  matches its own output and diverges (D15). The caller loops; the corpus runner applies to a
+  fixpoint, as a real consumer does.
+
+Pinned by `matcher::tests::a_rejected_binding_is_retried_not_abandoned` and by corpus 003,
+whose two-pair hash converges in two passes.
+
 ### Q5 — Heredoc-safe rewriting → **D14**
 A general rule *is* derivable: `effective_range()` = transitive closure over descendants
 unioning heredoc `closing_loc`, at splice time. The enforcement matters more than the rule —
 never expose raw `.location` from the capture API.
 
-## Q13 - Post-hoc constraints miss alternative bindings *(new)*
-
-`satisfies` runs after a structural match, deliberately: a constraint may not change *what*
-matched, only whether it counts. The cost, found by corpus 003, is real.
-
-`{name: name, size: size}` against `{**$B, $K: $V, **$A}` with `$K: { same_name_as: $V }`
-rewrites only the first pair. `search` reports **one match per node**, backtracking binds
-`$K` to `name`, and `same_name_as` rejects it afterwards -- so the `size` binding, which would
-have satisfied the constraint, is never tried. A rerun does not help, because the same first
-binding is chosen again.
-
-**Fixing it means threading constraints into matching**, so a failed constraint drives
-backtracking rather than discarding a completed match. That couples two things the current
-design keeps apart, and the coupling has a real benefit here and a real cost in clarity.
-
-**Why it is recorded rather than fixed:** the failure is a clean under-match -- rwr rewrites
-less than it could and never wrongly -- and the reproducing case is small. But it is not
-exotic: `{name: name, size: size}` is ordinary Ruby, and any rule combining a sequence
-metavariable with a constraint on a sibling capture hits it.
-
-Reproducing case: `corpus/003-hash-shorthand`, `known_limitation` in its `meta.yml`.

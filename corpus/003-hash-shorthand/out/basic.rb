@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 class Widget
-  def payload(name)
-    {name:, kind: "widget"}
+  def payload(name, size)
+    {name:, size:, kind: "widget"}
   end
 
   def rocket(total)

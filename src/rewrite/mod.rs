@@ -576,7 +576,12 @@ mod tests {
 
         let parsed = ruby_prism::parse(source.as_bytes());
         assert_eq!(parsed.errors().count(), 0, "source does not parse");
-        let hits = matcher::search(&p_root, &parsed.node(), &prepared);
+        let hits = matcher::search(
+            &p_root,
+            &parsed.node(),
+            &prepared,
+            &matcher::Criteria::none(),
+        );
 
         let planned = plan(&hits, &p_root, &prepared, template, source.as_bytes())?;
         let out = apply(source.as_bytes(), &planned.edits);
