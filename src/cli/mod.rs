@@ -312,7 +312,7 @@ fn report_residue(residues: &[Residue]) {
 
 /// One structural match, as reported.
 /// An occurrence the rule could not account for, as reported.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct Residue {
     file: String,
     line: usize,
@@ -466,7 +466,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
 }
 
 /// A file rwr would change, or did.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct Changed {
     file: String,
     edits: usize,
@@ -530,7 +530,16 @@ fn cmd_apply(
         edits: usize,
         rewritten: Option<String>,
         refusal: Option<String>,
+        residue: Vec<Residue>,
     }
+
+    // The class a rule set is about, used to scope its own residue report.
+    let class_anchor: Option<String> = rules.iter().find_map(|r| {
+        r.scope
+            .inside
+            .clone()
+            .or_else(|| r.constraints.values().find_map(|c| c.receiver_type.clone()))
+    });
 
     let outcomes: Vec<Outcome> = files
         .par_iter()
@@ -583,6 +592,7 @@ fn cmd_apply(
                             edits: 0,
                             rewritten: None,
                             refusal: Some(refusal),
+                            residue: Vec::new(),
                         });
                     }
                     Ok(None) => {}
@@ -593,11 +603,53 @@ fn cmd_apply(
                 }
             }
 
-            (total > 0).then(|| Outcome {
+            if total == 0 {
+                return None;
+            }
+
+            // What the rule set could not account for (D7). Reported against
+            // the *rewritten* source, so an occurrence a rule already handled
+            // is not counted twice -- and so a subclass call site left behind
+            // by a rename is visible rather than silently broken.
+            let residue = {
+                let parsed = ruby_prism::parse(&current);
+                let mut found = Vec::new();
+                for prepared in &prepareds {
+                    let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+                    let p_node = p_parsed.node();
+                    let Some(p_root) = matcher::pattern_root(&p_node) else {
+                        continue;
+                    };
+                    let anchors = residue::anchors(&p_root, prepared);
+                    if anchors.is_empty() {
+                        continue;
+                    }
+                    let mut occurrences = residue::find(&parsed.node(), &anchors, &[], &current);
+                    if let Some(class) = &class_anchor {
+                        occurrences = residue::scoped_to(occurrences, class);
+                    }
+                    found.extend(occurrences.into_iter().map(|o| {
+                        let (line, col) = source::line_col(&current, o.byte_start);
+                        Residue {
+                            file: file.clone(),
+                            line,
+                            col,
+                            context: o.context,
+                            text: source::line_at(&current, o.byte_start),
+                        }
+                    }));
+                }
+                found.sort_by_key(|r| (r.line, r.col));
+                found.dedup_by_key(|r| (r.line, r.col));
+                found
+            };
+
+            Some(Outcome {
                 file,
                 edits: total,
                 rewritten: Some(String::from_utf8_lossy(&current).into_owned()),
                 refusal: None,
+                residue,
             })
         })
         .collect();
@@ -622,6 +674,12 @@ fn cmd_apply(
             edits: outcome.edits,
         });
     }
+
+    let mut left_over: Vec<Residue> = outcomes
+        .iter()
+        .flat_map(|o| o.residue.iter().cloned())
+        .collect();
+    left_over.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     changed.sort_by(|a, b| a.file.cmp(&b.file));
 
     match out {
@@ -630,6 +688,7 @@ fn cmd_apply(
                 let verb = if write { "rewrote" } else { "would rewrite" };
                 println!("{}: {verb} {} site(s)", c.file, c.edits);
             }
+            report_residue(&left_over);
         }
         _ => {
             if emit_rows(out, &changed).is_some() {

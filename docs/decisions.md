@@ -880,3 +880,43 @@ distinction D49 exists to respect, so the spelling a Ruby developer already uses
 exactly the information the rename needs. The dot form emits two rules rather than three -
 implicit self inside a class-method body is not yet reachable, since `inside:` does not track
 singleton context.
+
+## D51 - Inheritance is not modelled; residue is the safety net until it is
+**Decided** (roadmap), after the author asked whether rwr handles inheritance and whether
+`self` should be distinguished from the lexical class. It does not, and the honest answer has
+two halves.
+
+**`self` is an approximation.** Inside `class Account`, `self` is an instance of Account *or
+any descendant*. rwr resolves it to `Instance(Account)`, which is right for finding Account's
+own definition and its self-calls, and wrong in the strict sense that a subclass override
+could be what actually dispatches. For a rename the approximation is usually harmless, because
+a rename covers the hierarchy - but it is an approximation and should be named as one.
+
+**Inheritance is unmodelled, and it cuts both ways:**
+
+- *False negatives.* `premium.display_name`, where `Premium < Account`, does not match
+  `type: Account`, so a rename misses it - and the method it called has just been renamed away.
+  Demonstrated: rwr renamed the definition and the self-call, left the subclass call site, and
+  the file no longer ran.
+- *Override protection.* If `Premium` overrides `display_name`, renaming `Account`'s must not
+  touch `Premium`'s. rwr gets this accidentally right today by matching neither.
+
+**Why this is shipped rather than blocking:** wiring residue into `check` and `rewrite` turns
+the gap from *silently broken code* into *reported*. The same run now says:
+
+```
+rewrote 2 site(s)
+1 occurrence(s) this rule could not account for (0 symbol, 0 string, 1 call, 0 definition):
+  inherit.rb:15:1: Call: premium.display_name
+```
+
+That is the design working as intended - do what can be proven, refuse the rest, and account
+for it - rather than a gap papered over.
+
+**Roadmap:** a class-hierarchy index. Walk every file recording `class X < Y`, then let
+`type: Account` optionally admit descendants (`type: Account, subclasses: true`) and let a
+rename see overrides. It needs the cross-file index Phase 1 deliberately avoided, which is why
+it belongs to Phase 2's later half rather than to this pass.
+
+*Reverses if:* measurement on a real monolith shows subclass call sites are rare enough that
+the residue report is a sufficient permanent answer.
