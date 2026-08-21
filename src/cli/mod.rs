@@ -394,6 +394,34 @@ fn report_by_rule(changed: &[Changed]) {
     }
 }
 
+/// Print what the finding rules flagged.
+///
+/// Separate from the edit list because it is a different kind of answer: these
+/// are shapes a human has to judge, not changes a tool is proposing.
+fn report_findings(findings: &[Finding]) {
+    if findings.is_empty() {
+        return;
+    }
+    let mut rules: Vec<&str> = findings.iter().map(|f| f.rule.as_str()).collect();
+    rules.sort_unstable();
+    rules.dedup();
+    println!(
+        "\n{} finding(s) for review, no edit proposed:",
+        findings.len()
+    );
+    for rule in rules {
+        let mine: Vec<&Finding> = findings.iter().filter(|f| f.rule == rule).collect();
+        let note = mine.first().map_or("", |f| f.note.as_str());
+        println!("\n  {rule} — {note}");
+        for f in mine.iter().take(RESIDUE_DETAIL_CAP) {
+            println!("    {}:{}:{}: {}", f.file, f.line, f.col, f.text);
+        }
+        if mine.len() > RESIDUE_DETAIL_CAP {
+            println!("    ... and {} more", mine.len() - RESIDUE_DETAIL_CAP);
+        }
+    }
+}
+
 /// Warn when one rule renamed across more than one class.
 ///
 /// `Account#display_name` and `Company#display_name` are different methods. A
@@ -825,11 +853,24 @@ struct Report<'a> {
     schema: u32,
     rwr_version: &'static str,
     changed: &'a [Changed],
+    /// Matches of rules that propose no edit -- lints rather than rewrites.
+    findings: &'a [Finding],
     /// Occurrences the rule could not account for. Present and empty when the
     /// rule is name-anchored and found none; absent means it made no claim.
     residue: &'a [Residue],
     /// Template files not searched, since they embed Ruby rwr does not read.
     templates_skipped: usize,
+}
+
+/// A match of a rule that proposes no edit -- a lint rather than a rewrite.
+#[derive(Debug, Serialize, Clone)]
+struct Finding {
+    file: String,
+    line: usize,
+    col: usize,
+    rule: String,
+    note: String,
+    text: String,
 }
 
 /// One rule's share of a file's edits.
@@ -952,10 +993,16 @@ fn cmd_apply(
     if rules.is_empty() {
         return Exit::Ok.into();
     }
-    if rules.iter().any(|r| r.rewrite.is_none()) {
-        eprintln!("rwr: {}", rule::RuleError::NoTemplate);
-        return Exit::PatternError.into();
-    }
+    // A rule with no `rewrite:` is a *finding*: it flags a shape for a human
+    // without proposing an edit. Some things are worth surfacing and not worth
+    // rewriting -- `.size` on a relation means one thing loaded and another
+    // not, and only the caller knows which was meant.
+    //
+    // There is deliberately no attempt to tell a lint from a forgotten
+    // template. Nothing distinguishes them in the file, and the output says
+    // "no edit proposed" plainly enough that a missing `rewrite:` announces
+    // itself. A bare pattern with no `-r` never reaches here: it is not a path,
+    // so it fails to resolve as a rule at all.
     // A rule set that names no class cannot tell `Account#display_name` from
     // `Company#display_name`, so its matches are tallied by resolved receiver.
     let unnarrowed = !rules
@@ -1083,6 +1130,8 @@ fn cmd_apply(
         /// Classes this file's matched receivers resolved to, for the
         /// cross-class warning. Empty unless the rule set narrows by none.
         spread: Vec<String>,
+        /// Matches of rules that propose no edit.
+        flagged: Vec<Finding>,
         /// Edits per rule, positionally. Attribution is per file because that
         /// is where the work happened; totals aggregate from it.
         by_rule: Vec<usize>,
@@ -1132,6 +1181,7 @@ fn cmd_apply(
 
             let mut by_rule = vec![0usize; rules.len()];
             let mut spread: Vec<String> = Vec::new();
+            let mut flagged: Vec<Finding> = Vec::new();
             // One parse serves every rule until a rule actually rewrites
             // something. It used to be one parse *per rule*, so a ten-rule pack
             // parsed each candidate file ten times whether or not any rule
@@ -1202,7 +1252,28 @@ fn cmd_apply(
                                             }
                                         }
                                     }
-                                    if hits.is_empty() {
+                                    // A finding rule proposes no edit: its
+                                    // matches are reported and the source left
+                                    // alone, so the parse still describes it.
+                                    // Some things are worth surfacing and not
+                                    // worth rewriting -- `.size` on a relation
+                                    // means one thing loaded and another not,
+                                    // and only the caller knows which.
+                                    if rule.rewrite.is_none() {
+                                        for hit in &hits {
+                                            let (start, _) = rewrite::effective_range(&hit.node);
+                                            let (line, col) = source::line_col(&current, start);
+                                            flagged.push(Finding {
+                                                file: file.clone(),
+                                                line,
+                                                col,
+                                                rule: rule.id.clone().unwrap_or_default(),
+                                                note: rule.description.clone().unwrap_or_default(),
+                                                text: source::line_at(&current, start),
+                                            });
+                                        }
+                                        Ok(None)
+                                    } else if hits.is_empty() {
                                         Ok(None)
                                     } else {
                                         let template = rule.rewrite.as_deref().unwrap_or_default();
@@ -1253,6 +1324,7 @@ fn cmd_apply(
                         file,
                         sites: 0,
                         spread: Vec::new(),
+                        flagged: Vec::new(),
                         by_rule: Vec::new(),
                         rewritten: None,
                         refusal: Some(refusal),
@@ -1326,7 +1398,7 @@ fn cmd_apply(
                 found
             };
 
-            if total == 0 && residue.is_empty() {
+            if total == 0 && residue.is_empty() && flagged.is_empty() {
                 return None;
             }
 
@@ -1334,6 +1406,7 @@ fn cmd_apply(
                 file,
                 sites: total,
                 spread,
+                flagged,
                 by_rule,
                 // Nothing to write when nothing changed, so the write path
                 // skips a file that only contributed residue.
@@ -1385,6 +1458,12 @@ fn cmd_apply(
         });
     }
 
+    let mut findings: Vec<Finding> = outcomes
+        .iter()
+        .flat_map(|o| o.flagged.iter().cloned())
+        .collect();
+    findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+
     let mut left_over: Vec<Residue> = outcomes
         .iter()
         .flat_map(|o| o.residue.iter().cloned())
@@ -1398,6 +1477,7 @@ fn cmd_apply(
                 let verb = if write { "rewrote" } else { "would rewrite" };
                 println!("{}: {verb} {} site(s)", c.file, c.sites);
             }
+            report_findings(&findings);
             report_by_rule(&changed);
             report_spread(
                 &outcomes
@@ -1416,6 +1496,7 @@ fn cmd_apply(
                 schema: REPORT_SCHEMA,
                 rwr_version: env!("CARGO_PKG_VERSION"),
                 changed: &changed,
+                findings: &findings,
                 residue: &left_over,
                 templates_skipped: if claims_completeness { templates } else { 0 },
             };
@@ -1442,7 +1523,9 @@ fn cmd_apply(
     // `check` is enforcement polarity: nothing to change is success, and
     // something to change is the signal a hook or CI acts on (D22). `rewrite`
     // succeeds either way, having done whatever there was to do.
-    if write || changed.is_empty() {
+    // A finding is work to do, exactly as an edit is: `check` exists to fail a
+    // gate on it, and a lint that exits 0 gates nothing.
+    if write || (changed.is_empty() && findings.is_empty()) {
         Exit::Ok.into()
     } else {
         Exit::Negative.into()

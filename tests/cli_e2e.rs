@@ -117,15 +117,41 @@ fn the_rewrite_verb_writes() {
     assert_eq!(after, "def a\n  return\nend\n");
 }
 
-/// A find-only rule cannot be applied, and the error says what is missing.
+/// A rule with no `rewrite:` is a lint: it flags a shape for a human without
+/// proposing an edit. Some things are worth surfacing and not worth rewriting.
 #[test]
-fn applying_requires_a_replacement() {
-    let dir = fixture("def a\n  return nil\nend\n");
+fn a_rule_without_a_template_is_a_finding() {
+    let dir = fixture("a = Company.where(x: 1).size\n");
     let rule = dir.path().join("r.yml");
-    std::fs::write(&rule, "match: return nil\n").expect("write");
+    std::fs::write(
+        &rule,
+        "id: relation-size\ndescription: say which you meant\nmatch: $R.where($C).size\n",
+    )
+    .expect("write");
 
-    let err = stderr(&rwr(&["rewrite", rule.to_str().unwrap()]));
-    assert!(err.contains("rewrite"), "{err}");
+    let out = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("finding(s) for review"), "{text}");
+    assert!(text.contains("say which you meant"), "{text}");
+    // A finding is work to do, exactly as an edit is -- a lint that exits 0
+    // gates nothing.
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+
+    // And it writes nothing.
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    assert_eq!(after, "a = Company.where(x: 1).size\n");
+}
+
+/// A bare pattern is not a rule file, so it never reaches the lint path.
+#[test]
+fn a_bare_pattern_without_a_template_still_fails() {
+    let dir = fixture("def a\n  return nil\nend\n");
+    let out = rwr(&["check", "return nil", dir.path().to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
 }
 
 /// A rule argument that is neither a path nor a built-in names what it tried,

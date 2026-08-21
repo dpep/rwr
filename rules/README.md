@@ -67,6 +67,30 @@ can rule it out where it can resolve the receiver. Add a `type:` constraint when
 running these over a Rails app, and read the residue report for the sites it
 could not resolve.
 
+## Lints: rules that flag without rewriting
+
+A rule with no `rewrite:` is a **finding**. It reports its matches with its
+`description` and proposes nothing:
+
+```yaml
+description: '`.size` on a relation queries when unloaded and counts in memory when loaded.'
+match: $R.where($C).size
+```
+
+```
+1 finding(s) for review, no edit proposed:
+
+  performance/relation-size — `.size` on a relation queries when unloaded…
+    app/models/company.rb:14:5: total = Company.where(active: true).size
+```
+
+Findings make `check` exit 1, like edits do — a lint that exits 0 gates nothing.
+`rewrite` reports them and writes nothing for them.
+
+This is for shapes where the right answer depends on something rwr cannot see.
+`.size` on a relation is `count` unloaded and `length` loaded, and only the
+caller knows which was meant; proposing either would be guessing.
+
 ## What is not here, and why
 
 **`if !x` → `unless x`.** An `IfNode` and an `UnlessNode` are different kinds,
@@ -78,3 +102,12 @@ correspondence across node kinds.
 
 **Layout.** Indentation, alignment and trailing commas are presentation, and
 rwr does not own style (D34, D53).
+
+**N+1 detection.** Association access inside an `each`/`map` block with no
+`includes` upstream is a real and valuable thing to flag, and rwr cannot express
+it. A pattern matches a *shape*; there is no way to say "this block contains
+that call somewhere inside it", and the `includes` it would need to look for is
+usually in another method entirely. A version narrow enough to write would miss
+most real N+1s and a version broad enough to catch them would flag every block.
+The lint mechanism above is now in place for when the matcher can express
+containment.

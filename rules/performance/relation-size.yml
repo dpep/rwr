@@ -1,0 +1,8 @@
+# A lint, not a rewrite: `.size` on a relation is `count` when the relation is
+# unloaded and `length` when it is loaded, and which one the author wanted is a
+# question about code rwr cannot see. Flagging it is the honest answer.
+description: '`.size` on a relation queries when unloaded and counts in memory when loaded; say which you meant.'
+unsafe: >-
+  Assumes an ActiveRecord relation. `where` on anything else is a different
+  method entirely.
+match: $R.where($C).size

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**Rules can lint without rewriting.** A rule with no `rewrite:` is a *finding*: it reports
+its matches with its `description` and proposes no edit. Findings make `check` exit 1 like
+edits do, since a lint that exits 0 gates nothing. Ships as `performance/relation-size`,
+because `.size` on a relation is `count` unloaded and `length` loaded and only the caller
+knows which was meant.
+
 **Fixed: residue reported against rules that move no name.** `gsub` → `tr` is shaped exactly
 like a rename — a literal name applied to metavariables — but `String#gsub` still exists
 afterwards, so every `.gsub` the rule declined to rewrite is fine. They were being listed as
