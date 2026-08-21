@@ -330,6 +330,19 @@ impl MethodRename {
 }
 
 impl Rule {
+    /// The class this rule is about, if it names one.
+    ///
+    /// Used to scope the rule's own residue report. Per rule rather than per
+    /// set: a pack containing two renames has two classes, and scoping both by
+    /// the first drops the second's account entirely.
+    pub(crate) fn class_anchor(&self) -> Option<String> {
+        self.scope.inside.clone().or_else(|| {
+            self.constraints
+                .values()
+                .find_map(|c| c.receiver_type.clone())
+        })
+    }
+
     /// Captures the rule declares to be constants.
     ///
     /// Fed to the substitution, which cannot otherwise tell `FOO = 1` from

@@ -1,0 +1,19 @@
+# Two spellings of the same question, so one file holds both rules.
+#
+# `where` is the tell: a relation is the only common receiver where `.count`
+# issues a query. It is a tell rather than a proof, which is what `unsafe:` is
+# for -- and `where: { $R: { type: ApplicationRecord, subclasses: true } }`
+# turns the tell into a proof wherever the receiver resolves.
+- description: '`count > 0` runs COUNT(*) to answer a question `exists?` answers with LIMIT 1.'
+  unsafe: >-
+    Assumes an ActiveRecord relation. `where` on anything else is a different
+    method, and `count` on a loaded collection is already free.
+  match: $R.where($C).count > 0
+  rewrite: $R.where($C).exists?
+
+- description: '`count.positive?` runs COUNT(*) to answer a question `exists?` answers with LIMIT 1.'
+  unsafe: >-
+    Assumes an ActiveRecord relation. `where` on anything else is a different
+    method, and `count` on a loaded collection is already free.
+  match: $R.where($C).count.positive?
+  rewrite: $R.where($C).exists?

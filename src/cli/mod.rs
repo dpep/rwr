@@ -457,17 +457,34 @@ fn report_residue(residues: &[Residue], templates: usize) {
     // appears and vanishes with unrelated results is not a report. The caller
     // passes zero when the run makes no completeness claim at all.
     if templates > 0 {
+        // Stated as a *risk*, not a footnote. The refusal contract only covers
+        // what rwr can see, and here it cannot see embedded Ruby -- so a rename
+        // under-reports rather than over-reports, which is the dangerous
+        // direction and the opposite of what the rest of the tool promises.
         eprintln!(
-            "\nnote: {templates} template file(s) were not searched. rwr reads Ruby, \
-             and .erb/.haml embed it -- so this account covers Ruby only (Q11)."
+            "\nwarning: {templates} template file(s) were not searched, and .erb/.haml \
+             embed Ruby.\n  This account is Ruby-only, so a call site in a view is \
+             missing from it rather than\n  listed -- check the templates by hand \
+             before trusting a rename as complete (Q11)."
         );
     }
     if residues.is_empty() {
         return;
     }
     let count = |c: residue::Context| residues.iter().filter(|r| r.context == c).count();
+    // Name the rule when the run had one. An unlabelled block after several
+    // rules fired leaves the reader to guess which one it belongs to, and a
+    // real run guessed wrong.
+    let mut named: Vec<&str> = residues.iter().filter_map(|r| r.rule.as_deref()).collect();
+    named.sort_unstable();
+    named.dedup();
+    let whose = match named.as_slice() {
+        [] => "this rule".to_string(),
+        [one] => format!("`{one}`"),
+        many => format!("{} rules ({})", many.len(), many.join(", ")),
+    };
     eprintln!(
-        "\n{} occurrence(s) this rule could not account for \
+        "\n{} occurrence(s) {whose} could not account for \
          ({} symbol, {} string, {} call, {} definition):",
         residues.len(),
         count(residue::Context::Symbol),
@@ -476,9 +493,18 @@ fn report_residue(residues: &[Residue], templates: usize) {
         count(residue::Context::Definition),
     );
     for r in residues.iter().take(RESIDUE_DETAIL_CAP) {
+        // The rule is shown per line only when several contributed, since
+        // repeating one name on every line is noise.
+        let tag = if named.len() > 1 {
+            r.rule
+                .as_deref()
+                .map_or(String::new(), |id| format!("[{id}] "))
+        } else {
+            String::new()
+        };
         eprintln!(
-            "  {}:{}:{}: {:?}: {}",
-            r.file, r.line, r.col, r.context, r.text
+            "  {}{}:{}:{}: {:?}: {}",
+            tag, r.file, r.line, r.col, r.context, r.text
         );
     }
     if residues.len() > RESIDUE_DETAIL_CAP {
@@ -529,6 +555,9 @@ struct Residue {
     line: usize,
     col: usize,
     context: residue::Context,
+    /// The rule whose name this occurrence is, when the run has named rules.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule: Option<String>,
     text: String,
 }
 
@@ -685,6 +714,8 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                             line,
                             col,
                             context: o.context,
+                            // `find` takes a bare pattern, which has no rule id.
+                            rule: None,
                             text: source::line_at(&src, o.byte_start),
                         }
                     }));
@@ -960,10 +991,14 @@ fn cmd_apply(
     // name-anchored rules only (D7), and the templates note is part of that
     // claim -- a pack of shape rules makes no claim, so noting what it did not
     // read there is noise on every run.
+    // Residue applies only where the rule set moves a *definition* (D7 as
+    // amended twice). A set that only rewrites call sites -- `gsub` to `tr` --
+    // leaves every name it did not touch working, so it has nothing to be
+    // incomplete about.
     let claims_completeness = prepareds.iter().any(|prepared| {
         let parsed = ruby_prism::parse(prepared.source.as_bytes());
         matcher::pattern_root(&parsed.node())
-            .is_some_and(|root| !residue::anchors(&root, prepared).is_empty())
+            .is_some_and(|root| residue::defines_a_method(&root, prepared))
     });
 
     let mut scoped: Vec<String> = paths.to_vec();
@@ -1058,12 +1093,6 @@ fn cmd_apply(
     }
 
     // The class a rule set is about, used to scope its own residue report.
-    let class_anchor: Option<String> = rules.iter().find_map(|r| {
-        r.scope
-            .inside
-            .clone()
-            .or_else(|| r.constraints.values().find_map(|c| c.receiver_type.clone()))
-    });
 
     // Union across the rule set: a file kept by any rule must still be parsed.
     // One filter per rule, checked disjunctively: any rule needing the file is
@@ -1254,10 +1283,12 @@ fn cmd_apply(
             // already handled is not counted twice -- and so a subclass call
             // site left behind by a rename is visible rather than silently
             // broken.
-            let residue = {
+            let residue = if !claims_completeness {
+                Vec::new()
+            } else {
                 let parsed = ruby_prism::parse(&current);
                 let mut found = Vec::new();
-                for prepared in &prepareds {
+                for (rule, prepared) in rules.iter().zip(&prepareds) {
                     let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
                     let p_node = p_parsed.node();
                     let Some(p_root) = matcher::pattern_root(&p_node) else {
@@ -1268,8 +1299,12 @@ fn cmd_apply(
                         continue;
                     }
                     let mut occurrences = residue::find(&parsed.node(), &anchors, &[], &current);
-                    if let Some(class) = &class_anchor {
-                        occurrences = residue::scoped_to(occurrences, class, &hierarchy);
+                    // Each rule scopes by *its own* class. Taking the set's
+                    // first meant a pack of two renames reported everything
+                    // against the first one's class and dropped the second's
+                    // entirely.
+                    if let Some(class) = rule.class_anchor() {
+                        occurrences = residue::scoped_to(occurrences, &class, &hierarchy);
                     }
                     found.extend(occurrences.into_iter().map(|o| {
                         let (line, col) = source::line_col(&current, o.byte_start);
@@ -1278,6 +1313,10 @@ fn cmd_apply(
                             line,
                             col,
                             context: o.context,
+                            // Which rule's name this is. A pack can run several
+                            // renames, and an unlabelled block leaves the reader
+                            // guessing which one an occurrence belongs to.
+                            rule: rule.id.clone(),
                             text: source::line_at(&current, o.byte_start),
                         }
                     }));

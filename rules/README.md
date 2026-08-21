@@ -39,9 +39,27 @@ is printed next to the diff. RuboCop carries the same information as
 `SafeAutoCorrect: false`, in a config file nobody reads at the moment of the
 edit.
 
-**Held back by default:** `performance/detect`, `performance/count`,
-`performance/filter-map`, `performance/sum`,
-`performance/string-replacement`, `style/sorted-constant-array`.
+**Held back by default:** everything under `performance/` except `reverse-each`,
+plus `style/sorted-constant-array`.
+
+## The ActiveRecord rules
+
+`exists`, `find-by`, `pluck` and `relation-count` all assume their receiver is
+an ActiveRecord relation, and say so. The pattern carries a *tell* rather than a
+proof — `where(...)` and `to_a` are rare on anything else — which is precisely
+what `unsafe:` is for.
+
+Turn the tell into a proof where the receiver resolves:
+
+```yaml
+where:
+  $R: { type: ApplicationRecord, subclasses: true, kind: class }
+```
+
+That narrows to constants rwr can trace to your model base class. It also means
+the rule stops firing on `company.employees.where(...)`, whose receiver rwr
+cannot resolve — under-matching, reported as nothing, which is the safe
+direction.
 
 The narrowing that makes several of these safe is a `where:` receiver type — an
 `ActiveRecord::Relation` is the whole problem with the `select` rules, and rwr

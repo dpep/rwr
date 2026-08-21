@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+**Fixed: residue reported against rules that move no name.** `gsub` → `tr` is shaped exactly
+like a rename — a literal name applied to metavariables — but `String#gsub` still exists
+afterwards, so every `.gsub` the rule declined to rewrite is fine. They were being listed as
+"could not account for", which is a false claim. Residue now applies only where the rule set
+rewrites a *definition*, because that is the only way a name moves.
+
+**Fixed: residue now names the rule it belongs to**, and each rule scopes by its own class.
+An unlabelled block after several rules fired left the reader guessing, and a pack of two
+renames reported everything against the first one's class and dropped the second's entirely.
+
+**The template gap is a warning, not a footnote.** rwr cannot read `.erb`/`.haml`, so a
+rename *under-reports* there — a call site in a view is missing from the account rather than
+listed. That is the dangerous direction, and the message now says so.
+
+**Five ActiveRecord performance rules**: `exists` (`where(...).count > 0` → `exists?`),
+`find-by`, `pluck`, and `relation-count` (`to_a.size` → `count`). All held back as unsafe
+with their caveats, since the pattern carries a tell rather than a proof.
+
 **`T::Struct` field declarations feed receiver narrowing.** `const :name, String` states a
 type with no `sig` anywhere, and rwr was not reading it — 45,068 sites on a Sorbet monolith,
 a third again as many as its `sig` blocks. The signature prefilter now looks for `T::` as

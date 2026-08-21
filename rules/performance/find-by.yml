@@ -1,0 +1,7 @@
+description: '`where(...).first` is spelled `find_by(...)`, which is the same query and says what it means.'
+unsafe: >-
+  Assumes an ActiveRecord relation. `where` on anything else is a different
+  method, and on an already-loaded relation `first` takes from memory where
+  `find_by` issues a query.
+match: $R.where($C).first
+rewrite: $R.find_by($C)

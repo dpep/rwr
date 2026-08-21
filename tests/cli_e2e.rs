@@ -504,6 +504,10 @@ fn templates_are_reported_as_unread() {
     let err = stderr(&out);
     assert!(err.contains("2 template file(s)"), "{err}");
     assert!(err.contains("not searched"), "{err}");
+    // Stated as a risk: the gap makes a rename under-report, which is the
+    // dangerous direction and the opposite of what the tool promises.
+    assert!(err.contains("warning:"), "{err}");
+    assert!(err.contains("missing from it"), "{err}");
 }
 
 /// A `.rake` file is Ruby, and was invisible until it was not.
@@ -585,6 +589,57 @@ fn structured_output_names_its_own_shape() {
         assert_eq!(doc["schema"], 2, "{text}");
         assert_eq!(doc["rwr_version"], env!("CARGO_PKG_VERSION"), "{text}");
     }
+}
+
+/// A rule that only rewrites call sites has nothing to be incomplete about.
+///
+/// `$R.gsub($F, $T)` -> `$R.tr($F, $T)` is shaped exactly like a rename -- a
+/// literal name applied to metavariables -- but `String#gsub` still exists
+/// afterwards, so every `.gsub` it declined to rewrite is fine. Reporting them
+/// as unaccounted-for was a false claim, found by a real run.
+#[test]
+fn a_call_site_rewrite_reports_no_residue() {
+    let dir = fixture("a = s.gsub(\"-\", \"_\")\nb = s.gsub(\"hello\", \"world\")\n");
+    let out = rwr(&[
+        "check",
+        "performance/string-replacement",
+        dir.path().to_str().unwrap(),
+        "--unsafe",
+    ]);
+    let err = stderr(&out);
+    assert!(!err.contains("could not account for"), "{err}");
+}
+
+/// With several renames in one run, an unlabelled block leaves the reader to
+/// guess which rule an occurrence belongs to -- and a real run guessed wrong.
+#[test]
+fn residue_names_the_rule_it_belongs_to() {
+    let dir = fixture(
+        "class Account\n  def display_name; 1; end\nend\n         class Company\n  def legal_name; 2; end\nend\n         class AccountSerializer\n  delegate :display_name, to: :account\nend\n         class CompanySerializer\n  delegate :legal_name, to: :company\nend\n",
+    );
+    let pack = dir.path().join("pack");
+    std::fs::create_dir_all(&pack).expect("mkdir");
+    std::fs::write(
+        pack.join("rename-account.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+    std::fs::write(
+        pack.join("rename-company.yml"),
+        "method: Company#legal_name\nrename: registered_name\n",
+    )
+    .expect("write");
+
+    let out = rwr(&[
+        "check",
+        pack.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    // Both rules report: scoping every rule by the *set's* first class dropped
+    // the second rule's account entirely.
+    assert!(err.contains("[rename-account]"), "{err}");
+    assert!(err.contains("[rename-company]"), "{err}");
 }
 
 /// No arguments is a usage error, not a silent no-op.

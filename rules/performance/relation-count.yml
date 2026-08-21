@@ -1,0 +1,12 @@
+# `to_a` is the tell: something is being turned into an array only to be
+# measured. On a relation that loads every row to count them.
+description: '`to_a.size` loads every record to measure the collection; `count` asks the database.'
+unsafe: >-
+  On an already-loaded relation this is a pessimisation, not a win -- `to_a` is
+  then free and `count` issues a fresh query. On a plain Array it trades O(1)
+  for O(n).
+match: $R.to_a.$AGG
+where:
+  $AGG:
+    name: [size, length]
+rewrite: $R.count

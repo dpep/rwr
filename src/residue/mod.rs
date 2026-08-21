@@ -76,12 +76,12 @@ fn scope_name(node: &Node<'_>) -> Option<String> {
 /// `delegate :display_name, to: :account` forwards to an Account and breaks
 /// when Account's method is renamed; `attr_reader :display_name` in a Widget
 /// makes Widget's own method and is untouched by it.
-const DEFINERS: &[&str] = &[
-    "attr_reader",
-    "attr_accessor",
-    "attr_writer",
-    "define_method",
-    "alias_method",
+const DEFINERS: &[&[u8]] = &[
+    b"attr_reader",
+    b"attr_accessor",
+    b"attr_writer",
+    b"define_method",
+    b"alias_method",
 ];
 
 /// Narrow a report to what a class-anchored rule could plausibly be about.
@@ -122,9 +122,33 @@ pub(crate) fn scoped_to(
                 // Except where the call *defines* a method rather than
                 // referring to one. `attr_reader :name` in an unrelated class
                 // creates that class's own `name`; it does not reach this one.
-                || o.via.as_deref().is_some_and(|call| !DEFINERS.contains(&call))
+                || o.via
+                    .as_deref()
+                    .is_some_and(|call| !DEFINERS.contains(&call.as_bytes()))
         })
         .collect()
+}
+
+/// Whether a pattern rewrites a *definition* of a method.
+///
+/// This is what makes residue meaningful, and the name-shape test alone is not
+/// enough. Residue answers "what breaks because this name moved", and a name
+/// only moves when its definition does. `$R.gsub($F, $T)` -> `$R.tr($F, $T)`
+/// looks exactly like a rename -- a literal name applied to metavariables --
+/// but `String#gsub` still exists afterwards, so every `.gsub` the rule
+/// declined to rewrite is perfectly fine. Reporting those as unaccounted-for
+/// was a false claim, and it is what a real run hit first.
+pub(crate) fn defines_a_method(pattern: &Node<'_>, prepared: &Prepared) -> bool {
+    if matches!(pattern, Node::DefNode { .. }) {
+        return true;
+    }
+    let Some(call) = pattern.as_call_node() else {
+        return false;
+    };
+    // A macro that defines a method counts too: renaming `attr_reader :old` to
+    // `attr_reader :new` moves the name just as `def` does.
+    DEFINERS.contains(&call.name().as_slice())
+        && matcher::placeholder_name(pattern, prepared).is_none()
 }
 
 /// The identifier a rule is anchored on, if it is anchored on one at all.

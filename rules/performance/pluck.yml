@@ -1,0 +1,9 @@
+# `pluck` selects one column and skips instantiating models; `map(&:col)` loads
+# every record in full to read one attribute from each.
+description: '`map(&:col)` instantiates every record to read one column; `pluck` selects just the column.'
+unsafe: >-
+  Assumes an ActiveRecord relation. On a plain Array this needs ActiveSupport's
+  `Array#pluck`, and on an already-loaded relation `map` reads memory where
+  `pluck` issues a fresh query.
+match: $R.map(&:$COL)
+rewrite: $R.pluck(:$COL)
