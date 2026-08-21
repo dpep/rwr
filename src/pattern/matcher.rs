@@ -295,6 +295,11 @@ pub(crate) fn satisfies(
     {
         return false;
     }
+    if let Some(wanted) = scope.singleton
+        && found.singleton != wanted
+    {
+        return false;
+    }
 
     constraints.iter().all(|(key, constraint)| {
         let Some(bound) = found.env.get(key.trim_start_matches('$')) else {
@@ -826,6 +831,42 @@ end
         assert_eq!(hits.iter().filter(|m| m.singleton).count(), 1);
     }
 
+    /// Implicit-self calls split by singleton context, so a class-method
+    /// rename cannot reach into an instance method's body or the reverse.
+    #[test]
+    fn inside_can_require_singleton_context() {
+        let prepared = prepare("display_name").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let src =
+            "class Account\n  def self.a; display_name; end\n  def b; display_name; end\nend\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = hits_for("", src, &parsed, &prepared, &p_node);
+        assert_eq!(hits.len(), 2);
+
+        let singleton = Scope {
+            inside: Some("Account".into()),
+            singleton: Some(true),
+        };
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &HashMap::new(), &singleton))
+                .count(),
+            1
+        );
+
+        let instance = Scope {
+            inside: Some("Account".into()),
+            singleton: Some(false),
+        };
+        assert_eq!(
+            hits.iter()
+                .filter(|m| satisfies(m, &HashMap::new(), &instance))
+                .count(),
+            1
+        );
+    }
+
     /// `inside:` reaches implicit-self call sites, which measurement (b) found
     /// are 43.5% of all calls -- the largest bucket, and free from lexical
     /// scope alone.
@@ -841,6 +882,7 @@ end
 
         let scope = Scope {
             inside: Some("Account".into()),
+            singleton: None,
         };
         let narrowed = hits
             .iter()

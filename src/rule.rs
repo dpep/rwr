@@ -82,6 +82,14 @@ pub(crate) struct Scope {
     /// 43.5% of all calls in rails.
     #[serde(default)]
     pub inside: Option<String>,
+
+    /// Restrict to singleton context -- inside `def self.x` or `class << self`.
+    ///
+    /// Without this, a bare `display_name` inside a class-method body is
+    /// indistinguishable from one inside an instance method, so a class-method
+    /// rename could not reach its implicit-self calls.
+    #[serde(default)]
+    pub singleton: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -144,6 +152,7 @@ impl MethodRename {
         let new = &self.rename;
         let scope = || Scope {
             inside: class.map(str::to_string),
+            singleton: None,
         };
         let receiver = || {
             let mut c = HashMap::new();
@@ -186,13 +195,18 @@ impl MethodRename {
         let mut rules = vec![definition, calls];
 
         // Implicit self, the largest receiver bucket -- reachable only through
-        // lexical scope, so it needs a class to be anchored to.
-        if class.is_some() && kind == Kind::Instance {
+        // lexical scope, so it needs a class to be anchored to. The singleton
+        // flag is what keeps a class-method rename from touching an instance
+        // method's body, and vice versa.
+        if class.is_some() {
             rules.push(Rule {
                 pattern: name.to_string(),
                 rewrite: Some(new.to_string()),
                 constraints: HashMap::new(),
-                scope: scope(),
+                scope: Scope {
+                    inside: class.map(str::to_string),
+                    singleton: Some(kind == Kind::Class),
+                },
             });
         }
         rules
@@ -313,10 +327,11 @@ mod tests {
         let rules = rename.expand();
         assert_eq!(rules[0].pattern, "def self.display_name; $B; end");
         assert_eq!(rules[1].constraints["$R"].kind, Some(Kind::Class));
+        assert_eq!(rules.len(), 3);
         assert_eq!(
-            rules.len(),
-            2,
-            "implicit self needs no rule for class methods"
+            rules[2].scope.singleton,
+            Some(true),
+            "a class-method rename reaches implicit self only in singleton context"
         );
     }
 
