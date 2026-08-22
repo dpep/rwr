@@ -123,8 +123,14 @@ pub(crate) struct Constraint {
     /// ```yaml
     /// match: $R.each { |$X| $B }
     /// where:
-    ///   $B: { contains: '$X.$INNER' }
+    ///   $B:
+    ///     contains: $X.$INNER
     /// ```
+    ///
+    /// No quotes needed: `$` is nothing special to YAML. A pattern wants
+    /// quoting only when it *starts* with a YAML metacharacter -- `{` opens a
+    /// flow mapping, which is why the hash-shorthand rule has them and this
+    /// does not.
     #[serde(default)]
     pub contains: Option<String>,
 

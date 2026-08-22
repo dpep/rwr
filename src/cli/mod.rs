@@ -136,6 +136,11 @@ pub(crate) struct Common {
     profile: bool,
 }
 
+/// The replacement a run was given, with `--delete` spelled as the empty one.
+fn template(replace: Option<&str>, delete: bool) -> Option<&str> {
+    if delete { Some("") } else { replace }
+}
+
 /// Where this run is pointed, for questions that are properties of the *repo*
 /// rather than of a file: which git repository, and which Ruby version.
 fn scope_start(paths: &[String], common: &Common) -> std::path::PathBuf {
@@ -212,6 +217,10 @@ struct Cli {
     #[arg(short = 'r', long = "replace", value_name = "TEMPLATE")]
     replace: Option<String>,
 
+    /// Delete what matches, rather than replacing it — previews the diff.
+    #[arg(short = 'd', long = "delete", conflicts_with = "replace")]
+    delete: bool,
+
     #[command(flatten)]
     common: Common,
 }
@@ -252,6 +261,15 @@ enum Command {
         /// Replacement template. Given, `rule` is read as a pattern, not a file.
         #[arg(short = 'r', long = "replace", value_name = "TEMPLATE")]
         replace: Option<String>,
+
+        /// Delete what matches, rather than replacing it. Given, `rule` is read
+        /// as a pattern, not a file.
+        ///
+        /// Deletion takes the whole *unit*: the match, the comments written
+        /// directly above it, and its line. `-r ''` means the same thing and is
+        /// harder to read.
+        #[arg(short = 'd', long = "delete", conflicts_with = "replace")]
+        delete: bool,
     },
 
     /// Apply a rewrite rule, writing the changes to disk.
@@ -271,6 +289,15 @@ enum Command {
         /// Replacement template. Given, `rule` is read as a pattern, not a file.
         #[arg(short = 'r', long = "replace", value_name = "TEMPLATE")]
         replace: Option<String>,
+
+        /// Delete what matches, rather than replacing it. Given, `rule` is read
+        /// as a pattern, not a file.
+        ///
+        /// Deletion takes the whole *unit*: the match, the comments written
+        /// directly above it, and its line. `-r ''` means the same thing and is
+        /// harder to read.
+        #[arg(short = 'd', long = "delete", conflicts_with = "replace")]
+        delete: bool,
     },
 }
 
@@ -283,15 +310,18 @@ pub fn run() -> ExitCode {
     // The shorthand desugars to a verb; it can only ever reach a read-only one.
     let command = match (cli.command, cli.pattern) {
         (Some(c), _) => c,
-        (None, Some(pattern)) => match cli.replace {
-            None => Command::Find {
+        (None, Some(pattern)) => match (cli.replace, cli.delete) {
+            (None, false) => Command::Find {
                 pattern,
                 paths: cli.paths,
             },
-            Some(replace) => Command::Check {
+            // Still read-only: the shorthand previews, and writing always
+            // requires typing `rewrite` (D30).
+            (replace, delete) => Command::Check {
                 rule: pattern,
                 paths: cli.paths,
-                replace: Some(replace),
+                replace,
+                delete,
             },
         },
         (None, None) => {
@@ -302,16 +332,34 @@ pub fn run() -> ExitCode {
 
     match command {
         Command::Find { pattern, paths } => cmd_find(&pattern, &paths, &cli.common, out),
+        // `-d` is `-r ''` with a name: an empty template is a deletion, and
+        // spelling it as a flag says so out loud.
         Command::Check {
             rule,
             paths,
             replace,
-        } => cmd_apply(&rule, &paths, replace.as_deref(), false, &cli.common, out),
+            delete,
+        } => cmd_apply(
+            &rule,
+            &paths,
+            template(replace.as_deref(), delete),
+            false,
+            &cli.common,
+            out,
+        ),
         Command::Rewrite {
             rule,
             paths,
             replace,
-        } => cmd_apply(&rule, &paths, replace.as_deref(), true, &cli.common, out),
+            delete,
+        } => cmd_apply(
+            &rule,
+            &paths,
+            template(replace.as_deref(), delete),
+            true,
+            &cli.common,
+            out,
+        ),
     }
 }
 

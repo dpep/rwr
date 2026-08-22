@@ -31,6 +31,11 @@ pub(crate) struct Edit {
 /// Why a rewrite was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Refusal {
+    /// A deletion whose match does not occupy whole lines of its own.
+    ///
+    /// Removing it would leave a hole in an expression, and the result can
+    /// still parse -- `x = a.name` becomes `x = ` and swallows the next line.
+    PartialDeletion { text: String },
     /// Two edits overlap partially, so neither can be applied without
     /// corrupting the other (D15).
     Overlap { first: Edit, second: Edit },
@@ -366,6 +371,29 @@ pub(crate) fn plan(
             }
             // No difference at all: the rule is a no-op here.
             Some(_) => {}
+            // An empty template is a deletion, and deletion means the *unit*:
+            // the node, the comments written directly above it, and the line it
+            // ends on. Replacing only the node's own bytes leaves its comment
+            // stranded above a blank gap, which is not what anyone means by
+            // deleting a method (D66).
+            _ if template.trim().is_empty() => {
+                let Some((start, end)) = sequence::unit_range(source, &m.node) else {
+                    return Err(Refusal::PartialDeletion {
+                        text: String::from_utf8_lossy(
+                            &source[effective_range(&m.node).0..effective_range(&m.node).1],
+                        )
+                        .into_owned(),
+                    });
+                };
+                edits.push((
+                    index,
+                    Edit {
+                        start,
+                        end,
+                        text: String::new(),
+                    },
+                ));
+            }
             // Shapes diverge, so fall back to replacing the whole span. Correct,
             // merely non-minimal.
             None => {

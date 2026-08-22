@@ -1306,7 +1306,8 @@ this".
 ```yaml
 match: $R.each { |$X| $B }
 where:
-  $B: { contains: '$X.$ASSOC.$FIELD' }
+  $B:
+    contains: $X.$ASSOC.$FIELD
 ```
 
 **The agreement is the feature.** A containment that ignored the outer bindings would match
@@ -1373,3 +1374,29 @@ simple version costs nothing worth the complexity.
 
 *Reverses if:* nothing here. Haml wants the same treatment and is a separate job — its Ruby
 is line-oriented rather than delimited, so extraction is a different problem.
+
+## D66 - An empty template is a deletion, and deletion means the unit
+**Decided.** `-d`, `-r ''` and `rewrite: ''` are three spellings of one mechanism, because
+one mechanism is easier to trust than three.
+
+**Deletion means the *unit*, not the node.** Removing only a method's own bytes leaves its
+doc comment stranded above a blank gap, which is not what anyone means by deleting a method.
+The unit is the match, the comment lines written directly above it, its own line, and one of
+the blank lines that separated it from its neighbours -- so the survivors stay spaced exactly
+as they were. `unit_for` already computed this for sequence sorting (D35); deletion reuses it.
+
+A comment block belonging to the *neighbour* is not taken: the walk upward stops at the first
+line that is not a comment, and a blank line is not a comment.
+
+**A partial match refuses.** This is the important half, and the naive version got it wrong
+in the worst possible way. Deleting `a.display_name` from `x = a.display_name` leaves `x = `,
+which then swallows the line below into `x =   y = 2` -- **valid Ruby, wholly wrong, exit 0**.
+That is the clean-confident-wrong failure this whole design exists to prevent, and it was
+sitting in the first working version until a test caught it.
+
+So a deletion whose match does not occupy whole lines of its own is refused
+(`Refusal::PartialDeletion`, exit 5), and the file is left alone. Pinned by
+`cli_e2e::delete_refuses_a_partial_match`.
+
+*Reverses if:* nothing. Deleting a sub-expression has no correct answer to fall back on --
+there is no "smaller" thing to do than refuse.

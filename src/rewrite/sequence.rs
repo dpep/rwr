@@ -78,6 +78,51 @@ fn line_end(source: &[u8], at: usize) -> usize {
 /// Trailing: a comment after the element on its own line. Leading: whole-line
 /// comments directly above, with no blank line between. A comment sharing a
 /// line with another element has no unambiguous owner, so the caller refuses.
+/// The span a node occupies as a *unit*: itself, the comments written directly
+/// above it, and the newline that ends its last line.
+///
+/// What deletion needs. Removing only a node's own bytes leaves the comment
+/// that documented it stranded above a blank gap, which is not what anyone
+/// means by deleting a method.
+/// `None` when the node does not occupy whole lines of its own.
+///
+/// Deleting a sub-expression is not deletion, it is mutilation: removing
+/// `a.display_name` from `x = a.display_name` leaves `x = `, which then joins
+/// the line below into `x = y = 2` -- valid Ruby, wholly wrong, and exit 0.
+/// Refusing is the only answer, and it is the failure this whole design fears
+/// most.
+pub(crate) fn unit_range(source: &[u8], node: &Node<'_>) -> Option<(usize, usize)> {
+    let (node_start, node_end) = effective_range(node);
+    let before = &source[line_start(source, node_start)..node_start];
+    let after = &source[node_end..line_end(source, node_end)];
+    if !before.iter().all(u8::is_ascii_whitespace) || !after.iter().all(u8::is_ascii_whitespace) {
+        return None;
+    }
+
+    let unit = unit_for(source, node, 0);
+    // Take the newline too, or deletion leaves an empty line behind.
+    let mut end = if source.get(unit.end) == Some(&b'\n') {
+        unit.end + 1
+    } else {
+        unit.end
+    };
+
+    // A method separated from its neighbours by blank lines has a blank line on
+    // each side; removing it and neither leaves a double gap. Absorb one, so
+    // the survivors stay spaced exactly as they were.
+    let blank = |from: usize| {
+        let stop = line_end(source, from);
+        source
+            .get(from..stop)
+            .is_some_and(|line| line.iter().all(u8::is_ascii_whitespace))
+    };
+    let preceded_by_blank = unit.start > 0 && blank(line_start(source, unit.start - 1));
+    if preceded_by_blank && end < source.len() && blank(end) {
+        end = line_end(source, end) + 1;
+    }
+    Some((unit.start, end.min(source.len())))
+}
+
 fn unit_for(source: &[u8], element: &Node<'_>, floor: usize) -> Unit {
     let (start, end) = effective_range(element);
     let key = source[start..end].to_vec();

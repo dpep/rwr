@@ -702,6 +702,96 @@ fn a_rewrite_reaches_inside_erb() {
     );
 }
 
+/// Deletion takes the whole unit: the match, the comments above it, its line,
+/// and one of the blank lines that separated it from its neighbours.
+#[test]
+fn delete_removes_a_definition_and_its_comment() {
+    let dir = fixture(
+        "class Widget\n  def keep_me\n    1\n  end\n\n           # a comment on the doomed method\n  def remove_me\n    2\n  end\n\n           def also_keep\n    3\n  end\nend\n",
+    );
+    let out = rwr(&[
+        "rewrite",
+        "def remove_me; $B; end",
+        dir.path().to_str().unwrap(),
+        "-d",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    assert_eq!(
+        after,
+        "class Widget\n  def keep_me\n    1\n  end\n\n           def also_keep\n    3\n  end\nend\n",
+        "comment gone, spacing unchanged"
+    );
+}
+
+/// A doc block is part of the method, however many lines it runs to -- and the
+/// comment belonging to the *neighbour* is not.
+#[test]
+fn delete_takes_the_whole_doc_block() {
+    let dir = fixture(
+        "class Widget\n  # Keep this one.\n  def keep; 1; end\n\n           # Computes the legacy total.\n  #\n  # @return [Integer]\n           # @deprecated\n  def legacy_total(x)\n    x * 2\n  end\n\n           def after; 3; end\nend\n",
+    );
+    let out = rwr(&[
+        "rewrite",
+        "def legacy_total($A); $B; end",
+        dir.path().to_str().unwrap(),
+        "-d",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    assert_eq!(
+        after,
+        "class Widget\n  # Keep this one.\n  def keep; 1; end\n\n           def after; 3; end\nend\n"
+    );
+}
+
+/// `-d` is a name for the empty template; `-r ''` and `rewrite: ''` mean the
+/// same thing, because one mechanism is easier to trust than three.
+#[test]
+fn every_spelling_of_deletion_agrees() {
+    let expected = "class W\n  def a; 1; end\n\n  def b; 3; end\nend\n";
+    for args in [vec!["-d"], vec!["-r", ""]] {
+        let dir =
+            fixture("class W\n  def a; 1; end\n\n  def doomed; 2; end\n\n  def b; 3; end\nend\n");
+        let mut call = vec![
+            "rewrite",
+            "def doomed; $B; end",
+            dir.path().to_str().unwrap(),
+        ];
+        call.extend(args);
+        let out = rwr(&call);
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read"),
+            expected
+        );
+    }
+}
+
+/// Deleting a sub-expression is not deletion. `x = a.name` would become `x = `
+/// and swallow the line below into `x = y`, which still parses -- the clean,
+/// confident, wrong rewrite this design exists to prevent.
+#[test]
+fn delete_refuses_a_partial_match() {
+    let dir = fixture("def go\n  x = a.display_name\n  y = 2\nend\n");
+    let before = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+
+    let out = rwr(&[
+        "rewrite",
+        "$R.display_name",
+        dir.path().to_str().unwrap(),
+        "-d",
+    ]);
+    assert_eq!(out.status.code(), Some(5), "refused: {}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read"),
+        before,
+        "a refusal leaves the file alone"
+    );
+}
+
 /// No arguments is a usage error, not a silent no-op.
 #[test]
 fn bare_invocation_explains_itself() {

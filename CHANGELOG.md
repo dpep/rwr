@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**Deletion.** `rwr rewrite 'def legacy; $B; end' -d` removes a definition — along with the
+doc comment written above it, its line, and one of the blank lines that separated it, so the
+survivors keep their spacing. `-r ''` and `rewrite: ''` mean the same thing.
+
+A deletion whose match does not occupy whole lines of its own is **refused**: removing
+`a.name` from `x = a.name` would leave `x = `, which swallows the line below and still
+parses (D66).
+
 **ERB templates are parsed, matched and rewritten.** Their tags are stitched into one Ruby
 program — 95% of real templates parse that way — so a rename reaches inside a view and leaves
 every byte of HTML where it was. An edit spanning two tags is refused, since those bytes are
@@ -16,7 +24,8 @@ required to refer to the same thing:
 ```yaml
 match: $R.each { |$X| $B }
 where:
-  $B: { contains: '$X.$ASSOC.$FIELD' }
+  $B:
+    contains: $X.$ASSOC.$FIELD
 ```
 
 It ships `performance/possible-n-plus-one`, a lint that narrows discourse's 637 `each`/`map`
