@@ -1041,6 +1041,20 @@ fn cmd_apply(
         None => crate::ruby::detect(&scope_start(paths, common)),
     };
 
+    // Checked before the gate below, which would otherwise read an unparseable
+    // version as "too new" and hold the rule back with a misleading reason.
+    for r in &rules {
+        if let Some(text) = &r.ruby
+            && crate::ruby::Version::parse(text).is_none()
+        {
+            eprintln!(
+                "rwr: {}: `ruby: {text}` is not a version like 3.1",
+                r.id.as_deref().unwrap_or("rule")
+            );
+            return Exit::PatternError.into();
+        }
+    }
+
     let (rules, too_new): (Vec<rule::Rule>, Vec<rule::Rule>) =
         rules.into_iter().partition(|r| match &r.ruby {
             None => true,
@@ -1123,6 +1137,13 @@ fn cmd_apply(
                 };
                 if !single {
                     eprintln!("rwr: a pattern must be a single expression: {}", r.pattern);
+                    return Exit::PatternError.into();
+                }
+                // Everything checkable before a file is read, checked here --
+                // a rule that is wrong should say so once, not run clean and
+                // do the wrong amount of work on every file.
+                if let Err(e) = r.validate(&p) {
+                    eprintln!("rwr: {e}");
                     return Exit::PatternError.into();
                 }
                 prepareds.push(p);

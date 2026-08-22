@@ -812,7 +812,9 @@ fn a_pattern_yaml_truncated_refuses_loudly() {
         dir.path().to_str().unwrap(),
     ]);
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
-    assert!(stderr(&out).contains("quote it"), "{}", stderr(&out));
+    // The cause, not just the symptom: serde reports it as an unknown field,
+    // which describes what YAML did without saying why.
+    assert!(stderr(&out).contains("Quote it"), "{}", stderr(&out));
 
     // Quoted, the same rule works -- and flow style needs no quotes at all
     // when the pattern holds none of YAML's structural characters.

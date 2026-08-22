@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Rule {
     /// What to call this rule when reporting which one fired.
     ///
@@ -61,6 +62,7 @@ pub(crate) struct Rule {
 
 /// What a capture must satisfy beyond matching structurally.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Constraint {
     /// The capture must be one of these identifiers.
     ///
@@ -184,6 +186,7 @@ impl Constraint {
 
 /// Constraints on the match as a whole rather than on one capture.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Scope {
     /// The match must sit lexically inside this class or module.
     ///
@@ -234,7 +237,20 @@ impl std::fmt::Display for RuleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RuleError::Unreadable { path, message } => write!(f, "cannot read {path}: {message}"),
-            RuleError::Malformed { path, message } => write!(f, "{path} is not a rule: {message}"),
+            RuleError::Malformed { path, message } => {
+                write!(f, "{path} is not a rule: {message}")?;
+                // A pattern cut in half by a YAML flow mapping arrives as an
+                // extra key, and serde's report of it -- "unknown field `$B)`"
+                // -- describes the symptom without naming the cause.
+                if message.contains("unknown field") && message.contains('$') {
+                    write!(
+                        f,
+                        "\n  A pattern inside `{{ ... }}` cannot hold a comma, brace or \
+                         bracket: YAML claims those. Quote it, or use indented keys."
+                    )?;
+                }
+                Ok(())
+            }
             RuleError::EmptyPack { path } => {
                 write!(f, "no .yml or .yaml rule files under {path}")
             }
@@ -251,6 +267,12 @@ impl std::fmt::Display for RuleError {
     }
 }
 
+/// Every field above is spelled out and unknown ones are rejected, because the
+/// alternative is silent and dangerous: `wher:` for `where:` produced a rule
+/// that ran happily *without its constraint*, turning a narrowed rename into an
+/// unnarrowed one. serde ignores unknown fields by default, which is the wrong
+/// default for a file that decides what gets rewritten.
+///
 /// A rename written in Ruby's own method notation.
 ///
 /// `Account#display_name` and `Account.display_name` are how Ruby developers
@@ -363,6 +385,68 @@ impl Rule {
                 .values()
                 .find_map(|c| c.receiver_type.clone())
         })
+    }
+
+    /// Everything about a rule that can only be checked once its pattern is
+    /// prepared, checked before a single file is read.
+    ///
+    /// Each of these used to degrade silently, and silently in the same
+    /// direction: a rule that ran clean and did the wrong amount of work. A
+    /// constraint on a capture the pattern never binds matched *nothing*; a
+    /// metavariable in the template that the pattern never binds rendered as
+    /// *empty*, turning `log($A, $B)` into `log(a, )`. Neither said a word.
+    pub(crate) fn validate(
+        &self,
+        prepared: &crate::pattern::prepare::Prepared,
+    ) -> Result<(), RuleError> {
+        let bound: Vec<&str> = prepared
+            .bindings
+            .values()
+            .filter_map(|b| b.name.as_deref())
+            .collect();
+        let complain = |what: String| RuleError::Malformed {
+            path: self.id.clone().unwrap_or_else(|| "rule".to_string()),
+            message: what,
+        };
+        let known = |name: &str| bound.iter().any(|b| *b == name.trim_start_matches('$'));
+
+        for (key, constraint) in &self.constraints {
+            if !known(key) {
+                return Err(complain(format!(
+                    "`where:` constrains {key}, which `match:` never captures"
+                )));
+            }
+            if let Some(other) = &constraint.same_name_as
+                && !known(other)
+            {
+                return Err(complain(format!(
+                    "`same_name_as: {other}` names something `match:` never captures"
+                )));
+            }
+        }
+
+        // A metavariable the template introduces has nothing to be replaced
+        // with, and renders as empty rather than announcing itself.
+        if let Some(template) = &self.rewrite {
+            for var in crate::pattern::metavar::scan(template) {
+                if let Some(name) = &var.name
+                    && !known(name)
+                {
+                    return Err(complain(format!(
+                        "`rewrite:` uses ${name}, which `match:` never captures"
+                    )));
+                }
+            }
+        }
+
+        if let Some(text) = &self.ruby
+            && crate::ruby::Version::parse(text).is_none()
+        {
+            return Err(complain(format!(
+                "`ruby: {text}` is not a version like 3.1"
+            )));
+        }
+        Ok(())
     }
 
     /// Sub-patterns this rule's `contains:` constraints need, prepared once.
