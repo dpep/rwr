@@ -392,6 +392,42 @@ pub(crate) fn find(
 
 #[cfg(test)]
 mod tests {
+
+    /// Residue survives the prefilter even though the engine wires in no
+    /// anchors.
+    ///
+    /// `Filter::may_contribute` checks required literals conjunctively OR the
+    /// anchors, because residue is reported from files a rule does *not* match.
+    /// `Engine::new` passes `&[]` for anchors, which reads like a silent loss of
+    /// exactly that report -- and is not: `anchors` only returns a name when the
+    /// pattern is that name applied to metavariables, so the anchor is the
+    /// pattern's only literal identifier and the required check already covers
+    /// it.
+    ///
+    /// Pinned because the invariant holds by coincidence rather than by
+    /// construction. The day `anchors` returns something `required` does not
+    /// extract, the engine silently stops reporting the blind spots it exists
+    /// for, and this is the test that says so.
+    #[test]
+    fn an_anchor_is_always_one_of_the_required_literals() {
+        for pattern in ["$R.display_name", "display_name", "$R.display_name($A)"] {
+            let prepared = crate::pattern::prepare::prepare(pattern).expect("prepares");
+            let parsed = ruby_prism::parse(prepared.source.as_bytes());
+            let root = matcher::pattern_root(&parsed.node()).expect("one expression");
+            let found = anchors(&root, &prepared);
+            assert!(!found.is_empty(), "{pattern} should anchor");
+
+            let required = crate::pattern::prefilter::required(pattern);
+            for a in &found {
+                let a = String::from_utf8_lossy(a).into_owned();
+                assert!(
+                    required.contains(&a),
+                    "{pattern}: anchor {a:?} missing from required {required:?} -- \
+                     Engine::new must start passing anchors to Filter::new"
+                );
+            }
+        }
+    }
     use super::*;
     use crate::pattern::{matcher, prepare};
 
