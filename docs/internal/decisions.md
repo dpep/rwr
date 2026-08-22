@@ -1800,3 +1800,25 @@ the report under every unparseable file in a repository -- which is the same lie
 direction.
 
 *Reverses if:* nothing plausible. The count is small by construction and the field is additive.
+
+## D78 - An active refinement refuses the file
+**Decided.**
+
+`using M` makes a refinement of the target class intercept exactly the call a rename would
+rewrite. Rewriting it routes around the refinement: the class gains the new name, the refinement
+keeps defining the old one, and the call silently stops being refined. No exception, nothing
+that fails to parse, and `verify` passes -- the same "working code, changed behaviour" shape as
+a rename colliding with a local, and the only unrecoverable outcome rwr has.
+
+**Refuse the file, do not downgrade the rewrite to a report.** A refusal is loud, leaves every
+byte alone, and costs a round trip; the alternative silently produces a file that runs and is
+wrong. This is principle 1 applied where it matters most.
+
+**Scoped to activation, not to existence.** A refinement nobody `using`s is inert, so a call
+really does dispatch to the class and renaming it is correct -- verified both ways. Refusing on
+the mere presence of `refine C do` anywhere would decline work that is perfectly safe, which is
+the cost of getting the scope wrong in the other direction.
+
+*Reverses if:* per-file granularity proves too coarse. `using` inside a class or module body
+scopes to that body, so a file could in principle be part-refined; rwr refuses the whole file
+today. Narrowing that is a precision improvement, not a correctness one.

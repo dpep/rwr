@@ -1793,3 +1793,61 @@ fn a_ruby_file_that_does_not_parse_is_reported() {
         "{doc}"
     );
 }
+
+/// A rename refuses a file where a refinement of the target is active.
+///
+/// The wrong rewrite this prevents produces working code with changed
+/// behaviour, which is the only unrecoverable outcome rwr has. Renaming
+/// `Account#display_name` in a file that says `using AccountRefinements`
+/// rewrites the call to `full_name`; afterwards `Account#full_name` exists, the
+/// refinement still defines `display_name`, and the call quietly stops going
+/// through the refinement. No error, no failing parse, no failing spec -- the
+/// refined behaviour simply stops happening.
+///
+/// The refusal is scoped to *activation*, not to the refinement's existence: a
+/// refinement nobody `using`s is inert, so a call really does reach the class
+/// and renaming it is correct.
+#[test]
+fn an_active_refinement_refuses_rather_than_routing_around_itself() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    let body = "class Account\n  def display_name\n    @n\n  end\nend\n\n\
+                module AccountRefinements\n  refine Account do\n    def display_name\n\
+                \x20     super.upcase\n    end\n  end\nend\n\n";
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+
+    let run = |file: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["rewrite", "rename.yml", file])
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    // Activated: refuse, and leave every byte alone.
+    let active = format!("{body}using AccountRefinements\n\nputs Account.new.display_name\n");
+    std::fs::write(path.join("active.rb"), &active).expect("write");
+    let out = run("active.rb");
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert!(stderr(&out).contains("refines Account"), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(path.join("active.rb")).expect("read"),
+        active,
+        "a refused file keeps its bytes"
+    );
+
+    // Defined but never activated: the refinement is inert, so the call reaches
+    // the class and the rename is correct.
+    let inert = format!("{body}puts Account.new.display_name\n");
+    std::fs::write(path.join("inert.rb"), &inert).expect("write");
+    let out = run("inert.rb");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = std::fs::read_to_string(path.join("inert.rb")).expect("read");
+    assert!(after.contains("Account.new.full_name"), "{after}");
+    // And the refinement's own definition is still reported, not rewritten.
+    assert!(after.contains("    def display_name\n"), "{after}");
+}

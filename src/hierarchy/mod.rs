@@ -27,10 +27,16 @@ pub(crate) struct Hierarchy {
     /// methods in concerns, so a report that only knows `class X < Y` is silent
     /// about most of the code the class actually runs.
     mixins: HashMap<String, Vec<String>>,
+    /// Modules that *refine* each class, kept apart from the rest.
+    ///
+    /// A refinement is only in force in a file that says `using`, so it is not
+    /// interchangeable with an `include`: a rename must not rewrite a call the
+    /// refinement is intercepting, or the call quietly stops going through it.
+    refines: HashMap<String, Vec<String>>,
 }
 
 /// The name a constant-ish node denotes, ignoring how it was reached.
-fn constant_name(node: &Node<'_>) -> Option<String> {
+pub(crate) fn constant_name(node: &Node<'_>) -> Option<String> {
     let bytes = match node {
         Node::ConstantReadNode { .. } => node.as_constant_read_node()?.name().as_slice().to_vec(),
         Node::ConstantPathNode { .. } => node.as_constant_path_node()?.name()?.as_slice().to_vec(),
@@ -84,7 +90,12 @@ fn mixin_host(node: &Node<'_>, enclosing: Option<&String>) -> Option<String> {
 }
 
 /// Collect `class X < Y` pairs and the modules each class mixes in.
-fn links(root: &Node<'_>, out: &mut Vec<(String, String)>, mixins: &mut Vec<(String, String)>) {
+fn links(
+    root: &Node<'_>,
+    out: &mut Vec<(String, String)>,
+    mixins: &mut Vec<(String, String)>,
+    refined: &mut Vec<(String, String)>,
+) {
     // Carries the enclosing class, which a flat stack loses -- and without it an
     // `include` cannot be attributed to anything.
     let mut stack = vec![(generated::dup(root), None::<String>)];
@@ -121,6 +132,7 @@ fn links(root: &Node<'_>, out: &mut Vec<(String, String)>, mixins: &mut Vec<(Str
                 // The refinement's body belongs to the enclosing module, so that
                 // is what contributes to the host.
                 if let Some(module) = &enclosing {
+                    refined.push((host.clone(), module.clone()));
                     mixins.push((host, module.clone()));
                 }
             } else {
@@ -181,6 +193,7 @@ impl Hierarchy {
         let mut known: HashSet<String> = roots.iter().cloned().collect();
         let mut superclass: HashMap<String, String> = HashMap::new();
         let mut mixins: HashMap<String, Vec<String>> = HashMap::new();
+        let mut refines: HashMap<String, Vec<String>> = HashMap::new();
         let mut done = vec![false; candidates.len()];
         let mut parsed_total = 0usize;
 
@@ -190,7 +203,12 @@ impl Hierarchy {
                 .map(|n| memchr::memmem::Finder::new(n.as_bytes()).into_owned())
                 .collect();
 
-            type Round = (usize, Vec<(String, String)>, Vec<(String, String)>);
+            type Round = (
+                usize,
+                Vec<(String, String)>,
+                Vec<(String, String)>,
+                Vec<(String, String)>,
+            );
             let round: Vec<Round> = candidates
                 .par_iter()
                 .enumerate()
@@ -206,15 +224,15 @@ impl Hierarchy {
                     if parsed.errors().count() > 0 {
                         return None;
                     }
-                    let (mut found, mut mixed) = (Vec::new(), Vec::new());
-                    links(&parsed.node(), &mut found, &mut mixed);
-                    Some((i, found, mixed))
+                    let (mut found, mut mixed, mut refined) = (Vec::new(), Vec::new(), Vec::new());
+                    links(&parsed.node(), &mut found, &mut mixed, &mut refined);
+                    Some((i, found, mixed, refined))
                 })
                 .collect();
 
             parsed_total += round.len();
             let mut grew = false;
-            for (i, found, mixed) in round {
+            for (i, found, mixed, refined) in round {
                 done[i] = true;
                 for (child, parent) in found {
                     if known.contains(&parent) && known.insert(child.clone()) {
@@ -225,13 +243,23 @@ impl Hierarchy {
                 for (class, module) in mixed {
                     mixins.entry(class).or_default().push(module);
                 }
+                for (class, module) in refined {
+                    refines.entry(class).or_default().push(module);
+                }
             }
             if !grew {
                 break;
             }
         }
 
-        (Hierarchy { superclass, mixins }, parsed_total)
+        (
+            Hierarchy {
+                superclass,
+                mixins,
+                refines,
+            },
+            parsed_total,
+        )
     }
 
     /// Whether `module` is mixed into `class` or into any of its descendants.
@@ -245,6 +273,15 @@ impl Hierarchy {
             modules.iter().any(|m| m == module)
                 && (host == class || self.descends_from(host, class))
         })
+    }
+
+    /// The modules that refine `class`.
+    ///
+    /// A refinement only applies in a file that says `using`, so a call site in
+    /// such a file may be dispatching to the refinement rather than the class --
+    /// and renaming it there silently routes around the refinement.
+    pub(crate) fn refined_by(&self, class: &str) -> &[String] {
+        self.refines.get(class).map_or(&[], Vec::as_slice)
     }
 
     /// Whether `class` is `ancestor` or descends from it.
@@ -274,14 +311,20 @@ impl Hierarchy {
     pub(crate) fn from_source(source: &str) -> Self {
         let parsed = ruby_prism::parse(source.as_bytes());
         let (mut found, mut mixed) = (Vec::new(), Vec::new());
-        links(&parsed.node(), &mut found, &mut mixed);
+        let mut refined = Vec::new();
+        links(&parsed.node(), &mut found, &mut mixed, &mut refined);
         let mut mixins: HashMap<String, Vec<String>> = HashMap::new();
         for (class, module) in mixed {
             mixins.entry(class).or_default().push(module);
         }
+        let mut refines: HashMap<String, Vec<String>> = HashMap::new();
+        for (class, module) in refined {
+            refines.entry(class).or_default().push(module);
+        }
         Hierarchy {
             superclass: found.into_iter().collect(),
             mixins,
+            refines,
         }
     }
 }

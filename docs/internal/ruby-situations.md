@@ -269,7 +269,7 @@ qualified name.** Ubiquitous in any namespaced app or engine.
 it; and `Struct.new(:display_name)` *defines* the reader. **Report**, and for
 `Struct` report as a probable definition site. Rare / occasional.
 
-**E5. `include` / `extend` / `prepend`.** *account, silently.* `prepend` puts the
+**E5. `include` / `extend` / `prepend`.** ✅ reported. *account, silently.* `prepend` puts the
 module's method *ahead* of the class's. Rename only the class's own definition and
 the prepended one no longer overrides anything: the module's behaviour stops
 happening, `super` in it raises, callers skip it. Everything parses; most suites
@@ -278,7 +278,7 @@ participates in the override, or refuse** — a partially-renamed override chain
 a behaviour change, not a stale reference. Occasional for `prepend`, common for
 the general shape.
 
-**E6. `ActiveSupport::Concern` — `included do` and `class_methods do`.** *match.*
+**E6. `ActiveSupport::Concern` — `included do` and `class_methods do`.** ✅ reported. *match.*
 `included do` executes in the including class's singleton context; defs inside
 `class_methods do` are class methods, with the only signal being the enclosing
 block's method name. **Rewrite the instance def; skip-and-report the
@@ -290,7 +290,7 @@ instance method and callable as a module method; both `#` and `.` are arguably
 correct. **Rewrite, and note the dual nature** rather than picking one silently.
 Occasional.
 
-**E8. Refinements.** *account.* The method exists only in files with a matching
+**E8. Refinements.** ✅ reported, and a file that *activates* one with `using` is now refused rather than rewritten. *account.* The method exists only in files with a matching
 `using`. **Report; do not rewrite** as part of a class-scoped rename. Rare — but
 wrong handling is a wrong rewrite, not a miss.
 
@@ -350,7 +350,7 @@ places and rwr sees one. Ubiquitous.
 macro spellings; a rule matching one misses every Rails 7 model. **Report; refuse
 to rewrite.** Common.
 
-**F8. `alias_attribute`, `class_attribute`, `store_accessor`, `serialize`.**
+**F8. `alias_attribute`, `class_attribute`, `store_accessor`, `serialize`.** ✅ recognised as definers.
 *account.* `class_attribute` defines five methods from one symbol;
 `store_accessor` is backed by a JSON column key, so renaming means migrating
 stored data. **Report**, and flag `store_accessor` as data-backed. Occasional
@@ -415,7 +415,7 @@ factory; state that fixture YAML was not scanned.** Common.
 
 ## H. Legacy-codebase realities
 
-**H1. Files that do not parse.** *invisible by construction.* Generator templates
+**H1. Files that do not parse.** ✅ named, for files that could have contributed. *invisible by construction.* Generator templates
 under `lib/templates/` with `.rb` extensions, `.rb.tt`, syntax from a newer Ruby,
 genuinely broken files. A file that fails to parse contributes zero matches and
 zero residue, and looks exactly like a file with nothing in it. **Count and
@@ -523,6 +523,22 @@ a self-assignment that quietly evaluates to `"unknown"`. It parses, it runs,
 The fix is a refusal, not a smarter rewrite: before rewriting a call site, check
 whether the new name is already bound as a local, parameter or block parameter in
 that scope, and refuse the whole rename if so.
+
+**Still open, from the metaprogramming audit:**
+
+- **Interpolated dynamic dispatch gets no blind-spot notice.** `send("display_#{x}")` inside the
+  target class is invisible, which the design accepts — but the design also says rwr should
+  *state* that completeness is not claimed. Needs a new `Context` variant, and the trigger set is
+  a judgement call: keying on `send`/`try`/`define_method` with a non-literal argument is
+  defensible; prefix-matching the anchor against an interpolation is not.
+- **A module included into a class rwr never parses.** The worklist parses files naming an
+  already-known class, so `Account.prepend(A)` in one file and `module A; include B` in another
+  works, but a third hop to `module B` does not — B's file names no known class. Fixing it means
+  seeding the fixpoint with discovered *module* names, which changes the shape of the worklist.
+- **`validates`, callbacks and `scope` over-report in unrelated classes.** Deliberate: they
+  *refer* rather than define, and a serializer's `validates :display_name` is a genuine two-hop
+  reach. Collapsing them into the definer list would conflate two mechanisms that happen to
+  agree in the common case.
 
 ## The ten to test first
 

@@ -92,6 +92,30 @@ pub(crate) struct Engine {
     /// A rule set that names no class cannot tell `Account#display_name` from
     /// `Company#display_name`, so its matches are tallied by resolved receiver.
     unnarrowed: bool,
+    /// The class the rule set is about, when it names one.
+    anchor: Option<String>,
+}
+
+/// Whether a source activates any of `modules` with `using`.
+///
+/// A refinement is inert until a file says so, which is exactly what makes it
+/// different from an `include`: the same call means different things in two
+/// files, and only this call tells them apart.
+fn activates(parsed: &ruby_prism::ParseResult<'_>, modules: &[String]) -> Option<String> {
+    let mut stack = vec![crate::pattern::generated::dup(&parsed.node())];
+    while let Some(node) = stack.pop() {
+        if let Some(call) = node.as_call_node()
+            && call.name().as_slice() == b"using"
+            && let Some(arguments) = call.arguments()
+            && let Some(named) = arguments.arguments().iter().next()
+            && let Some(name) = crate::hierarchy::constant_name(&named)
+            && modules.contains(&name)
+        {
+            return Some(name);
+        }
+        stack.extend(crate::pattern::generated::children(&node));
+    }
+    None
 }
 
 /// What the rules need to know about the wider program.
@@ -193,7 +217,9 @@ impl Engine {
             .map(|r| prefilter::Filter::new(&prefilter::required(&r.pattern), &[]))
             .collect();
 
+        let anchor = rules.iter().find_map(rule::Rule::class_anchor);
         Ok(Engine {
+            anchor,
             rules,
             prepareds,
             contained,
@@ -335,6 +361,23 @@ impl Engine {
                 if parsed.errors().count() > 0 {
                     return ScanOutcome::Unparseable;
                 }
+                // A refinement active in this file intercepts the very call
+                // the rename would rewrite. Rewriting it routes around the
+                // refinement -- the refined behaviour silently stops happening,
+                // with no error and nothing that fails to parse. Refuse the
+                // file: a loud refusal is recoverable, and this rewrite is not.
+                if let Some(anchor) = &self.anchor {
+                    let refining = ctx.hierarchy.refined_by(anchor);
+                    if !refining.is_empty()
+                        && let Some(module) = activates(&parsed, refining)
+                    {
+                        return ScanOutcome::Refused(format!(
+                            "`using {module}` refines {anchor} here, so a call may be \
+                             dispatching to the refinement rather than the class"
+                        ));
+                    }
+                }
+
                 let (here, bad) = crate::suppress::directives(&parsed, &current);
                 directives = here;
                 malformed = bad

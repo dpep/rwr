@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**A rename refuses a file where a refinement of the target is active.** Renaming
+`Account#display_name` in a file that says `using AccountRefinements` rewrote the call site;
+afterwards `Account#full_name` existed, the refinement still defined `display_name`, and the
+call quietly stopped going through the refinement — no error, no failing parse, the refined
+behaviour just stopped happening. The refusal is scoped to `using`, not to the refinement's
+existence: one nobody activates is inert, so a call really does reach the class and renaming it
+is correct.
+
 **Residue reports overrides written with `include`, `prepend`, `extend` and `refine`.** A method
 redefined in a module — a concern, a patch, a refinement — was dropped from the account
 entirely, because the hierarchy recorded `class X < Y` links and nothing else, and the report
