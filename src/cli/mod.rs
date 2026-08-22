@@ -770,6 +770,7 @@ fn report_residue(residues: &[Residue]) {
         ("call", residue::Context::Call),
         ("definition", residue::Context::Definition),
         ("comment", residue::Context::Comment),
+        ("dynamic", residue::Context::Dynamic),
     ]
     .iter()
     .filter_map(|(label, context)| match count(*context) {
@@ -1087,7 +1088,7 @@ struct Changed {
 /// schema number is what it can branch on without a version comparison.
 ///
 /// 1 was a bare array of changed files, with no account of residue at all.
-const REPORT_SCHEMA: u32 = 4;
+const REPORT_SCHEMA: u32 = 5;
 
 /// Everything a `check` or `rewrite` run has to say, for machine consumers.
 ///

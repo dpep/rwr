@@ -24,6 +24,6 @@ class Presenter
   end
 
   def dynamic
-    @account.send(:display_name)
+    @account.send(:full_name)
   end
 end

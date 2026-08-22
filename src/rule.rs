@@ -474,8 +474,45 @@ impl MethodRename {
             ..Default::default()
         };
 
+        // A literal name handed to a dispatcher, on a receiver that resolves.
+        //
+        // `account.send(:display_name)` is as unambiguous as `account.display_name`
+        // once the receiver is known -- the same narrowing decides both -- so
+        // reporting it and leaving the user to edit it by hand was declining work
+        // rwr had already proved it could do safely. The receiver constraint is
+        // what makes it safe: `unknown.send(:display_name)` does not resolve and
+        // is reported, exactly as the plain call would be.
+        let dispatchers = || {
+            let mut c = receiver();
+            c.insert(
+                "$SEND".to_string(),
+                Constraint {
+                    name: Some(
+                        ["send", "public_send", "__send__", "try", "try!"]
+                            .iter()
+                            .map(|s| (*s).to_string())
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+            );
+            c
+        };
+
         let mut rules = definitions;
         rules.push(calls);
+        rules.push(Rule {
+            pattern: format!("$R.$SEND(:{name})"),
+            rewrite: Some(format!("$R.$SEND(:{new})")),
+            constraints: dispatchers(),
+            ..Default::default()
+        });
+        rules.push(Rule {
+            pattern: format!("$R.$SEND(\"{name}\")"),
+            rewrite: Some(format!("$R.$SEND(\"{new}\")")),
+            constraints: dispatchers(),
+            ..Default::default()
+        });
 
         // Implicit self, the largest receiver bucket -- reachable only through
         // lexical scope, so it needs a class to be anchored to. The singleton
@@ -853,16 +890,37 @@ mod tests {
             rename: "full_name".into(),
         };
         let rules = rename.expand();
-        assert_eq!(
-            rules.len(),
-            3,
-            "definition, explicit receiver, implicit self"
-        );
         assert_eq!(rules[0].pattern, "def display_name(*$P); $B; end");
         assert_eq!(rules[0].scope.inside.as_deref(), Some("Account"));
         assert_eq!(rules[1].pattern, "$R.display_name");
         assert_eq!(rules[1].constraints["$R"].kind, Some(Kind::Instance));
-        assert_eq!(rules[2].pattern, "display_name");
+
+        // A literal name handed to a dispatcher is the same call in another
+        // spelling, and the same receiver constraint decides it.
+        let patterns: Vec<&str> = rules.iter().map(|r| r.pattern.as_str()).collect();
+        assert!(
+            patterns.contains(&"$R.$SEND(:display_name)"),
+            "{patterns:?}"
+        );
+        assert!(
+            patterns.contains(&"$R.$SEND(\"display_name\")"),
+            "{patterns:?}"
+        );
+        for rule in rules.iter().filter(|r| r.pattern.contains("$SEND")) {
+            assert!(
+                rule.constraints["$SEND"]
+                    .name
+                    .as_ref()
+                    .is_some_and(|n| n.iter().any(|m| m == "public_send")),
+                "a dispatcher rule must say which dispatchers it means"
+            );
+            assert_eq!(rule.constraints["$R"].kind, Some(Kind::Instance));
+        }
+
+        // Implicit self is last, and reaches only inside the class.
+        let implicit = rules.last().expect("an implicit-self rule");
+        assert_eq!(implicit.pattern, "display_name");
+        assert_eq!(implicit.scope.inside.as_deref(), Some("Account"));
     }
 
     /// The dot form names a class method, and its definition is on the

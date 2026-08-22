@@ -39,6 +39,15 @@ pub(crate) enum Context {
     /// that leaves `# returns the display_name` behind has left something
     /// stale, and saying so is the whole job of this report.
     Comment,
+    /// A dispatch whose method name is *computed* -- `send("display_#{x}")`,
+    /// `define_method("formatted_#{attr}")`.
+    ///
+    /// Not an occurrence of the name: the name is not there, and rwr cannot say
+    /// whether this reaches the renamed method. Reported anyway, because the
+    /// alternative is a report that looks complete while a class dispatches on
+    /// names nobody can enumerate. The account of blind spots is the product,
+    /// and this is a blind spot with a location.
+    Dynamic,
     /// Found by text search in a file rwr cannot parse -- a template, where
     /// Ruby is embedded rather than written.
     ///
@@ -188,9 +197,16 @@ pub(crate) fn scoped_to(
                 // Except where the call *defines* a method rather than
                 // referring to one. `attr_reader :name` in an unrelated class
                 // creates that class's own `name`; it does not reach this one.
-                || o.via
-                    .as_deref()
-                    .is_some_and(|call| !DEFINERS.contains(&call.as_bytes()))
+                // A dispatcher's own name is not a reason to keep it: `send`
+                // appears in every class, and a computed name in an unrelated
+                // one says nothing about this rename. Only the scope rules above
+                // keep a `Dynamic`, which puts it in the target class, a
+                // descendant, or a module mixed into it -- where it is a caveat
+                // worth reading. Unscoped it was 12% of a real report.
+                || (o.context != Context::Dynamic
+                    && o.via
+                        .as_deref()
+                        .is_some_and(|call| !DEFINERS.contains(&call.as_bytes())))
         })
         .collect()
 }
@@ -215,6 +231,35 @@ pub(crate) fn defines_a_method(pattern: &Node<'_>, prepared: &Prepared) -> bool 
     // `attr_reader :new` moves the name just as `def` does.
     DEFINERS.contains(&call.name().as_slice())
         && matcher::placeholder_name(pattern, prepared).is_none()
+}
+
+/// Calls that dispatch on a method name given as a value.
+///
+/// A literal argument is already handled: it either names the anchor and is
+/// reported (or rewritten), or it names some other method and is irrelevant. It
+/// is the *non*-literal argument that nothing can see.
+const DISPATCHERS: &[&[u8]] = &[
+    b"send",
+    b"public_send",
+    b"__send__",
+    b"try",
+    b"try!",
+    b"method",
+    b"define_method",
+    b"instance_method",
+    b"method_defined?",
+    b"respond_to?",
+];
+
+/// Whether a node is a literal the anchor scan can already see.
+fn is_literal_name(node: &Node<'_>) -> bool {
+    match node {
+        Node::SymbolNode { .. } => true,
+        // An interpolated string is not a literal: `"display_#{x}"` parses as an
+        // InterpolatedStringNode, which is exactly the case worth reporting.
+        Node::StringNode { .. } => true,
+        _ => false,
+    }
 }
 
 /// The identifier a rule is anchored on, if it is anchored on one at all.
@@ -350,6 +395,28 @@ pub(crate) fn find(
     while let Some((node, here, via)) = stack.pop() {
         let loc = node.location();
         let (start, end) = (loc.start_offset(), loc.end_offset());
+
+        // A dispatcher handed a name it computes. Emitted regardless of the
+        // anchors, because there is no anchor to match -- the point is that
+        // *something* here dispatches on a name rwr cannot enumerate, and a
+        // report that stays silent about it claims a completeness it does not
+        // have.
+        if let Some(call) = node.as_call_node()
+            && DISPATCHERS.contains(&call.name().as_slice())
+            && let Some(arguments) = call.arguments()
+            && let Some(first) = arguments.arguments().iter().next()
+            && !is_literal_name(&first)
+        {
+            let at = first.location();
+            out.push(Occurrence {
+                context: Context::Dynamic,
+                byte_start: at.start_offset(),
+                byte_end: at.end_offset(),
+                scope: here.clone(),
+                implicit: false,
+                via: Some(String::from_utf8_lossy(call.name().as_slice()).into_owned()),
+            });
+        }
 
         let mut implicit_self = false;
         let context = match &node {

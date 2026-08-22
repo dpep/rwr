@@ -4,9 +4,18 @@ source: derived from measurement (a) - the differentiator under load
 notes: >
   The entry that tests the *claim*, not the mechanism. Ruby dispatches through
   literal symbols, so a rename that rewrites every syntactic call still leaves
-  `delegate`, `attr_reader` and a `send` behind. rwr rewrites what it can prove
-  and *reports the rest* -- and this fixture is deliberately built so the
-  reported residue is the difference between working code and a NoMethodError.
+  `delegate` and `attr_reader` behind. rwr rewrites what it can prove and
+  *reports the rest* -- and this fixture is deliberately built so the reported
+  residue is the difference between working code and a NoMethodError.
+
+  The `send` here used to be part of that residue, and is now rewritten: the
+  receiver is an ivar assigned from a constructor, so `@account.send(:x)` is as
+  provable as `@account.x`, and the same narrowing decides both. Declining it was
+  a limitation rather than a judgement -- and this file had recorded the
+  limitation as the expected output, which is how a fixture written after the
+  behaviour goes stale. What remains residue here is what rwr genuinely cannot
+  prove: a `delegate` naming a method on another class, and an `attr_reader`
+  that defines rather than calls.
 
   Scored on the rewrite; the residue report is asserted by
   `cli_e2e::a_rename_reports_what_it_could_not_account_for`.

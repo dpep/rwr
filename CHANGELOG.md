@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**A rename rewrites `send` when the name is literal, and notices it when it is not.** Two halves
+of one shape. `account.send(:display_name)` is as provable as `account.display_name` once the
+receiver resolves — the same narrowing decides both — so reporting it was declining work rwr had
+already shown it could do safely. `send`, `public_send`, `__send__`, `try` and `try!` are covered,
+with symbol or string. A receiver that does not resolve is still reported, never rewritten.
+
+`send("display_#{attr}")` is genuinely invisible, and a report that says nothing about it looks
+complete while a class dispatches on names nobody can enumerate. Those sites are now reported as
+a new `dynamic` residue context, scoped to the class the rule is about — unscoped they were 12%
+of a real report on discourse, scoped they are three entries. Schema is now **5**.
+
 **A rename reaches an override whose parameter list has drifted.** `def display_name(format =
 :long)` overriding a zero-arity parent is the ordinary shape of legacy inheritance, and no
 pattern could express it — a definition pattern with no parameter list matched only a definition

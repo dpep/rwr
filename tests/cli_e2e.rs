@@ -840,8 +840,9 @@ fn structured_output_names_its_own_shape() {
         assert!(doc.is_object(), "a document, not a list of one: {text}");
         // One version across the CLI contract, not one per command: field
         // names are shared, so a consumer branches on a single number. 3 added
-        // `rejections`; 4 added `unparsed`.
-        assert_eq!(doc["schema"], 4, "{text}");
+        // `rejections`; 4 added `unparsed`; 5 added the `dynamic` residue
+        // context.
+        assert_eq!(doc["schema"], 5, "{text}");
         assert_eq!(doc["rwr_version"], env!("CARGO_PKG_VERSION"), "{text}");
     }
 }
@@ -2059,4 +2060,75 @@ fn inside_names_one_class_by_its_qualified_name() {
     let after = rewrite_with("Account::Row", "c.rb");
     assert!(after.contains("helped(2)"), "{after}");
     assert!(after.contains("helper(1)"), "{after}");
+}
+
+/// `send` with a literal name is rewritten; with a computed one it is noticed.
+///
+/// Two halves of one shape. `account.send(:display_name)` is as provable as
+/// `account.display_name` once the receiver resolves -- the same narrowing
+/// decides both -- so reporting it was declining work rwr had already shown it
+/// could do safely. `send("display_#{x}")` is genuinely invisible, and saying
+/// nothing about it lets a report look complete while a class dispatches on
+/// names nobody can enumerate.
+#[test]
+fn send_is_rewritten_when_literal_and_noticed_when_not() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+    let source = "class Account\n  def display_name\n    @n\n  end\n\n  \
+        def dispatch(attr)\n    send(\"display_#{attr}\")\n  end\nend\n\n\
+        a = Account.new\na.send(:display_name)\na.public_send(:display_name)\n\
+        a.try(:display_name)\na.send(\"display_name\")\nunknown.send(:display_name)\n";
+    std::fs::write(path.join("app.rb"), source).expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "rename.yml", "app.rb", "-j"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+
+    // The computed name is noticed, scoped to the class that dispatches.
+    let dynamic: Vec<&serde_json::Value> = doc["residue"]
+        .as_array()
+        .expect("residue")
+        .iter()
+        .filter(|r| r["context"] == "dynamic")
+        .collect();
+    assert_eq!(dynamic.len(), 1, "{doc}");
+
+    // A receiver that does not resolve is still reported, not rewritten.
+    assert!(
+        doc["residue"]
+            .as_array()
+            .expect("residue")
+            .iter()
+            .any(|r| r["context"] == "symbol"
+                && r["text"].as_str().is_some_and(|t| t.contains("unknown"))),
+        "{doc}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "rename.yml", "app.rb"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = std::fs::read_to_string(path.join("app.rb")).expect("read");
+    for spelling in [
+        "a.send(:full_name)",
+        "a.public_send(:full_name)",
+        "a.try(:full_name)",
+        "a.send(\"full_name\")",
+    ] {
+        assert!(after.contains(spelling), "{spelling} missing from: {after}");
+    }
+    assert!(
+        after.contains("unknown.send(:display_name)"),
+        "an unresolved receiver keeps its bytes: {after}"
+    );
 }

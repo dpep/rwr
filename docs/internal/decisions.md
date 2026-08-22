@@ -1967,3 +1967,38 @@ percent -- and it closed the last recall gap on the testbed. A gap worth one per
 
 *Reverses if:* the ratio goes the other way on a corpus with large constant tables of
 non-method symbols. The measurement is cheap to repeat and the rule is one match arm.
+
+## D85 - `send` with a literal name is a call; with a computed one it is a caveat
+**Decided.**
+
+`account.send(:display_name)` was reported rather than rewritten, on the reasoning that dynamic
+dispatch cannot be proved. That reasoning is right about the *name* and wrong about this case:
+the name is a literal sitting in the source, and the only open question is which class receives
+it -- which is exactly the question receiver narrowing already answers for `account.display_name`
+two lines away. Declining it was a limitation, not a judgement, and it left the user to hand-edit
+a call rwr could prove.
+
+The rename now covers `send`, `public_send`, `__send__`, `try` and `try!`, with a symbol or a
+string, under the same receiver constraint as an ordinary call. `unknown.send(:display_name)` does
+not resolve and is reported, exactly as `unknown.display_name` would be.
+
+**A corpus fixture had recorded the limitation as its expected output.**
+`corpus/006-metaprogramming-residue` asserted that the `send` stays untouched -- written when it
+had to. Its receiver is an ivar assigned from a constructor in the same file, and the plain call
+beside it *was* being renamed, so the expectation was that rwr should ship a `NoMethodError`. The
+fixture is updated and its notes now say why, because a fixture written after the behaviour is
+how a limitation becomes a specification.
+
+**The computed case gets a `Dynamic` residue context.** `send("display_#{attr}")` names nothing
+rwr can enumerate, so this is not an occurrence of the anchor -- it is a location where the
+completeness claim does not hold, which is the same product as the rest of the report.
+
+**Scoped to the class the rule is about, and that scoping is the whole feature.** A dispatcher
+appears in nearly every class; a computed name in an unrelated one says nothing about this
+rename. Measured on discourse: unscoped it was 115 entries of 955, twelve percent of the report;
+scoped to the target class, its descendants and the modules mixed into it, three. A caveat that
+buries the report is not a caveat.
+
+*Reverses if:* the dispatcher list proves too narrow or too wide. It is a closed set, which is
+the point -- guessing from an interpolation's prefix whether it could produce the anchor is the
+kind of inference this tool refuses.
