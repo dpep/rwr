@@ -10,3 +10,8 @@ where:
   $AGG:
     name: [size, length, count]
 rewrite: $R.count { |$P| $B }
+tests:
+  - input: |
+      a = xs.select { |x| x.ok? }.size
+    output: |
+      a = xs.count { |x| x.ok? }

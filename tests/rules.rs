@@ -176,6 +176,33 @@ rewrite: $R.x
 
 /// The pack ships compiled into the binary, so a rule broken in the repo is a
 /// rule broken for every user. This is the guard that catches it before they do.
+/// Every shipped rule does what it says, asserted by its own fixtures.
+///
+/// These expectations used to live here as two Rust tables -- maintained in a
+/// file a rule author editing `rules/performance/detect.yml` would never open.
+/// They are `tests:` blocks in the rules now, so a rule and its proof travel
+/// together, and this is the one line that runs them all. Two sources of truth
+/// for one behaviour is the drift the fixtures exist to prevent, and it applied
+/// to itself.
+#[test]
+fn the_shipped_pack_passes_its_own_fixtures() {
+    let out = rwr(&["test", "all"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Every rule carries fixtures. A partly-covered pack must not read like a
+    // covered one, so this fails when a new rule arrives without them.
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("no fixtures"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 #[test]
 fn every_shipped_rule_is_valid() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -195,203 +222,6 @@ fn every_shipped_rule_is_valid() {
         Some(3),
         "a shipped rule does not load:\n{err}"
     );
-}
-
-/// What each shipped rule actually does, written down.
-///
-/// `every_shipped_rule_is_valid` proves they load; this proves they are *right*.
-/// The expected outputs here were written from what each rule is supposed to
-/// do, then checked -- not captured from what it did, which would only confirm
-/// the behaviour rather than test it. A corpus fixture in this project once
-/// recorded a bug as its expected output for exactly that reason.
-#[test]
-fn every_shipped_rule_does_what_it_says() {
-    let cases: &[(&str, &str, &str)] = &[
-        (
-            "style/return-nil",
-            "def a
-  return nil
-end
-",
-            "def a
-  return
-end
-",
-        ),
-        (
-            "style/hash-shorthand",
-            "h = { name: name }
-",
-            "h = { name: }
-",
-        ),
-        (
-            "style/redundant-self-assign",
-            "x = x + 1
-",
-            "x += 1
-",
-        ),
-        (
-            "style/sorted-constant-array",
-            "PERMS = [:zebra, :apple]
-",
-            "PERMS = [:apple, :zebra]
-",
-        ),
-        (
-            "performance/detect",
-            "a = xs.select { |x| x.ok? }.first
-",
-            "a = xs.detect { |x| x.ok? }
-",
-        ),
-        (
-            "performance/count",
-            "a = xs.select { |x| x.ok? }.size
-",
-            "a = xs.count { |x| x.ok? }
-",
-        ),
-        (
-            "performance/filter-map",
-            "a = xs.map { |x| x.y }.compact
-",
-            "a = xs.filter_map { |x| x.y }
-",
-        ),
-        (
-            "performance/reverse-each",
-            "xs.reverse.each { |x| p x }
-",
-            "xs.reverse_each { |x| p x }
-",
-        ),
-        (
-            "performance/sum",
-            "a = xs.inject(:+)
-",
-            "a = xs.sum
-",
-        ),
-        (
-            "performance/string-replacement",
-            "a = s.gsub(\"-\", \"_\")
-",
-            "a = s.tr(\"-\", \"_\")
-",
-        ),
-        (
-            "performance/exists",
-            "a = Model.where(x: 1).count > 0
-",
-            "a = Model.where(x: 1).exists?
-",
-        ),
-        (
-            "performance/find-by",
-            "a = Model.where(x: 1).first
-",
-            "a = Model.find_by(x: 1)
-",
-        ),
-        (
-            "performance/pluck",
-            "a = Model.all.map(&:name)
-",
-            "a = Model.all.pluck(:name)
-",
-        ),
-        (
-            "performance/relation-count",
-            "a = Model.all.to_a.size
-",
-            "a = Model.all.count
-",
-        ),
-    ];
-
-    for (rule, before, expected) in cases {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let file = dir.path().join("a.rb");
-        std::fs::write(&file, before).expect("write");
-
-        let out = rwr(&[
-            "rewrite",
-            rule,
-            dir.path().to_str().expect("utf8"),
-            "--unsafe",
-            "--ruby",
-            "3.4",
-        ]);
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert_ne!(out.status.code(), Some(3), "{rule}: {err}");
-        assert_eq!(
-            std::fs::read_to_string(&file).expect("read"),
-            *expected,
-            "{rule} did not produce what it promises"
-        );
-    }
-}
-
-/// A rule must not fire on the shape it is *not* about. These are the near
-/// misses each one has to leave alone.
-#[test]
-fn shipped_rules_leave_near_misses_alone() {
-    let cases: &[(&str, &str)] = &[
-        // `tr` maps character by character, so a multi-character argument is a
-        // different operation entirely.
-        (
-            "performance/string-replacement",
-            "a = s.gsub(\"ab\", \"cd\")
-",
-        ),
-        // A regex is not a string literal.
-        (
-            "performance/string-replacement",
-            "a = s.gsub(/x/, \"y\")
-",
-        ),
-        // Array order is meaning unless the array is a constant.
-        (
-            "style/sorted-constant-array",
-            "order = [:zebra, :apple]
-",
-        ),
-        // `{foo: bar}` is not shorthand for anything.
-        (
-            "style/hash-shorthand",
-            "h = { name: other }
-",
-        ),
-        // A different aggregate is a different rule.
-        (
-            "performance/detect",
-            "a = xs.select { |x| x.ok? }.last
-",
-        ),
-    ];
-
-    for (rule, source) in cases {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let file = dir.path().join("a.rb");
-        std::fs::write(&file, source).expect("write");
-
-        let out = rwr(&[
-            "rewrite",
-            rule,
-            dir.path().to_str().expect("utf8"),
-            "--unsafe",
-            "--ruby",
-            "3.4",
-        ]);
-        assert_ne!(out.status.code(), Some(3), "{rule}");
-        assert_eq!(
-            std::fs::read_to_string(&file).expect("read"),
-            *source,
-            "{rule} fired on a shape it is not about"
-        );
-    }
 }
 
 /// Selecting one family must not quietly select nothing, which is what a

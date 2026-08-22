@@ -9,7 +9,8 @@ line-scoped directive would leave that on the table. No `disable`/`enable` block
 forgotten terminator silently suppresses the rest of a file, which is the blind spot this tool
 exists to refuse.
 
-Rule ids are required. A bare `# rwr:ignore` is reported as malformed and suppresses nothing,
+A reason may follow `--`: `# rwr:ignore style/no-sleep -- flaky in CI`. Rule ids are required. A
+bare `# rwr:ignore` is reported as malformed and suppresses nothing,
 because a blanket ignore is one no staleness check can audit. A directive naming a rule outside
 the current run is left alone.
 

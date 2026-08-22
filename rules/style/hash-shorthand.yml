@@ -7,3 +7,11 @@ where:
   $K:
     same_name_as: $V
 rewrite: '{**$BEFORE, $K:, **$AFTER}'
+tests:
+  - input: |
+      h = { name: name }
+    output: |
+      h = { name: }
+  - input: |
+      h = { name: other }
+    unchanged: true

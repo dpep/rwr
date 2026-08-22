@@ -14,3 +14,14 @@ where:
     is: string
     length: 1
 rewrite: $R.tr($FROM, $TO)
+tests:
+  - input: |
+      a = s.gsub("-", "_")
+    output: |
+      a = s.tr("-", "_")
+  - input: |
+      a = s.gsub("ab", "cd")
+    unchanged: true
+  - input: |
+      a = s.gsub(/x/, "y")
+    unchanged: true

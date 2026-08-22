@@ -6,3 +6,15 @@ unsafe: >-
   Assumes an ActiveRecord relation. `where` on anything else is a different
   method entirely.
 match: $R.where($C).size
+tests:
+  - input: |
+      n = Model.where(x: 1).size
+    finds: 1
+  # `.length` and `.count` already say which they meant.
+  - input: |
+      n = Model.where(x: 1).length
+    finds: 0
+  # The question is about a relation, not any receiver with a `size`.
+  - input: |
+      n = [1, 2].size
+    finds: 0

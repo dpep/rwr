@@ -93,10 +93,16 @@ pub(crate) fn directives(
         };
         let line = crate::source::line_col(source, location.start_offset()).0;
 
-        let rules: Vec<String> = rest
-            .split(',')
-            .map(|r| r.trim().to_string())
+        // A reason is the natural thing to write next to a suppression, and
+        // taking it as part of a rule name meant the directive silently named a
+        // rule nothing has -- neither honoured nor reported stale, because an
+        // unknown id is assumed to belong to another pack.
+        let named = rest.split(" -- ").next().unwrap_or(rest);
+        let rules: Vec<String> = named
+            .split([',', ' ', '\t'])
+            .map(str::trim)
             .filter(|r| !r.is_empty())
+            .map(str::to_string)
             .collect();
         if rules.is_empty() {
             // A blanket ignore is a blind spot nothing can audit, so it is an
@@ -292,6 +298,25 @@ mod tests {
     fn several_rules_on_one_directive() {
         let (found, _) = read("sleep 1 # rwr:ignore a/b, c/d\n");
         assert_eq!(found[0].rules, vec!["a/b", "c/d"]);
+    }
+
+    /// A reason after `--` is prose, not a rule name. Writing one is the
+    /// natural thing to do, and swallowing it made the directive name a rule
+    /// nothing has -- which is neither honoured nor reported, since an unknown
+    /// id is assumed to belong to another pack.
+    #[test]
+    fn a_reason_after_a_dash_is_not_a_rule_name() {
+        let src = "sleep 1 # rwr:ignore a/b -- flaky in CI, see PIE-4\n";
+        let (found, _) = read(src);
+        assert_eq!(found[0].rules, vec!["a/b"]);
+    }
+
+    /// Space-separated names work too, since that is how people write lists.
+    #[test]
+    fn names_may_be_separated_by_spaces_or_commas() {
+        let src = "sleep 1 # rwr:ignore a/b c/d, e/f\n";
+        let (found, _) = read(src);
+        assert_eq!(found[0].rules, vec!["a/b", "c/d", "e/f"]);
     }
 
     /// A blanket ignore cannot be checked for staleness, so it is an error

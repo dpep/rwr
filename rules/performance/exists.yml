@@ -10,6 +10,19 @@
     method, and `count` on a loaded collection is already free.
   match: $R.where($C).count > 0
   rewrite: $R.where($C).exists?
+  tests:
+    - input: |
+        a = Model.where(x: 1).count > 0
+      output: |
+        a = Model.where(x: 1).exists?
+    - input: |
+        a = Model.where(x: 1).count.positive?
+      output: |
+        a = Model.where(x: 1).exists?
+    # A plain count is a question about how many, not whether any.
+    - input: |
+        a = Model.where(x: 1).count
+      unchanged: true
 
 - description: '`count.positive?` runs COUNT(*) to answer a question `exists?` answers with LIMIT 1.'
   unsafe: >-

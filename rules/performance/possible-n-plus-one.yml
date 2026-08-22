@@ -18,3 +18,20 @@ where:
   $ITER:
     name: [each, map, flat_map, select, filter_map, each_with_object, sum]
   $B: { contains: $X.$ASSOC.$FIELD }
+tests:
+  # Reaching through the block's own element to a further association.
+  - input: |
+      orders.each { |o| puts o.customer.name }
+    finds: 1
+  # Reaching through something else is somebody else's object, not an N+1.
+  - input: |
+      orders.each { |o| puts other.customer.name }
+    finds: 0
+  # One hop is a plain attribute read.
+  - input: |
+      orders.each { |o| puts o.name }
+    finds: 0
+  # A non-iterating method is not the shape at all.
+  - input: |
+      orders.tap { |o| puts o.customer.name }
+    finds: 0

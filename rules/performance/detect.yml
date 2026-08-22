@@ -12,3 +12,11 @@ where:
   $SEL:
     name: [select, find_all]
 rewrite: $R.detect { |$P| $B }
+tests:
+  - input: |
+      a = xs.select { |x| x.ok? }.first
+    output: |
+      a = xs.detect { |x| x.ok? }
+  - input: |
+      a = xs.select { |x| x.ok? }.last
+    unchanged: true

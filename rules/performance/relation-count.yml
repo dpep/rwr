@@ -10,3 +10,8 @@ where:
   $AGG:
     name: [size, length]
 rewrite: $R.count
+tests:
+  - input: |
+      a = Model.all.to_a.size
+    output: |
+      a = Model.all.count

@@ -5,3 +5,8 @@ unsafe: >-
   `find_by` issues a query.
 match: $R.where($C).first
 rewrite: $R.find_by($C)
+tests:
+  - input: |
+      a = Model.where(x: 1).first
+    output: |
+      a = Model.find_by(x: 1)

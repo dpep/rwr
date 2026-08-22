@@ -14,3 +14,11 @@ where:
   $C:
     is: constant
 rewrite: $C = [*$ITEMS.sort]
+tests:
+  - input: |
+      PERMS = [:zebra, :apple]
+    output: |
+      PERMS = [:apple, :zebra]
+  - input: |
+      order = [:zebra, :apple]
+    unchanged: true

@@ -1,3 +1,8 @@
 description: '`x = x + n` is `x += n`.'
 match: $V = $V + $N
 rewrite: $V += $N
+tests:
+  - input: |
+      x = x + 1
+    output: |
+      x += 1

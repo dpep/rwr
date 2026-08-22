@@ -8,3 +8,8 @@ unsafe: >-
   `compact` drops nil; `filter_map` drops nil and false. A block that can return false changes behaviour.
 match: $R.map { |$P| $B }.compact
 rewrite: $R.filter_map { |$P| $B }
+tests:
+  - input: |
+      a = xs.map { |x| x.y }.compact
+    output: |
+      a = xs.filter_map { |x| x.y }

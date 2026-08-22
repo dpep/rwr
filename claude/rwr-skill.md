@@ -228,7 +228,8 @@ no `disable`/`enable` block form — a forgotten terminator would silently
 suppress the rest of a file.
 
 Rule ids are required: a bare `# rwr:ignore` is reported as malformed and
-suppresses nothing. `rewrite` honours directives exactly as `check` does.
+suppresses nothing. A reason may follow `--`:
+`# rwr:ignore style/no-sleep -- flaky in CI, see PIE-4`. `rewrite` honours directives exactly as `check` does.
 
 Every run says how many findings were accepted and which directives have nothing
 left to accept, in text and in `-j`. Stale ones do not fail the build.

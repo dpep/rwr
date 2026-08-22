@@ -6,3 +6,8 @@ where:
   $RED:
     name: [inject, reduce]
 rewrite: $R.sum
+tests:
+  - input: |
+      a = xs.inject(:+)
+    output: |
+      a = xs.sum

@@ -1840,11 +1840,22 @@ fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
             return Exit::PatternError.into();
         }
     };
-    let untested: Vec<String> = rules
+    // By id, not by rule: a case runs the whole document's set (D69) and an id
+    // is the file's path within the pack, so a list file whose fixtures sit on
+    // its first rule has covered every rule in it.
+    let tested: std::collections::HashSet<&str> = rules
+        .iter()
+        .filter(|r| !r.tests.is_empty())
+        .filter_map(|r| r.id.as_deref())
+        .collect();
+    let mut untested: Vec<String> = rules
         .iter()
         .filter(|r| r.tests.is_empty())
         .map(|r| r.id.clone().unwrap_or_else(|| "(unnamed)".to_string()))
+        .filter(|id| !tested.contains(id.as_str()))
         .collect();
+    untested.sort();
+    untested.dedup();
     let cases = match rule::cases(&rules) {
         Ok(c) => c,
         Err(e) => {

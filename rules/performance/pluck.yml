@@ -7,3 +7,8 @@ unsafe: >-
   `pluck` issues a fresh query.
 match: $R.map(&:$COL)
 rewrite: $R.pluck(:$COL)
+tests:
+  - input: |
+      a = Model.all.map(&:name)
+    output: |
+      a = Model.all.pluck(:name)
