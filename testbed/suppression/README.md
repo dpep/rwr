@@ -1,4 +1,4 @@
-# The suppression corpus
+# The suppression testbed
 
 Ground truth for `# rwr:ignore`, kept apart from the rename testbed next door
 because it answers a different question. That one asks *what did a rename fail

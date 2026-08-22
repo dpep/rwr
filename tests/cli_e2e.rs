@@ -840,8 +840,8 @@ fn structured_output_names_its_own_shape() {
         assert!(doc.is_object(), "a document, not a list of one: {text}");
         // One version across the CLI contract, not one per command: field
         // names are shared, so a consumer branches on a single number. 3 added
-        // `rejections` to check's report.
-        assert_eq!(doc["schema"], 3, "{text}");
+        // `rejections`; 4 added `unparsed`.
+        assert_eq!(doc["schema"], 4, "{text}");
         assert_eq!(doc["rwr_version"], env!("CARGO_PKG_VERSION"), "{text}");
     }
 }
@@ -1606,4 +1606,190 @@ fn a_block_body_with_locals_still_matches() {
         .output()
         .expect("binary runs");
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+}
+
+/// An override written with `prepend` or `refine` is reported, in a file that
+/// never writes `class X < Y`.
+///
+/// Both are the shape E5/E8 call the dangerous one: the module's method runs
+/// *instead of* the class's, so renaming only the class's definition leaves an
+/// override that overrides nothing and a `super` that raises -- and everything
+/// still parses. `Hierarchy::reachable_from` prefiltered candidates on the
+/// inheritance shape, so `Account.prepend(Audit)` was dropped before Prism saw
+/// it and neither override was reported at all.
+///
+/// The testbed scored this case throughout, for the wrong reason: its `prepend`
+/// fixture carries a prose comment containing the words `class` and `<`, which
+/// is what admitted the file. Hence the assertion here that the fixture holds
+/// neither -- without it this test passes on the broken build too.
+#[test]
+fn a_prepended_or_refined_override_is_reported() {
+    const PATCH: &str = "module AccountAudit\n  def display_name\n    super\n  end\nend\n\nmodule AccountRefinements\n  refine Account do\n    def display_name\n      super.upcase\n    end\n  end\nend\n\nAccount.prepend(AccountAudit)\n";
+    assert!(
+        !PATCH.contains("class") && !PATCH.contains('<'),
+        "the fixture must not smuggle in the inheritance shape"
+    );
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("account.rb"),
+        "class Account\n  def display_name\n    \"#{first} #{last}\"\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(dir.path().join("patches.rb"), PATCH).expect("write");
+    let rule = dir.path().join("rename.yml");
+    std::fs::write(&rule, "method: Account#display_name\nrename: full_name\n").expect("write");
+
+    let out = rwr(&[
+        "check",
+        rule.to_str().expect("utf8"),
+        dir.path().to_str().expect("utf8"),
+        "-j",
+    ]);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout is one JSON document");
+    let lines: Vec<u64> = doc["residue"]
+        .as_array()
+        .expect("residue")
+        .iter()
+        .filter(|r| {
+            r["file"]
+                .as_str()
+                .is_some_and(|f| f.ends_with("patches.rb"))
+        })
+        .filter(|r| r["context"] == "definition")
+        .filter_map(|r| r["line"].as_u64())
+        .collect();
+    assert_eq!(lines, vec![2, 9], "both overrides must be reported: {doc}");
+}
+
+/// Exit-code *polarity* per verb, which is what actually drifted.
+///
+/// `Exit::code()` pins the numbers in a unit test, and that is not the thing
+/// that went wrong: three separate tables (README, docs/getting-started.md, the
+/// skill) each claimed `rewrite` exits 1 when nothing matched. It never has --
+/// writing nothing is not a failure -- and the `Exit` enum's own doc comment
+/// carried the same false claim. A number nobody disputes is not worth a test;
+/// the mapping from *situation* to code is.
+#[test]
+fn each_verb_keeps_its_polarity() {
+    let dir = fixture("def a\n  return nil\nend\n");
+    let at = dir.path().to_str().expect("utf8");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("binary runs")
+            .status
+            .code()
+    };
+
+    // find: 0 matched, 1 did not. A search that finds nothing is a negative
+    // result, not an error.
+    assert_eq!(run(&["find", "return nil", at]), Some(0), "find, matched");
+    assert_eq!(run(&["find", "nope($A)", at]), Some(1), "find, no match");
+
+    // check inverts: a clean tree is success, so a pre-commit hook does not
+    // block a commit on a rule that correctly matches nothing (D22).
+    assert_eq!(
+        run(&["check", "style/return-nil", at]),
+        Some(1),
+        "check, work to do"
+    );
+    assert_eq!(
+        run(&["check", "performance/detect", at]),
+        Some(0),
+        "check, clean"
+    );
+
+    // rewrite: 0 either way. Applying edits succeeds; having none to apply also
+    // succeeds. It has no 1.
+    assert_eq!(
+        run(&["rewrite", "performance/detect", at]),
+        Some(0),
+        "rewrite, nothing to do"
+    );
+    assert_eq!(
+        run(&["rewrite", "style/return-nil", at]),
+        Some(0),
+        "rewrite, applied"
+    );
+
+    // And the shapes that are errors whatever the verb.
+    assert_eq!(
+        run(&["find", "def foo(", at]),
+        Some(3),
+        "unparseable pattern"
+    );
+    assert_eq!(
+        run(&["check", "style/return-nil", "nope"]),
+        Some(2),
+        "no such path"
+    );
+}
+
+/// A Ruby file that does not parse is named, not silently skipped.
+///
+/// Templates already had `templates_skipped`; Ruby that failed to parse had
+/// nothing at all, so a generator template with a `.rb` extension -- or any
+/// broken file -- vanished with the run still exiting 0. The same blind spot,
+/// surfaced in one case and hidden in the other.
+///
+/// Only files that could have contributed are counted: one with no mention of
+/// the name is skipped by the prefilter before anything tries to parse it, and
+/// naming those would bury the report under every unparseable file in the repo.
+#[test]
+fn a_ruby_file_that_does_not_parse_is_reported() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("account.rb"),
+        "class Account\n  def display_name\n    @n\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("broken.rb"),
+        "class Broken\n  def display_name(\n    @n\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    let out = run(&["check", "rename.yml", ".", "-j"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let unparsed = doc["unparsed"].as_array().expect("always present");
+    assert_eq!(unparsed.len(), 1, "{doc}");
+    assert!(
+        unparsed[0]
+            .as_str()
+            .is_some_and(|f| f.ends_with("broken.rb")),
+        "{doc}"
+    );
+
+    // Unconditional, like every other blind-spot count -- not behind `-e`.
+    let out = run(&["check", "rename.yml", "."]);
+    assert!(stderr(&out).contains("did not parse"), "{}", stderr(&out));
+
+    // A broken file with no mention of the name cannot contribute, so it is not
+    // named: the prefilter declines it before parsing is attempted.
+    std::fs::write(path.join("unrelated.rb"), "class Other\n  def nope(\nend\n").expect("write");
+    let out = run(&["check", "rename.yml", ".", "-j"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(
+        doc["unparsed"].as_array().expect("present").len(),
+        1,
+        "{doc}"
+    );
 }

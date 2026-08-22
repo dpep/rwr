@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+**Residue reports overrides written with `include`, `prepend`, `extend` and `refine`.** A method
+redefined in a module — a concern, a patch, a refinement — was dropped from the account
+entirely, because the hierarchy recorded `class X < Y` links and nothing else, and the report
+compared scope names literally. In Rails a large share of a model's methods live in concerns, so
+this was a whole category rwr was silent about being silent on. Testbed recall went from 37 of
+45 to 44.
+
+**A Ruby file that does not parse is now named.** Templates had `templates_skipped`; Ruby that
+failed to parse had nothing at all, so a generator template with a `.rb` extension — or any
+broken file — vanished with the run still exiting 0. The same blind spot, surfaced in one case
+and hidden in the other. Only files that could have contributed are listed: one with no mention
+of the name is declined by the prefilter before parsing is attempted. `-j` gains `unparsed` and
+the schema is now **4**.
+
+**`class_attribute`, `store_accessor`, `alias_attribute` and `enum` are recognised as defining
+methods**, so a symbol handed to one in an unrelated class is no longer reported as a reach into
+this one.
+
 **`class << self` no longer confuses instance and class methods.** The definition rule left
 singleton context unconstrained and the walk cleared the flag on entry to every method inside a
 singleton class, so an instance rename **rewrote a class method's call sites** — injecting a

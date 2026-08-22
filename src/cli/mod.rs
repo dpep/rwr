@@ -1087,7 +1087,7 @@ struct Changed {
 /// schema number is what it can branch on without a version comparison.
 ///
 /// 1 was a bare array of changed files, with no account of residue at all.
-const REPORT_SCHEMA: u32 = 3;
+const REPORT_SCHEMA: u32 = 4;
 
 /// Everything a `check` or `rewrite` run has to say, for machine consumers.
 ///
@@ -1122,6 +1122,10 @@ struct Report<'a> {
     stale_suppressions: &'a [crate::suppress::Stale],
     /// Directives naming no rule.
     malformed_directives: &'a [crate::suppress::Malformed],
+    /// Ruby files that did not parse, so nothing was read from them. Always
+    /// present: a file rwr could not open is exactly what the account of blind
+    /// spots exists to name.
+    unparsed: &'a [String],
 }
 
 /// What running the rules over one template produced.
@@ -1333,6 +1337,7 @@ fn cmd_apply(
     }
 
     let skipped = std::sync::atomic::AtomicUsize::new(0);
+    let unparsed: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     let scanning = profile::now();
     let outcomes: Vec<Outcome> = files
         .par_iter()
@@ -1357,7 +1362,16 @@ fn cmd_apply(
                 .map(|(changed, absolute)| crate::engine::Only { changed, absolute });
 
             match engine.scan(&file, mapped, &context, only, common.explain) {
-                crate::engine::ScanOutcome::Unparseable | crate::engine::ScanOutcome::Quiet => None,
+                // A file rwr could not read is a blind spot, and blind spots are
+                // reported unconditionally. Templates already had
+                // `templates_skipped`; Ruby that does not parse had nothing at
+                // all, so a generator template with a `.rb` extension -- or any
+                // broken file -- vanished with the run still exiting 0.
+                crate::engine::ScanOutcome::Unparseable => {
+                    unparsed.lock().map(|mut v| v.push(file)).ok();
+                    None
+                }
+                crate::engine::ScanOutcome::Quiet => None,
                 crate::engine::ScanOutcome::Refused(reason) => Some(Outcome {
                     file,
                     scanned: crate::engine::Scanned::default(),
@@ -1612,6 +1626,9 @@ fn cmd_apply(
         }
     }
 
+    let mut unparsed = unparsed.into_inner().unwrap_or_default();
+    unparsed.sort();
+
     let suppressed: Vec<crate::suppress::Suppressed> = outcomes
         .iter()
         .flat_map(|o| o.scanned.suppressed.iter().cloned())
@@ -1666,6 +1683,15 @@ fn cmd_apply(
             report_unsafe(&changed, rules);
             report_rejections(&rejections);
             report_suppressions(&suppressed, &stale, &malformed);
+            if !unparsed.is_empty() {
+                eprintln!(
+                    "rwr: {} Ruby file(s) did not parse and were not read:",
+                    unparsed.len()
+                );
+                for file in unparsed.iter().take(RESIDUE_DETAIL_CAP) {
+                    eprintln!("  {file}");
+                }
+            }
             report_residue(&left_over);
             // Only the templates that fell back: one rwr parsed has real
             // evidence and does not belong in a paragraph about guesses.
@@ -1695,6 +1721,7 @@ fn cmd_apply(
                 suppressed: &suppressed,
                 stale_suppressions: &stale,
                 malformed_directives: &malformed,
+                unparsed: &unparsed,
             };
             if emit_document(out, &report).is_some() {
                 return Exit::Error.into();

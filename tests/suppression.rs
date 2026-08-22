@@ -44,7 +44,7 @@ fn report() -> (Vec<(usize, String)>, serde_json::Value) {
         serde_json::from_slice(&out.stdout).expect("stdout is one JSON document");
 
     let truth = ground_truth(&source);
-    assert!(!truth.is_empty(), "the corpus carries no GT: markers");
+    assert!(!truth.is_empty(), "the testbed carries no GT: markers");
     (truth, doc)
 }
 

@@ -144,14 +144,13 @@ fn every_dynamic_reach_is_reported() {
     // that is the corpus doing its job, and the original scored 2 of 7. What
     // must never happen is the number going up.
     //
-    // The outstanding misses share one root cause: `residue::scoped_to` compares
-    // scope names literally, and the hierarchy carries `class X < Y` links only.
-    // So anything a module contributes -- a concern's `included do`, its
-    // instance methods, a `prepend`ed override, a `refine` block -- has an
-    // enclosing scope that never equals the anchor class and is dropped. In
-    // Rails a large share of a model's methods live in concerns, so this is a
-    // whole category the report is silent about being silent on.
-    const KNOWN_MISSES: usize = 8;
+    // The one outstanding miss is a namespaced class in *compact* form:
+    // `class Account::Exporter` gives Prism the name `Exporter`, so its scope
+    // stack is `["Exporter"]` and nothing connects it to Account. Written
+    // nested, the same class scores. Both readings are wrong for the same
+    // reason -- a namespace is not the class -- and the divergence shows it was
+    // never decided (see ruby-situations.md E2).
+    const KNOWN_MISSES: usize = 1;
     assert!(
         missed.len() <= KNOWN_MISSES,
         "recall regressed -- {} unreported, was {KNOWN_MISSES}: {missed:?}",

@@ -1752,3 +1752,51 @@ model's methods live in concerns.
 
 *Reverses if:* the constants stop being lowered. A ratchet nobody tightens is a todo file with
 better manners, which is exactly what D70 was written to avoid.
+
+## D76 - The hierarchy records mixins, not just superclasses
+**Decided.**
+
+`class X < Y` was the only relation rwr knew, which answers "what is this class" and not "where
+else are its methods written". In Rails the second question matters more: a concern, a
+`prepend`ed patch and a refinement all put a method on a class without either file naming the
+other in a superclass line. Every one of them was dropped from the residue report, and the
+report said nothing about dropping them.
+
+`Hierarchy` now carries `include`/`prepend`/`extend`/`refine` edges alongside superclass links,
+and `residue::scoped_to` asks `contributes_to` as well as `descends_from`. `refine C do` is
+recorded inverted -- the argument is the host, the enclosing module the contributor -- because
+that is the direction the relation actually runs.
+
+**The prefilter that fed it was the real bug, and it had been hiding behind a comment.**
+`reachable_from` only parsed a file containing both `class` and `<`, which was exact while the
+hierarchy held superclass links and wrong the moment it held mixin edges: `Account.prepend(Audit)`
+contains neither word. The testbed's own patches file passed anyway -- because a *prose comment*
+in it reads "Neither module names Account in a `class X < Y` line". The sentence asserting the
+module never writes `class X < Y` was the literal reason the file was admitted to the scan.
+
+That is worth recording beyond the fix. The corpus was green, the feature was broken, and the
+thing bridging them was English. A ground-truth corpus can be right about what *should* happen
+and still pass for a reason unrelated to the mechanism under test -- so when a fixture passes
+and a minimal reconstruction of it does not, the reconstruction is the honest signal.
+
+*Reverses if:* mixin edges prove noisy enough to bury the report on a wide corpus. Measured on
+discourse the widening cost 10 ms of hierarchy time and changed no rewrite -- `contributes_to`
+is consumed only by the report, and the matcher still uses `descends_from` alone.
+
+## D77 - A Ruby file that does not parse is named
+**Decided.**
+
+Skipping an unparseable file is the contract (D-nn) and saying nothing about it is not.
+Templates were counted in `templates_skipped` from the day they were searched; Ruby that failed
+to parse had no counterpart, so a generator template under `lib/templates/` with a `.rb`
+extension -- or any broken file -- contributed zero matches, zero residue, and no mention, with
+the run exiting 0. A filter that over-fires is indistinguishable from a quiet corpus, which is
+the failure class this codebase produces; this was that failure with the reporting half simply
+absent.
+
+**Only files that could have contributed are listed.** A broken file with no mention of the
+anchor is declined by the prefilter before any parse is attempted, and naming those would bury
+the report under every unparseable file in a repository -- which is the same lie in the other
+direction.
+
+*Reverses if:* nothing plausible. The count is small by construction and the field is additive.

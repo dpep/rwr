@@ -92,12 +92,36 @@ fn scope_name(node: &Node<'_>) -> Option<String> {
 /// `delegate :display_name, to: :account` forwards to an Account and breaks
 /// when Account's method is renamed; `attr_reader :display_name` in a Widget
 /// makes Widget's own method and is untouched by it.
+///
+/// The bar for entry is strict, because `via` labels *every* argument of a call
+/// with that call's name: a macro belongs here only if each name it takes lands
+/// on the enclosing class. That is what keeps these out --
+///
+/// - `attribute :display_name` defines on an ActiveRecord model and *reaches*
+///   on a serializer, identical syntax either way (testbed marks the serializer
+///   one a reach, correctly);
+/// - `has_many` / `belongs_to` define from the first symbol but take
+///   `inverse_of:`, `foreign_key:` and `source:`, which name methods on
+///   *another* class;
+/// - `scope` defines the class method and carries a lambda whose body is full of
+///   column names;
+/// - `validates` and the callbacks refer rather than define -- to the enclosing
+///   class, so the conclusion matches, but by a different mechanism that a
+///   serializer's two-hop `validates` does not share.
 const DEFINERS: &[&[u8]] = &[
     b"attr_reader",
     b"attr_accessor",
     b"attr_writer",
     b"define_method",
     b"alias_method",
+    // Every name these take is the enclosing class's own. `class_attribute`
+    // makes five methods from one symbol, `store_accessor` names the store
+    // column and then its keys, `alias_attribute` names both sides locally, and
+    // an `enum` defines predicates and bangs -- none of them reaches outward.
+    b"class_attribute",
+    b"store_accessor",
+    b"alias_attribute",
+    b"enum",
 ];
 
 /// Narrow a report to what a class-anchored rule could plausibly be about.
@@ -124,20 +148,39 @@ pub(crate) fn scoped_to(
                 && let Some(enclosing) = o.scope.last()
                 && enclosing != class
                 && !hierarchy.descends_from(enclosing, class)
+                // A module mixed into the class dispatches on the class, so an
+                // implicit call in its body reaches the target after all. This
+                // guard runs before the keep-rules below, so without the check
+                // here a concern's own methods were rejected early and never
+                // reconsidered.
+                && !hierarchy.contributes_to(enclosing, class)
             {
                 return false;
             }
             o.scope.iter().any(|s| s == class)
+                // A concern's contribution is the class's own code, written
+                // elsewhere. `included do`, an instance method in the module
+                // body, a `prepend`ed override, a `refine` block -- all have an
+                // enclosing scope that never equals the anchor class, so
+                // comparing names literally dropped the whole category and said
+                // nothing about having dropped it. In Rails that is where a
+                // large share of a model's methods live.
+                || o.scope
+                    .iter()
+                    .any(|s| hierarchy.contributes_to(s, class))
                 // A definition in a *subclass* is the rule's business too: an
                 // override the rename failed to reach is the one occurrence
                 // guaranteed to break. `subclasses: true` was honoured by the
                 // matcher and ignored here, so an override whose arity had
                 // drifted from its parent's was neither rewritten nor reported
                 // -- exit 0, with the work half done.
-                || (o.context == Context::Definition
-                    && o.scope
-                        .last()
-                        .is_some_and(|enclosing| hierarchy.descends_from(enclosing, class)))
+                // Anything written in a descendant is the rule's business: an
+                // override the rename failed to reach is the one occurrence
+                // guaranteed to break, and an `alias` or a symbol table in a
+                // subclass names the same method the rule is moving.
+                || o.scope
+                    .last()
+                    .is_some_and(|enclosing| hierarchy.descends_from(enclosing, class))
                 || o.context == Context::Call
                 // A symbol handed to a call is a reach wherever it lives, and
                 // scoping it away lost the whole Rails metaprogramming
