@@ -314,12 +314,12 @@ different question.
 *(Pack figures are post-D63; they were 178 / 348 / 970 ms when the targets below
 were first set, and the targets were deliberately not lowered to match — see D63.)*
 
-**The pack has since outgrown the third target, and that is the target's fault.** It was
-written as "the whole shipped pack under 1.5 s" when the pack held ten rules; it holds
-seventeen now, and `--unsafe` runs 1.3–1.5 s. A ceiling pinned to a collection that grows is
-not a ceiling, so the number that carries over is the **marginal cost per rule** — about
-40 ms per rule over 11,000 files, measured in D63 and unchanged since. Judge a pack against
-that, not against a total that was only ever true of one pack.
+**The third target was written wrong and has since been overtaken.** "The whole shipped pack
+under 1.5 s" pinned a ceiling to a collection that grows every time a rule is added, so it
+stopped meaning anything the moment the pack grew — and running every rule now sits at that
+ceiling. The figure that survives is the **marginal cost per rule**: about 40 ms per rule
+over 11,000 files, measured in D63. Judge a pack against that, not against a total that was
+only ever true of one pack.
 
 Cold-cache first runs: 99 ms, 105 ms, 280 ms for `find`. The gap is page-in, not work.
 
@@ -329,7 +329,7 @@ figure, so ordinary variance does not trip them and an order-of-magnitude regres
 - a single-pattern `find` over ~10k files: **under 250 ms** warm
 - a rename, which additionally builds the class hierarchy and reads signatures: **under
   500 ms**
-- the whole shipped pack, ten rules: **under 1.5 s**
+- each additional rule in a pack: **under ~60 ms** over ~10k files (D63 measured ~40 ms)
 
 **No timing assertion goes into CI, deliberately.** A wall-clock test is machine-dependent,
 and a suite that fails on a busy laptop teaches people to rerun until green — which is worse
@@ -340,8 +340,8 @@ not.
 
 **What the numbers say about the design.** Cost tracks how many files mention an identifier
 rather than repository size: discourse is 3.4× rails by file count and 2.7× by `find` time,
-while the pack, which cannot prefilter as sharply because ten rules contribute ten literal
-sets, scales closer to linear. That is the literal prefilter working as intended.
+while a pack, which cannot prefilter as sharply because every rule contributes its own
+literal set, scales closer to linear. That is the literal prefilter working as intended.
 
 ## Q8 — Are Coccinelle-style isomorphisms viable, or a known trap? — **closed: no user-defined layer**
 

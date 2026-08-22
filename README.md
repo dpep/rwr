@@ -207,7 +207,7 @@ prefilter skips any file that cannot contribute. Over discourse's 11,006 files,
 five warm runs — `find` on a single pattern **175 ms**, a rename **292 ms**, the
 pack's safe rules **478 ms**, each discovering, reading, searching, parsing the
 survivors and matching structurally. `--unsafe`, which runs every rule in the
-pack rather than the four that need no caveat, takes about **1.4 s**.
+pack rather than only those that need no caveat, takes about **1.4 s**.
 
 `--profile` reports where the time went. See [docs/scaling.md](docs/scaling.md).
 

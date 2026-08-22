@@ -39,8 +39,13 @@ is printed next to the diff. RuboCop carries the same information as
 `SafeAutoCorrect: false`, in a config file nobody reads at the moment of the
 edit.
 
-**Held back by default:** everything under `performance/` except `reverse-each`,
-plus `style/sorted-constant-array`.
+Which rules are held back is not listed here, because that list changes every
+time one is added. The run says so itself, with a count and — under `-e` — the
+reason for each:
+
+```
+rwr: N rule(s) held back as unsafe; --unsafe to include them, -e for why
+```
 
 ## The ActiveRecord rules
 

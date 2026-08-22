@@ -188,8 +188,8 @@ files, which means an index -- deferred, with the threshold recorded above.
 `--profile` had reported `scan` as one block at ~80% of a pack run for months, which named a
 phase without decomposing it. Three cuts, measured five warm runs each on discourse:
 
-*(The pack held ten rules when this was measured; it holds seventeen now, and the
-per-rule marginal cost is what carries over — see Q7.)*
+*(Measured against the pack as it stood then. The pack grows, so the figure that
+carries over is the per-rule marginal cost rather than any total — see Q7.)*
 
 | | pack (4 rules) | 10 rules |
 |---|---|---|
