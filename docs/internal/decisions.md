@@ -1706,3 +1706,49 @@ the fix was wrong.
 *Reverses if:* a field in `DERIVED` turns out to carry meaning a pattern should be able to
 match. The test to write first would be the one showing two programs that differ only in that
 field and should not be equal.
+
+## D74 - Singleton context is inherited, and a subclass definition is the report's business
+**Decided.**
+
+Two faults from one corpus, both in the receiver narrowing that is rwr's headline claim.
+
+**`class << self` puts its whole body in singleton context.** `walk` computed the flag as "does
+this `def` have an explicit receiver", which cleared it on entry to every method *inside* a
+singleton class. The definition rule additionally left `scope.singleton` unset. Together an
+instance rename declined the `class << self` definition (correct, once the rule constrained it)
+and then rewrote the call sites inside its sibling methods (wrong) -- introducing a
+`NoMethodError` into a class method the rule had just correctly refused to touch. The pairing is
+the worst available: a wrong rewrite, in the one place the tool had demonstrated it knew better.
+
+A `.` rename had the mirror fault, missing the definition entirely, because `def self.name` is
+not the only spelling of a class method. The expansion now carries both.
+
+**`subclasses: true` was honoured by the matcher and ignored by the report.** `residue::scoped_to`
+kept a `Definition` only when its lexical scope literally contained the anchor class, so an
+override in a subclass -- the one occurrence *guaranteed* to break, since a rename that misses it
+ships a `NoMethodError` -- was dropped from the account. Definitions in descendants are now kept.
+
+*Reverses if:* nothing plausible for the singleton half. For the subclass half, if descendant
+definitions prove noisy on a wide hierarchy, the answer is to rank them rather than drop them --
+an override the rename did not reach is the highest-value line in the whole report.
+
+## D75 - The testbed scores on a ratchet
+**Decided.**
+
+The corpus states what *should* happen, derived from Ruby semantics, so it necessarily describes
+behaviour the tool does not yet have -- the original scored 2 of 7 and that was the point (see
+`testbed/README.md`). Asserting perfection makes the suite permanently red and blocks every
+commit; deleting the failing cases throws away the only honest measurement there is.
+
+So the scorers pin today's number and fail on regression, and the assertion that recall
+*improved* is also a failure -- it says "lower the constant to lock it in". A gap that quietly
+closes and is not recorded can quietly reopen.
+
+Every outstanding gap is named in the test, with its cause. The current ones share a root:
+`scoped_to` compares scope names literally and the hierarchy carries `class X < Y` links only, so
+anything a module contributes -- a concern's `included do`, a `prepend`ed override, a `refine`
+block -- has an enclosing scope that never equals the anchor class. In Rails a large share of a
+model's methods live in concerns.
+
+*Reverses if:* the constants stop being lowered. A ratchet nobody tightens is a todo file with
+better manners, which is exactly what D70 was written to avoid.

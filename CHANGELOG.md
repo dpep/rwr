@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+**`class << self` no longer confuses instance and class methods.** The definition rule left
+singleton context unconstrained and the walk cleared the flag on entry to every method inside a
+singleton class, so an instance rename **rewrote a class method's call sites** — injecting a
+`NoMethodError` into code the rule had correctly declined to rename — while a class rename
+missed the definition entirely. Both directions now behave, and the near-miss is reported rather
+than passed over in silence.
+
+**An override in a subclass is reported when it cannot be rewritten.** `subclasses: true` was
+honoured by the matcher and ignored by the residue report, so an override whose parameter list
+had drifted from its parent's was neither rewritten nor mentioned — exit 0, with the work half
+done. It is now named.
+
 **A rename now reaches methods that have a body.** Prism carries a scope's local-variable table
 on the node, and rwr compared it as though it were syntax — so `def foo; $B; end` matched only
 methods whose locals were identical to the pattern's, which in practice meant methods with no

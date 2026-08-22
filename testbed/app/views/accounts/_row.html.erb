@@ -1,0 +1,17 @@
+<%# A partial, which is where a rename's last uncaught call site usually lives.
+    The local `account` arrives from the render call and has no type anywhere in
+    this file. The CSS class and the translation key merely share the spelling,
+    and a template that falls back to text search is exactly where they start
+    looking like reaches. %>
+<tr class="display_name"> <%# GT:ignore -- a CSS class is not a method %>
+  <th><%= t("accounts.display_name") %></th> <%# GT:ignore -- a translation key %>
+  <td><%= account.email %></td>
+  <td><%= account.display_name %></td> <%# GT:residue -- an untyped local %>
+  <td> <%# GT:residue -- a chain split across ERB lines %>
+    <%= account
+          .display_name %>
+  </td>
+  <% if account.respond_to?(:display_name) -%> <%# GT:residue -- a symbol %>
+    <td class="formal"><%= account.display_name.upcase %></td> <%# GT:residue %>
+  <% end -%>
+</tr>

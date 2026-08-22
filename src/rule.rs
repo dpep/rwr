@@ -424,19 +424,38 @@ impl MethodRename {
             c
         };
 
-        let definition = match kind {
-            Kind::Instance => Rule {
+        // `class << self` puts an ordinary-looking `def` in singleton context,
+        // so the definition rules have to say which context they mean. Left
+        // unconstrained, a `#` rename rewrote a class method defined that way --
+        // a wrong rewrite from a node identical to the one it was looking for --
+        // and a `.` rename missed the same definition entirely.
+        let in_singleton = |singleton: bool| Scope {
+            inside: class.map(str::to_string),
+            singleton: Some(singleton),
+            subclasses: Some(true),
+        };
+        let definitions = match kind {
+            Kind::Instance => vec![Rule {
                 pattern: format!("def {name}; $B; end"),
                 rewrite: Some(format!("def {new}; $B; end")),
-                scope: scope(),
+                scope: in_singleton(false),
                 ..Default::default()
-            },
-            Kind::Class => Rule {
-                pattern: format!("def self.{name}; $B; end"),
-                rewrite: Some(format!("def self.{new}; $B; end")),
-                scope: scope(),
-                ..Default::default()
-            },
+            }],
+            Kind::Class => vec![
+                Rule {
+                    pattern: format!("def self.{name}; $B; end"),
+                    rewrite: Some(format!("def self.{new}; $B; end")),
+                    scope: scope(),
+                    ..Default::default()
+                },
+                // The same method, spelled the other way.
+                Rule {
+                    pattern: format!("def {name}; $B; end"),
+                    rewrite: Some(format!("def {new}; $B; end")),
+                    scope: in_singleton(true),
+                    ..Default::default()
+                },
+            ],
         };
 
         // Explicit receivers, narrowed by class *and* kind. `self.foo` inside an
@@ -449,7 +468,8 @@ impl MethodRename {
             ..Default::default()
         };
 
-        let mut rules = vec![definition, calls];
+        let mut rules = definitions;
+        rules.push(calls);
 
         // Implicit self, the largest receiver bucket -- reachable only through
         // lexical scope, so it needs a class to be anchored to. The singleton
@@ -849,12 +869,42 @@ mod tests {
         };
         let rules = rename.expand();
         assert_eq!(rules[0].pattern, "def self.display_name; $B; end");
-        assert_eq!(rules[1].constraints["$R"].kind, Some(Kind::Class));
-        assert_eq!(rules.len(), 3);
+        // The same method spelled the other way: `class << self` puts an
+        // ordinary-looking `def` in singleton context, and without this rule a
+        // `.` rename missed the definition while a `#` rename rewrote it.
+        assert_eq!(rules[1].pattern, "def display_name; $B; end");
+        assert_eq!(rules[1].scope.singleton, Some(true));
+
+        let calls = rules
+            .iter()
+            .find(|r| r.pattern.starts_with("$R."))
+            .expect("a call-site rule");
+        assert_eq!(calls.constraints["$R"].kind, Some(Kind::Class));
+
+        let implicit = rules.last().expect("an implicit-self rule");
         assert_eq!(
-            rules[2].scope.singleton,
+            implicit.scope.singleton,
             Some(true),
             "a class-method rename reaches implicit self only in singleton context"
+        );
+    }
+
+    /// The `#` form must not reach a definition inside `class << self`.
+    ///
+    /// Left unconstrained, the definition rule matched it -- an instance rename
+    /// rewriting a class method, from a node identical to the one it wanted.
+    #[test]
+    fn the_hash_form_stays_out_of_the_singleton() {
+        let rename = MethodRename {
+            method: "Account#display_name".into(),
+            rename: "full_name".into(),
+        };
+        let rules = rename.expand();
+        assert_eq!(rules[0].pattern, "def display_name; $B; end");
+        assert_eq!(
+            rules[0].scope.singleton,
+            Some(false),
+            "an instance rename must decline a `class << self` definition"
         );
     }
 

@@ -13,7 +13,7 @@ class AccountsController
   end
 
   def export
-    # GT:blind -- a chained receiver rwr cannot resolve (D61)
+    # GT:residue -- cannot *resolve* is not cannot *see*; reported as a call (D61)
     current_scope.accounts.first.display_name
   end
 end

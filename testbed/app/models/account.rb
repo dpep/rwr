@@ -2,6 +2,8 @@
 
 # The class the rename is about. Everything here either changes or breaks.
 class Account
+  include Nameable
+
   # GT:rewrite -- the definition itself.
   #
   # Deliberately more than one statement, and it assigns a local. Prism carries
@@ -26,7 +28,7 @@ class Account
   end
 
   def label
-    # GT:blind -- Symbol#to_proc; the symbol is the method name
+    # GT:residue -- Symbol#to_proc; the symbol is right there and is reported
     [self].map(&:display_name).first
   end
 

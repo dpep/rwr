@@ -128,6 +128,16 @@ pub(crate) fn scoped_to(
                 return false;
             }
             o.scope.iter().any(|s| s == class)
+                // A definition in a *subclass* is the rule's business too: an
+                // override the rename failed to reach is the one occurrence
+                // guaranteed to break. `subclasses: true` was honoured by the
+                // matcher and ignored here, so an override whose arity had
+                // drifted from its parent's was neither rewritten nor reported
+                // -- exit 0, with the work half done.
+                || (o.context == Context::Definition
+                    && o.scope
+                        .last()
+                        .is_some_and(|enclosing| hierarchy.descends_from(enclosing, class)))
                 || o.context == Context::Call
                 // A symbol handed to a call is a reach wherever it lives, and
                 // scoping it away lost the whole Rails metaprogramming

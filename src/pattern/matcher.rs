@@ -224,8 +224,16 @@ pub(crate) fn match_node<'pr>(
     // Not an exception to D32's "one node" -- a Ruby body position holds a
     // statements sequence, and that sequence is one node. Comparing the two
     // sequences child by child instead made `def foo; $B; end` match only
-    // single-statement methods, so the flagship one-line rename silently
-    // declined every real method and reported its own definition as residue.
+    // single-statement methods, so the flagship rename declined every real
+    // method (D73).
+    //
+    // KNOWN GAP: a `def` carrying `rescue`/`ensure` has a `BeginNode` body, not
+    // a `StatementsNode`, so it does not reach here and the rename declines it
+    // -- reported as residue, not silently. Hoisting this above the discriminant
+    // check makes the match succeed and the *rewrite* path then claims edits it
+    // does not make and never converges (exit 4 forever), so the miss stays
+    // until the splice side is understood. See docs/internal/ruby-situations.md
+    // entry A2.
     if matches!(pattern, Node::StatementsNode { .. }) {
         let statements = generated::children(pattern);
         if let [only] = statements.as_slice()
@@ -1296,8 +1304,20 @@ fn walk<'pr>(
     // context, which is what makes `self` mean the class rather than an
     // instance.
     let inner_singleton = match target {
-        Node::DefNode { .. } => target.as_def_node().is_some_and(|d| d.receiver().is_some()),
+        // `|| state.singleton` because a plain `def` *inside* `class << self` is
+        // a singleton method too. Overwriting instead of inheriting cleared the
+        // flag on entry to every such method, so an instance rename rewrote the
+        // call sites inside a class method -- introducing a NoMethodError into
+        // code it was never about, which is the worst pairing available: a wrong
+        // rewrite, in a method the rule had correctly declined to rename.
+        Node::DefNode { .. } => {
+            target.as_def_node().is_some_and(|d| d.receiver().is_some()) || state.singleton
+        }
         Node::SingletonClassNode { .. } => true,
+        // A class or module body starts a fresh instance context, however it was
+        // reached -- otherwise `class << self; class Inner` would carry the flag
+        // into an ordinary class.
+        Node::ClassNode { .. } | Node::ModuleNode { .. } => false,
         _ => state.singleton,
     };
 

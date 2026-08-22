@@ -1,0 +1,17 @@
+-# What happens to a template rwr cannot stitch into Ruby? HAML introduces its
+-# Ruby with a leading `=` or `-` rather than with delimiters, so there is
+-# nothing to translate and the account of it can only come from text search.
+-# That is a weaker claim than the rest of the report and has to arrive labelled
+-# as one -- but silence would be worse, because a rename that misses a view
+-# under-reports, which is the dangerous direction.
+%table.accounts
+  %thead
+    %tr
+      -# GT:ignore -- a translation key, which text search cannot tell from a call
+      %th= t("accounts.display_name")
+  %tbody
+    - @accounts.each do |account|
+      %tr
+        -# GT:residue -- reached by text search, in a template with no delimiters
+        %td= account.display_name
+        %td= account.email
