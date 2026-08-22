@@ -15,6 +15,7 @@ rwr check all --since main             # only the lines this branch touched
 rwr check all app/x.rb:3-15            # only those lines
 rwr rewrite rule.yml app/              # apply
 rwr rewrite 'def legacy($A); $B; end' -d   # delete, doc comment and all
+rwr test my-rules/                     # run the rules' own fixtures
 ```
 
 ## What makes it different

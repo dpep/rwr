@@ -149,6 +149,40 @@ There are **no per-rule options** — a rule is four lines of YAML, so the rule
 *is* the option. Want the opposite direction? Copy the file and swap `match`
 with `rewrite`.
 
+## Pinning a rule with fixtures
+
+A rule can carry its own tests, so an rwr upgrade cannot quietly change what it
+does to real code:
+
+```yaml
+match: $R.$SEL { |$P| $B }.first
+where:
+  $SEL: { name: [select, find_all] }
+rewrite: $R.detect { |$P| $B }
+tests:
+  - input: "a = xs.select { |x| x.ok? }.first\n"
+    output: "a = xs.detect { |x| x.ok? }\n"
+  - input: "a = xs.select { |x| x.ok? }.last\n"
+    unchanged: true          # the negative case
+```
+
+```sh
+rwr test rule.yml       # exits 1 with a diff on a failure
+rwr test my-rules/ -j   # a directory, for CI
+```
+
+A rule with no `rewrite:` asserts `finds: N` instead of `output:`. **Write a case
+when you write a rule** — and write the expectation from what the rule is *for*,
+never by pasting what it currently produces, which records bugs as expectations.
+
+`output:` is compared byte for byte, the trailing newline included. The snippet is
+evaluated as a whole file, so a rule needing a class or a `type:` receiver writes
+that into its own input (`a = Account.new` then `a.foo`).
+
+Refused rather than run: a case that asserts nothing, `output:` with
+`unchanged:`, and `finds:` on a rule that rewrites. A snippet that does not parse
+**fails** — it would otherwise pass every negative assertion vacuously.
+
 ## Scoping to a change
 
 For a pre-commit hook or a pull-request gate, restrict the run to lines the

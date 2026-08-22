@@ -1497,3 +1497,54 @@ about to commit" into "everything across ten commits", silently.
 *Reverses if:* `--since main` proves to be typed often enough to want a spelling that infers the
 base — in which case it wants its own flag, taking no value, reading `origin/HEAD` only and
 erring when that is absent rather than guessing.
+
+## D69 - Fixtures live in the rule file, and `rwr test` runs them
+**Decided.**
+
+A hand-written rule had nothing pinning its behaviour: the shipped pack changed shape between
+two releases, which is reasonable for an actively developed tool, but it means a user's own rule
+can start doing something different after an upgrade and say nothing. A rule now carries
+`tests:` -- an input snippet and what should happen to it -- and `rwr test` checks them.
+
+**A verb, not a flag on `check`.** The object is the *rule*, not a codebase: `find`, `check` and
+`rewrite` all take (rule, codebase) and act on code. As `check --test` it would have had to
+reject the PATH positional plus `-p`, `--include-vendored`, `--diff`, `--since`, `--ruby`,
+`--unsafe`, `-r` and `-d` -- two thirds of the surface -- because fixtures walk nothing. A flag
+that invalidates most of its siblings is a verb wearing a flag's clothes, and D29 already
+refused the same shape pointing the other way (`--write`/`--dry-run` on one verb). Overloading
+`rwr check rule.yml` was ruled out separately: with no PATH it already means "check the current
+directory", so fixtures would have silently changed an existing command's meaning.
+
+**This is not a per-rule option (D57).** An option parameterizes behaviour and needs defaults
+and a merge order; a fixture parameterizes nothing and cannot change what the rule does to any
+file. It is a falsifiable claim *about* the declared behaviour, beside the declaration for the
+same reason `unsafe:`'s reason is. D57 is strengthened rather than bent: the rule is now also
+its own proof.
+
+**A case that asserts nothing is unrepresentable.** `input:` alone, `output:` together with
+`unchanged:`, `unchanged: false`, and `finds:` on a set that rewrites are all refused at load
+(exit 3). The whole value of a fixture suite is lost the moment a case can pass without
+claiming anything.
+
+**An unparseable snippet fails; it is not skipped.** In `check`, skipping a file that does not
+parse is the contract. Here the identical behaviour would make a typo'd snippet -- the
+commonest fixture bug there is -- pass every negative assertion vacuously. This is the same
+family as the nonexistent path that exited 0 (D68): a green result that checked nothing.
+
+**A set with no fixtures exits 2 rather than passing.** For the same reason, and the untested
+rules are named rather than counted so a partly-covered pack cannot read like a covered one.
+
+**Gates do not apply.** `unsafe:` holdback and `ruby:` version checks are application-time
+policy about *whether* to run a rule; a fixture tests what it does. Without this, most of the
+interesting pack would be untestable without a flag, and the flag would be D57's disease.
+
+**A case runs the whole document's rule set**, not the single rule its `tests:` key sits on.
+D54 makes the file the unit of identity, and a `method:`/`rename:` pair expands to several rules
+that only mean anything together; per-rule execution would test a mode that never occurs in
+production, which is the drift this feature exists to kill.
+
+*Reverses if:* fixtures prove unable to express the context-dependent rules that matter --
+`type:` narrowing and `scope: inside:` both need the snippet to carry a class or an assignment,
+and if authors find themselves unable to write those snippets, the answer is a declared context
+block rather than abandoning the feature. Deliberately not built yet: two cases is not a
+pattern.

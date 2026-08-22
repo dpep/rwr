@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+**`rwr test` runs a rule's own fixtures.** A rule file may carry `tests:` -- an input snippet
+plus `output:`, `unchanged: true`, or `finds: N` -- and `rwr test rule.yml` (or a directory, or
+a built-in name) checks them. It exits 1 on a failure with a diff, so a custom rule can be
+pinned in CI and upgrading rwr cannot quietly change what it does to real code.
+
+A case that asserts nothing is refused rather than passing: `input:` alone, `output:` with
+`unchanged:`, and `finds:` on a rule that rewrites are all exit 3. A snippet that does not
+parse **fails** rather than being skipped the way `check` skips an unparseable file -- the
+commonest fixture bug is a typo'd snippet, and skipping it would pass every negative assertion
+vacuously. A rule set declaring no fixtures at all exits 2 rather than reporting a green
+nothing.
+
 **A `contains:` rule now reaches templates from any position in a set.** The ERB pass built
 every rule's criteria from the *first* rule's sub-pattern map, so a set whose second rule used
 `contains:` silently matched nothing in `.erb` files -- while the identical rule matched the

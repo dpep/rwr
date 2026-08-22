@@ -58,6 +58,90 @@ pub(crate) struct Rule {
     /// sentence, printed when the rule fires.
     #[serde(default, rename = "unsafe")]
     pub unsafe_because: Option<String>,
+
+    /// Fixtures pinning what this rule does, run by `rwr test`.
+    ///
+    /// Not an option (D57): a fixture parameterizes nothing and cannot change
+    /// what the rule does to any file. It is a falsifiable claim *about* the
+    /// declared behaviour, living beside the declaration for the same reason
+    /// `unsafe:`'s reason does -- the information is worthless anywhere else.
+    #[serde(default)]
+    pub tests: Vec<Case>,
+}
+
+/// One fixture: a snippet, and what the rule set should do to it.
+///
+/// A case that asserts nothing is refused at load rather than passing vacuously,
+/// which is the failure a fixture suite exists to prevent.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Case {
+    /// The snippet, evaluated as a whole Ruby file.
+    ///
+    /// A snippet *is* a file: a rule constrained by `scope: inside:` or a
+    /// `type:` receiver writes the class or the assignment it needs into its own
+    /// input, rather than being handed a synthetic wrapper nobody asked for.
+    pub input: String,
+    /// The expected source afterwards, compared byte for byte.
+    ///
+    /// No normalization, the trailing newline included: this is the
+    /// identity-rewrite philosophy applied to fixtures, and a forgiving
+    /// comparison would hide what the tool actually writes.
+    #[serde(default)]
+    pub output: Option<String>,
+    /// The snippet must come back byte-identical.
+    #[serde(default)]
+    pub unchanged: Option<bool>,
+    /// How many findings a rule proposing no edit should report.
+    #[serde(default)]
+    pub finds: Option<usize>,
+}
+
+impl Case {
+    /// What this case claims, or why it claims nothing.
+    ///
+    /// `rewrites` and `reports` describe the rule *set*, since a case runs the
+    /// whole document (D54 makes the file the unit of identity, and a
+    /// `method:`/`rename:` pair expands to several rules that only mean
+    /// anything together).
+    fn check(&self, rewrites: bool, reports: bool) -> Result<(), String> {
+        if self.output.is_some() && self.unchanged.is_some() {
+            return Err("a case cannot claim both `output:` and `unchanged:`".into());
+        }
+        if self.unchanged == Some(false) {
+            return Err("`unchanged: false` asserts nothing -- say what the output is".into());
+        }
+        if self.output.is_none() && self.unchanged.is_none() && self.finds.is_none() {
+            return Err(
+                "this case asserts nothing -- add `output:`, `unchanged: true` or `finds:`".into(),
+            );
+        }
+        if self.finds.is_some() && !reports {
+            return Err("`finds:` needs a rule that proposes no edit; this set rewrites".into());
+        }
+        if (self.output.is_some() || self.unchanged.is_some()) && !rewrites {
+            return Err(
+                "`output:`/`unchanged:` need a rule with `rewrite:`; this set only reports".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Every fixture in a rule set, checked against what the set can actually do.
+///
+/// Returns the cases in document order. An empty result means the set declares
+/// no fixtures at all, which `rwr test` reports rather than calling a green
+/// nothing.
+pub(crate) fn cases(rules: &[Rule]) -> Result<Vec<Case>, String> {
+    let rewrites = rules.iter().any(|r| r.rewrite.is_some());
+    let reports = rules.iter().any(|r| r.rewrite.is_none());
+    let mut found = Vec::new();
+    for case in rules.iter().flat_map(|r| &r.tests) {
+        case.check(rewrites, reports)?;
+        found.push(case.clone());
+    }
+    Ok(found)
 }
 
 /// What a capture must satisfy beyond matching structurally.

@@ -1126,3 +1126,133 @@ fn bare_invocation_explains_itself() {
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("--help"), "{}", stderr(&out));
 }
+
+/// A rule file carrying its own fixtures, run by `rwr test`.
+fn rule_with(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, body).expect("write rule");
+    path
+}
+
+fn test_run(dir: &std::path::Path, rule: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["test", rule.to_str().expect("utf8")])
+        .current_dir(dir)
+        .output()
+        .expect("binary runs")
+}
+
+/// Fixtures pin what a rule does, so upgrading rwr cannot quietly change it.
+#[test]
+fn fixtures_pass_and_fail_on_their_own_terms() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let good = rule_with(
+        dir.path(),
+        "good.yml",
+        "id: t/detect\n\
+         match: $R.$SEL { |$P| $B }.first\n\
+         where:\n  $SEL:\n    name: [select, find_all]\n\
+         rewrite: $R.detect { |$P| $B }\n\
+         tests:\n\
+         \x20 - input: \"a = xs.select { |x| x.ok? }.first\\n\"\n\
+         \x20   output: \"a = xs.detect { |x| x.ok? }\\n\"\n\
+         \x20 - input: \"a = xs.select { |x| x.ok? }.last\\n\"\n\
+         \x20   unchanged: true\n",
+    );
+    let out = test_run(dir.path(), &good);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let bad = rule_with(
+        dir.path(),
+        "bad.yml",
+        "id: t/bad\nmatch: foo($A)\nrewrite: bar($A)\n\
+         tests:\n\x20 - input: \"foo(1)\\n\"\n\x20   output: \"WRONG(1)\\n\"\n",
+    );
+    let out = test_run(dir.path(), &bad);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("-WRONG(1)") && text.contains("+bar(1)"),
+        "{text}"
+    );
+}
+
+/// The commonest fixture bug: a typo'd snippet. `check` skips a file that does
+/// not parse, and the same behaviour here would pass every negative assertion
+/// vacuously -- so a fixture fails instead.
+#[test]
+fn an_unparseable_snippet_fails_rather_than_passing() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let rule = rule_with(
+        dir.path(),
+        "typo.yml",
+        "id: t/typo\nmatch: foo($A)\nrewrite: bar($A)\n\
+         tests:\n\x20 - input: \"def broken(\\n\"\n\x20   unchanged: true\n",
+    );
+    let out = test_run(dir.path(), &rule);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("does not parse"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// A case that asserts nothing, and a category error, are rule bugs -- caught
+/// before anything runs rather than passing quietly.
+#[test]
+fn a_case_that_asserts_nothing_is_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for (name, body) in [
+        (
+            "empty.yml",
+            "id: t/e\nmatch: foo($A)\nrewrite: bar($A)\n\
+             tests:\n\x20 - input: \"foo(1)\\n\"\n",
+        ),
+        (
+            "both.yml",
+            "id: t/b\nmatch: foo($A)\nrewrite: bar($A)\n\
+             tests:\n\x20 - input: \"foo(1)\\n\"\n\x20   output: \"bar(1)\\n\"\n\x20   unchanged: true\n",
+        ),
+        (
+            "category.yml",
+            "id: t/c\nmatch: foo($A)\nrewrite: bar($A)\n\
+             tests:\n\x20 - input: \"foo(1)\\n\"\n\x20   finds: 1\n",
+        ),
+    ] {
+        let rule = rule_with(dir.path(), name, body);
+        let out = test_run(dir.path(), &rule);
+        assert_eq!(out.status.code(), Some(3), "{name}: {}", stderr(&out));
+    }
+}
+
+/// A pack with no fixtures must not report a green nothing -- that is the
+/// failure this command exists to prevent, arriving through its own front door.
+#[test]
+fn a_rule_without_fixtures_is_not_a_pass() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let rule = rule_with(
+        dir.path(),
+        "none.yml",
+        "id: t/n\nmatch: foo($A)\nrewrite: bar($A)\n",
+    );
+    let out = test_run(dir.path(), &rule);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("no fixtures"), "{}", stderr(&out));
+}
+
+/// A rule proposing no edit asserts counts instead of output.
+#[test]
+fn a_finding_rule_asserts_how_many_it_finds() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let rule = rule_with(
+        dir.path(),
+        "finds.yml",
+        "id: t/finds\ndescription: sleep in application code.\nmatch: sleep($N)\n\
+         tests:\n\
+         \x20 - input: \"sleep 1\\nsleep 2\\n\"\n\x20   finds: 2\n\
+         \x20 - input: \"wake 1\\n\"\n\x20   finds: 0\n",
+    );
+    let out = test_run(dir.path(), &rule);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}

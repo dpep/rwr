@@ -364,6 +364,17 @@ enum Command {
         delete: bool,
     },
 
+    /// Run a rule's own fixtures, pinning what it does.
+    ///
+    /// The object is the *rule*, not a codebase -- which is why this is a verb
+    /// rather than a mode of `check`. It walks nothing and takes no paths, so
+    /// two thirds of `check`'s flags would have had to be rejected as a mode.
+    Test {
+        /// A rule file, a directory of them, or a built-in name.
+        #[arg(value_name = "RULE", value_hint = clap::ValueHint::AnyPath)]
+        rule: String,
+    },
+
     /// Apply a rewrite rule, writing the changes to disk.
     ///
     /// The verb carries the mode — there is no `--write` or `--dry-run`, because
@@ -439,6 +450,7 @@ pub fn run() -> ExitCode {
 
     match command {
         Command::Find { pattern, paths } => cmd_find(&pattern, &paths, &cli.common, out),
+        Command::Test { rule } => cmd_test(&rule, out),
         // `-d` is `-r ''` with a name: an empty template is a deletion, and
         // spelling it as a flag says so out loud.
         Command::Check {
@@ -1682,4 +1694,242 @@ mod tests {
         };
         assert_eq!(c.output(), Output::Ndjson);
     }
+}
+
+/// One fixture's verdict.
+///
+/// `kind` is a closed vocabulary so a caller can branch without parsing prose.
+#[derive(Debug, Serialize)]
+struct CaseResult {
+    rule: String,
+    case: usize,
+    outcome: &'static str,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actual: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TestReport<'a> {
+    schema: u32,
+    rwr_version: &'static str,
+    cases: &'a [CaseResult],
+    /// Rules in the set that declare no fixtures. Named rather than counted --
+    /// a pack whose rules are untested must not read like a pack that passed.
+    untested: &'a [String],
+    passed: usize,
+    failed: usize,
+}
+
+/// Run a rule set's fixtures.
+///
+/// Two policy differences from `check`, both deliberate. Gating does not apply:
+/// `unsafe:` holdback and `ruby:` version checks are application-time policy
+/// about *whether* to run a rule, and a fixture tests what it does. And an
+/// unparseable snippet is a failing case rather than a skip -- in `check`,
+/// skipping a file that does not parse is the contract; here the same behaviour
+/// would make a typo'd snippet pass every negative assertion vacuously, which is
+/// the commonest fixture bug there is.
+fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
+    let rules = match rule::load_all(rule_arg, None) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("rwr: {e}");
+            return Exit::PatternError.into();
+        }
+    };
+    let untested: Vec<String> = rules
+        .iter()
+        .filter(|r| r.tests.is_empty())
+        .map(|r| r.id.clone().unwrap_or_else(|| "(unnamed)".to_string()))
+        .collect();
+    let cases = match rule::cases(&rules) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rwr: {rule_arg}: {e}");
+            return Exit::PatternError.into();
+        }
+    };
+    if cases.is_empty() {
+        // A green nothing is the failure this command exists to prevent, so it
+        // must not be how a fixture-less pack reports.
+        eprintln!("rwr: {rule_arg} declares no fixtures -- add `tests:` to a rule");
+        return Exit::Error.into();
+    }
+
+    // The names before the set moves into the engine.
+    let names: Vec<String> = rules
+        .iter()
+        .map(|r| r.id.clone().unwrap_or_else(|| "(unnamed)".to_string()))
+        .collect();
+    let label = names.first().cloned().unwrap_or_default();
+    let engine = match crate::engine::Engine::new(rules) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("rwr: {e}");
+            return Exit::PatternError.into();
+        }
+    };
+
+    let mut results: Vec<CaseResult> = Vec::new();
+    for (index, case) in cases.iter().enumerate() {
+        let bytes = case.input.as_bytes();
+        // The snippet supplies its own context: a rule needing a class or a
+        // signature writes it into the input, rather than being handed one.
+        let sources = [source::Source::Owned(bytes.to_vec())];
+        let context = engine.context(&sources);
+        let outcome = engine.scan("fixture.rb", bytes, &context, None);
+
+        let (kind, actual, findings) = match &outcome {
+            crate::engine::ScanOutcome::Unparseable => ("invalid_ruby", None, 0),
+            crate::engine::ScanOutcome::Refused(reason) => ("refused", Some(reason.clone()), 0),
+            crate::engine::ScanOutcome::Quiet => ("no_match", None, 0),
+            crate::engine::ScanOutcome::Scanned(s) => (
+                if s.sites > 0 { "rewrote" } else { "reported" },
+                s.rewritten.clone(),
+                s.flagged.len(),
+            ),
+        };
+        let text = actual.clone().unwrap_or_else(|| case.input.clone());
+
+        let (outcome_word, kind, expected, actual) = if kind == "invalid_ruby" {
+            ("fail", "invalid_ruby", None, None)
+        } else if kind == "refused" {
+            ("fail", "refused", None, actual)
+        } else if let Some(want) = &case.output {
+            if &text == want {
+                ("pass", "rewrote", None, None)
+            } else {
+                ("fail", "output_mismatch", Some(want.clone()), Some(text))
+            }
+        } else if case.unchanged == Some(true) {
+            if text == case.input {
+                ("pass", "unchanged", None, None)
+            } else {
+                (
+                    "fail",
+                    "unexpected_rewrite",
+                    Some(case.input.clone()),
+                    Some(text),
+                )
+            }
+        } else if let Some(want) = case.finds {
+            if findings == want {
+                ("pass", "reported", None, None)
+            } else {
+                (
+                    "fail",
+                    "wrong_finds",
+                    Some(want.to_string()),
+                    Some(findings.to_string()),
+                )
+            }
+        } else {
+            // `rule::cases` refuses a case that asserts nothing, so this is
+            // unreachable rather than a silent pass.
+            ("fail", "asserts_nothing", None, None)
+        };
+
+        results.push(CaseResult {
+            rule: label.clone(),
+            case: index + 1,
+            outcome: outcome_word,
+            kind,
+            expected,
+            actual,
+        });
+    }
+
+    let failed = results.iter().filter(|r| r.outcome == "fail").count();
+    let passed = results.len() - failed;
+
+    match out {
+        Output::Text => {
+            for r in results.iter().filter(|r| r.outcome == "fail") {
+                println!("FAIL {} case {} — {}", r.rule, r.case, explain_kind(r.kind));
+                if let (Some(want), Some(got)) = (&r.expected, &r.actual) {
+                    for line in diff_lines(want, got) {
+                        println!("  {line}");
+                    }
+                }
+            }
+            println!(
+                "{passed} passed, {failed} failed{}",
+                if untested.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; {} rule(s) declare no fixtures: {}",
+                        untested.len(),
+                        untested.join(", ")
+                    )
+                }
+            );
+        }
+        _ => {
+            let report = TestReport {
+                schema: 1,
+                rwr_version: env!("CARGO_PKG_VERSION"),
+                cases: &results,
+                untested: &untested,
+                passed,
+                failed,
+            };
+            if let Some(code) = emit_document(out, &report) {
+                return code;
+            }
+        }
+    }
+
+    if failed > 0 {
+        Exit::Negative.into()
+    } else {
+        Exit::Ok.into()
+    }
+}
+
+/// One line on what a failure kind means, so the diff is not the only clue.
+fn explain_kind(kind: &str) -> &'static str {
+    match kind {
+        "invalid_ruby" => {
+            "the snippet does not parse; a fixture that cannot be read cannot test anything"
+        }
+        "refused" => "the rule refused to edit this snippet",
+        "output_mismatch" => "the rewrite did not produce the expected source",
+        "unexpected_rewrite" => "expected no change, but the rule rewrote it",
+        "wrong_finds" => "wrong number of findings",
+        _ => "asserts nothing",
+    }
+}
+
+/// A minimal line diff, enough to see which line moved.
+fn diff_lines(want: &str, got: &str) -> Vec<String> {
+    let mut out = vec!["--- expected".to_string(), "+++ actual".to_string()];
+    let (w, g): (Vec<&str>, Vec<&str>) = (want.lines().collect(), got.lines().collect());
+    for line in &w {
+        if !g.contains(line) {
+            out.push(format!("-{line}"));
+        }
+    }
+    for line in &g {
+        if !w.contains(line) {
+            out.push(format!("+{line}"));
+        }
+    }
+    // A trailing-newline difference is invisible line by line, and is the
+    // commonest YAML slip (`|` versus `|-`).
+    if want.ends_with('\n') != got.ends_with('\n') {
+        out.push(format!(
+            "(expected {} trailing newline, actual {})",
+            if want.ends_with('\n') { "a" } else { "no" },
+            if got.ends_with('\n') {
+                "has one"
+            } else {
+                "has none"
+            }
+        ));
+    }
+    out
 }
