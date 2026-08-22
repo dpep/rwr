@@ -3,7 +3,7 @@
 ## Unreleased
 
 **`# rwr:ignore <rule-id>` accepts a finding at the site.** Trailing on a line, or leading above
-one. It covers the **outermost node starting on the attached line**, so a directive above a
+one. It covers the **outermost statement starting on the attached line**, so a directive above a
 `def` covers the whole method rather than its signature — rwr has the parse tree, and a
 line-scoped directive would leave that on the table. No `disable`/`enable` block form: a
 forgotten terminator silently suppresses the rest of a file, which is the blind spot this tool

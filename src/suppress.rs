@@ -11,6 +11,8 @@
 //! rather than prose about the code. They suppress findings and edits, never
 //! residue. The account of blind spots is the product.
 
+use ruby_prism::Node;
+
 /// What a `# rwr:ignore` comment says.
 #[derive(Debug, Clone)]
 pub(crate) struct Directive {
@@ -146,10 +148,13 @@ pub(crate) fn directives(
     (found, malformed)
 }
 
-/// The widest node starting on each line.
+/// The widest *statement* starting on each line.
 ///
-/// Widest rather than innermost: the directive is about the thing that begins
-/// there, and for `def three` that is the method, not its name.
+/// Statements, not nodes: the widest node starting on a line is the program
+/// itself whenever a directive sits above the first statement in a file, since
+/// a comment is not in the tree and the root therefore begins at the same line.
+/// That made one directive cover the whole file. A unit is a child of a
+/// `StatementsNode` -- which is exactly "a thing you could put a comment above".
 fn widest_by_line(
     parsed: &ruby_prism::ParseResult<'_>,
     source: &[u8],
@@ -158,16 +163,20 @@ fn widest_by_line(
         std::collections::HashMap::new();
     let mut stack = vec![crate::pattern::generated::dup(&parsed.node())];
     while let Some(node) = stack.pop() {
-        let location = node.location();
-        let (start, end) = (location.start_offset(), location.end_offset());
-        let line = crate::source::line_col(source, start).0;
-        out.entry(line)
-            .and_modify(|span| {
-                if end - start > span.1 - span.0 {
-                    *span = (start, end);
-                }
-            })
-            .or_insert((start, end));
+        if matches!(node, Node::StatementsNode { .. }) {
+            for statement in crate::pattern::generated::children(&node) {
+                let location = statement.location();
+                let (start, end) = (location.start_offset(), location.end_offset());
+                let line = crate::source::line_col(source, start).0;
+                out.entry(line)
+                    .and_modify(|span| {
+                        if end - start > span.1 - span.0 {
+                            *span = (start, end);
+                        }
+                    })
+                    .or_insert((start, end));
+            }
+        }
         stack.extend(crate::pattern::generated::children(&node));
     }
     out
@@ -232,6 +241,34 @@ mod tests {
         assert!(found[0].covers(Some("a/b"), at(src, "return nil")));
         // And stops at its end.
         assert!(!found[0].covers(Some("a/b"), src.len()));
+    }
+
+    /// A directive above the *first* statement in a file must not take the
+    /// file. The widest node starting on that line is the program itself --
+    /// a comment is not in the tree, so the root begins on the same line -- and
+    /// scoping by node rather than by statement silently swallowed everything
+    /// below.
+    #[test]
+    fn a_directive_stops_at_the_end_of_its_statement() {
+        let src =
+            "# rwr:ignore a/b\ndef covered\n  return nil\nend\n\ndef after\n  return nil\nend\n";
+        let (found, _) = read(src);
+        let inside = at(src, "return nil");
+        let outside = src.rfind("return nil").expect("second");
+        assert!(found[0].covers(Some("a/b"), inside));
+        assert!(
+            !found[0].covers(Some("a/b"), outside),
+            "must not reach the next method"
+        );
+    }
+
+    /// Everything nested inside the covered statement is covered, including a
+    /// block several levels down -- that is what "the whole method" means.
+    #[test]
+    fn a_directive_reaches_nested_statements() {
+        let src = "# rwr:ignore a/b\ndef covered\n  [1].each do\n    return nil\n  end\nend\n";
+        let (found, _) = read(src);
+        assert!(found[0].covers(Some("a/b"), at(src, "return nil")));
     }
 
     /// Stacked above a doc comment, it still reaches the code.
