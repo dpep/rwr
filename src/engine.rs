@@ -133,6 +133,12 @@ pub(crate) struct Scanned {
     pub(crate) sites: usize,
     /// Why candidates were declined. Empty unless `-e` asked.
     pub(crate) rejections: Vec<Rejection>,
+    /// Findings a `# rwr:ignore` directive accepted.
+    pub(crate) suppressed: Vec<crate::suppress::Suppressed>,
+    /// Directives that accepted nothing -- stale debt, reported unconditionally.
+    pub(crate) stale: Vec<crate::suppress::Stale>,
+    /// Directives naming no rule, which cannot be audited.
+    pub(crate) malformed: Vec<crate::suppress::Malformed>,
     /// Classes this source's matched receivers resolved to, for the
     /// cross-class warning. Empty unless the rule set narrows by none.
     pub(crate) spread: Vec<String>,
@@ -307,6 +313,12 @@ impl Engine {
         let mut spread: Vec<String> = Vec::new();
         let mut flagged: Vec<Finding> = Vec::new();
         let mut rejections: Vec<Rejection> = Vec::new();
+        let mut suppressed: Vec<crate::suppress::Suppressed> = Vec::new();
+        // Keyed by document order, which survives the rewrites of a run where a
+        // line number does not.
+        let mut used: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+        let mut directives: Vec<crate::suppress::Directive> = Vec::new();
+        let mut malformed: Vec<crate::suppress::Malformed> = Vec::new();
 
         // One parse serves every rule until a rule actually rewrites something.
         // It used to be one parse *per rule*, so a ten-rule pack parsed each
@@ -323,6 +335,16 @@ impl Engine {
                 if parsed.errors().count() > 0 {
                     return ScanOutcome::Unparseable;
                 }
+                let (here, bad) = crate::suppress::directives(&parsed, &current);
+                directives = here;
+                malformed = bad
+                    .into_iter()
+                    .map(|(line, why)| crate::suppress::Malformed {
+                        file: label.to_string(),
+                        line,
+                        why,
+                    })
+                    .collect();
                 let mut outcome = Ok(());
                 for (index, (rule, prepared)) in self
                     .rules
@@ -375,6 +397,32 @@ impl Engine {
                                         bound: r.bound.map(|(a, b)| {
                                             String::from_utf8_lossy(&current[a..b]).into_owned()
                                         }),
+                                    });
+                                }
+                                // Accepted findings drop out before anything
+                                // else looks at them, so `check` and `rewrite`
+                                // cannot disagree about which sites exist.
+                                if !directives.is_empty() {
+                                    hits.retain(|m| {
+                                        let (start, _) = rewrite::effective_range(&m.node);
+                                        let (line, _) = source::line_col(&current, start);
+                                        let id = rule.id.as_deref();
+                                        match directives.iter().find(|d| d.covers(id, start)) {
+                                            None => true,
+                                            Some(d) => {
+                                                used.insert((
+                                                    d.index,
+                                                    id.unwrap_or_default().to_string(),
+                                                ));
+                                                suppressed.push(crate::suppress::Suppressed {
+                                                    file: label.to_string(),
+                                                    line,
+                                                    rule: rule.id.clone(),
+                                                    source: "directive",
+                                                });
+                                                false
+                                            }
+                                        }
                                     });
                                 }
                                 if let Some(only) = only {
@@ -473,13 +521,44 @@ impl Engine {
             }
         }
 
+        // A directive that accepted nothing is stale debt -- the symmetry that
+        // keeps this from becoming rubocop_todo: a suppression whose finding is
+        // gone is itself a finding. Only asserted for rules this run actually
+        // evaluated; a directive naming a rule from another pack is left alone.
+        let mine: Vec<&str> = self.rules.iter().filter_map(|r| r.id.as_deref()).collect();
+        let stale: Vec<crate::suppress::Stale> = directives
+            .iter()
+            .flat_map(|d| {
+                d.rules
+                    .iter()
+                    .filter(|r| mine.contains(&r.as_str()))
+                    .filter(|r| !used.contains(&(d.index, (*r).clone())))
+                    .map(|r| crate::suppress::Stale {
+                        file: label.to_string(),
+                        line: d.line,
+                        rule: r.clone(),
+                        source: "directive",
+                    })
+            })
+            .collect();
+
         let residue = self.residue(label, &current, ctx);
-        if total == 0 && residue.is_empty() && flagged.is_empty() && rejections.is_empty() {
+        if total == 0
+            && residue.is_empty()
+            && flagged.is_empty()
+            && rejections.is_empty()
+            && suppressed.is_empty()
+            && stale.is_empty()
+            && malformed.is_empty()
+        {
             return ScanOutcome::Quiet;
         }
         ScanOutcome::Scanned(Box::new(Scanned {
             sites: total,
             rejections,
+            suppressed,
+            stale,
+            malformed,
             spread,
             flagged,
             by_rule,

@@ -1387,3 +1387,90 @@ fn name_not_excludes_without_an_ignore_list() {
         .expect("binary runs");
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
 }
+
+/// `# rwr:ignore <rule-id>` accepts a finding at the site, and says so.
+///
+/// The unit is the node, not the line: above a `def`, it covers the method.
+/// Line-scoping would leave a directive sitting above a definition covering
+/// nothing but its signature, which is never what anyone means -- and rwr is
+/// the tool that can do better, because it has the tree.
+#[test]
+fn a_directive_accepts_a_finding_and_reports_that_it_did() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("app.rb"),
+        "def one\n  return nil\nend\n\n\
+         def two\n  return nil  # rwr:ignore style/return-nil\nend\n\n\
+         # rwr:ignore style/return-nil\ndef three\n  return nil\nend\n\n\
+         # rwr:ignore style/return-nil\ndef four\n  1\nend\n",
+    )
+    .expect("write");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    let out = run(&["check", "style/return-nil", "app.rb"]);
+    let (stdout, err) = (String::from_utf8_lossy(&out.stdout), stderr(&out));
+    assert!(
+        stdout.contains("1 site(s)"),
+        "only the unsuppressed one: {stdout}"
+    );
+    // Unconditional: a mechanism that can silence a run must never be able to
+    // silence itself.
+    assert!(err.contains("2 finding(s) accepted"), "{err}");
+
+    // A directive with nothing left to accept is itself reported -- the
+    // symmetry that stops this becoming a permanent monument.
+    assert!(err.contains("stale"), "{err}");
+    assert!(err.contains("app.rb:14"), "names the stale one: {err}");
+
+    // `rewrite` must agree with its own preview (D29), or the preview lies.
+    let out = run(&["rewrite", "style/return-nil", "app.rb"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = std::fs::read_to_string(path.join("app.rb")).expect("read");
+    assert!(after.contains("def two\n  return nil  #"), "kept: {after}");
+    assert!(after.contains("def three\n  return nil"), "kept: {after}");
+    assert!(after.contains("def one\n  return\n"), "rewrote: {after}");
+}
+
+/// A directive naming no rule cannot be checked for staleness, so it is an
+/// error rather than a very effective directive.
+#[test]
+fn a_bare_directive_is_reported_and_suppresses_nothing() {
+    let dir = fixture("def a\n  return nil  # rwr:ignore\nend\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "style/return-nil", "fixture.rb"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "not suppressed: {}",
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("names no rule"), "{}", stderr(&out));
+}
+
+/// Machine consumers see the suppressions too, always -- an agent reading `-j`
+/// must not see a clean tree that a directive made clean.
+#[test]
+fn suppressions_are_always_in_structured_output() {
+    let dir = fixture("def a\n  return nil  # rwr:ignore style/return-nil\nend\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "style/return-nil", "fixture.rb", "-j"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(doc["suppressed"][0]["rule"], "style/return-nil");
+    assert_eq!(doc["suppressed"][0]["source"], "directive");
+    // Present and empty rather than absent: the run made the claim.
+    assert!(doc["stale_suppressions"].is_array());
+}

@@ -564,6 +564,40 @@ fn report_by_rule(changed: &[Changed]) {
     }
 }
 
+/// Say what a suppression accepted, and what it no longer accepts.
+///
+/// Unconditional, unlike rejections. A mechanism that can silence a run must
+/// never be able to silence itself -- a baseline or a directive nobody sees is
+/// how RuboCop's todo file became permanent. The counts print even when the
+/// reader would rather they did not.
+fn report_suppressions(
+    suppressed: &[crate::suppress::Suppressed],
+    stale: &[crate::suppress::Stale],
+    malformed: &[crate::suppress::Malformed],
+) {
+    if !suppressed.is_empty() {
+        eprintln!(
+            "rwr: {} finding(s) accepted by rwr:ignore directive(s)",
+            suppressed.len()
+        );
+    }
+    if !stale.is_empty() {
+        // Reported, not failed: the drain is not forced. A stale directive
+        // cannot keep silencing anything -- its finding is already gone -- so
+        // what is left is tidying, and tidying does not block a commit.
+        eprintln!(
+            "rwr: {} stale rwr:ignore directive(s) -- nothing left to accept there:",
+            stale.len()
+        );
+        for d in stale.iter().take(RESIDUE_DETAIL_CAP) {
+            eprintln!("  {}:{}: {} -- delete the comment", d.file, d.line, d.rule);
+        }
+    }
+    for d in malformed {
+        eprintln!("rwr: {}:{}: rwr:ignore {}", d.file, d.line, d.why);
+    }
+}
+
 /// Say why candidates were declined.
 ///
 /// Behind `-e`, unlike residue: a rejection is detail about a site the rule
@@ -1089,6 +1123,14 @@ struct Report<'a> {
     /// nobody asked, not that nothing was declined.
     #[serde(skip_serializing_if = "Option::is_none")]
     rejections: Option<&'a [Rejection]>,
+    /// Findings a suppression accepted. Always present: a run that silenced
+    /// something must say so in the machine-readable output too, or an agent
+    /// reads a clean tree.
+    suppressed: &'a [crate::suppress::Suppressed],
+    /// Suppressions with nothing left to accept.
+    stale_suppressions: &'a [crate::suppress::Stale],
+    /// Directives naming no rule.
+    malformed_directives: &'a [crate::suppress::Malformed],
 }
 
 /// What running the rules over one template produced.
@@ -1593,6 +1635,19 @@ fn cmd_apply(
         }
     }
 
+    let suppressed: Vec<crate::suppress::Suppressed> = outcomes
+        .iter()
+        .flat_map(|o| o.scanned.suppressed.iter().cloned())
+        .collect();
+    let stale: Vec<crate::suppress::Stale> = outcomes
+        .iter()
+        .flat_map(|o| o.scanned.stale.iter().cloned())
+        .collect();
+    let malformed: Vec<crate::suppress::Malformed> = outcomes
+        .iter()
+        .flat_map(|o| o.scanned.malformed.iter().cloned())
+        .collect();
+
     let mut rejections: Vec<Rejection> = outcomes
         .iter()
         .flat_map(|o| o.scanned.rejections.iter().cloned())
@@ -1633,6 +1688,7 @@ fn cmd_apply(
             );
             report_unsafe(&changed, rules);
             report_rejections(&rejections);
+            report_suppressions(&suppressed, &stale, &malformed);
             report_residue(&left_over);
             // Only the templates that fell back: one rwr parsed has real
             // evidence and does not belong in a paragraph about guesses.
@@ -1655,6 +1711,9 @@ fn cmd_apply(
                     0
                 },
                 rejections: common.explain.then_some(rejections.as_slice()),
+                suppressed: &suppressed,
+                stale_suppressions: &stale,
+                malformed_directives: &malformed,
             };
             if emit_document(out, &report).is_some() {
                 return Exit::Error.into();

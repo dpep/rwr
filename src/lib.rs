@@ -22,3 +22,4 @@ pub(crate) mod ruby;
 pub(crate) mod rule;
 pub(crate) mod sigs;
 pub(crate) mod source;
+pub(crate) mod suppress;

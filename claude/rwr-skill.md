@@ -211,6 +211,41 @@ refusal, not a precedence rule.
 
 Works with `find`, `check` and `rewrite`.
 
+## Accepting a finding you are not going to fix
+
+```ruby
+sleep 0.1  # rwr:ignore style/no-sleep
+
+# rwr:ignore style/no-sleep, performance/detect
+def wait_for_worker
+  sleep 0.1        # covered — the directive takes the whole method
+end
+```
+
+Trailing on a line, or leading above one. It covers the **outermost node
+starting on the attached line**, so above a `def` it means the method. There is
+no `disable`/`enable` block form — a forgotten terminator would silently
+suppress the rest of a file.
+
+Rule ids are required: a bare `# rwr:ignore` is reported as malformed and
+suppresses nothing. `rewrite` honours directives exactly as `check` does.
+
+Every run says how many findings were accepted and which directives have nothing
+left to accept, in text and in `-j`. Stale ones do not fail the build.
+
+**Before reaching for it, ask which of these you mean** — they are not
+interchangeable:
+
+| You believe | Use |
+|---|---|
+| The finding is wrong; the rule over-matches | a `where:` predicate — `name_not:`, `type:` |
+| Code this change touched must be clean | `--diff` / `--since` |
+| This one site is a deliberate exception | `# rwr:ignore` |
+
+Narrow before you suppress. If you would have to explain why the finding is
+*wrong*, fix the rule instead — a suppression records debt, and recording debt
+that is not debt leaves the rule broken for the next repo.
+
 ## Safety signals to actually read
 
 Three things rwr says that are worth acting on rather than skimming:

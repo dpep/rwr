@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+**`# rwr:ignore <rule-id>` accepts a finding at the site.** Trailing on a line, or leading above
+one. It covers the **outermost node starting on the attached line**, so a directive above a
+`def` covers the whole method rather than its signature — rwr has the parse tree, and a
+line-scoped directive would leave that on the table. No `disable`/`enable` block form: a
+forgotten terminator silently suppresses the rest of a file, which is the blind spot this tool
+exists to refuse.
+
+Rule ids are required. A bare `# rwr:ignore` is reported as malformed and suppresses nothing,
+because a blanket ignore is one no staleness check can audit. A directive naming a rule outside
+the current run is left alone.
+
+**Suppressions report themselves, unconditionally.** How many findings were accepted, and which
+directives have nothing left to accept, print on every run and appear in `-j` — a mechanism that
+can silence a run must never be able to silence itself. Stale directives are reported but do not
+set the exit code: their finding is already gone, so what remains is tidying.
+
+`rewrite` honours directives identically to `check`, since `check` is its preview.
+
 **`name_not:` excludes identifiers.** `where:` could say `name: [a, b]` but had no negation, so
 a rule that over-matched on common tokens had nowhere to say so. Asymmetric with `name:` on
 purpose: `name:` fails a capture with no identifier, `name_not:` passes one -- nothing that is

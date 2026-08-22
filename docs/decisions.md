@@ -1593,3 +1593,83 @@ field names are shared.
 *Reverses if:* a repo-wide `-e` proves too loud to use -- the obvious next move would be a cap
 like residue's, but rejections only exist where a pattern matched structurally and a constraint
 refused, so the volume is bounded by how narrow the rule already is.
+
+## D71 - An accepted finding is one concept; a predicate is not a suppression
+**Decided.**
+
+Two requests -- a baseline file and inline directives -- are two spellings of one thing, an
+*acknowledged* finding: "this is real, I have seen it, stop failing on it." They share one
+engine, one report shape, and one rule: **a suppression whose finding is gone is itself a
+finding.** A mechanism that can silence a run must never be able to silence itself, which is
+exactly how RuboCop's todo file became a permanent monument.
+
+A `where:` predicate is deliberately outside this system. It says the finding was *wrong* -- the
+rule over-matched -- so a predicate-excluded site is not counted, not reported, and not debt.
+The teaching rule, one sentence: **narrow before you suppress; if you would have to explain why
+the finding is wrong, fix the rule.**
+
+Four ways a finding can stop failing a run, each canonical for one situation:
+
+| You believe | Mechanism | Lifetime |
+|---|---|---|
+| The finding is wrong | a `where:` predicate (`name_not:`) | permanent, portable to every repo |
+| Touched code must be clean | `--diff` / `--since` | per run, no state |
+| Existing stock accepted, new ones not | a baseline | temporary, drains |
+| This one site is a deliberate exception | `# rwr:ignore` | permanent, visible at the site, reviewed with the code |
+
+Cutting any one pushes its case onto a mechanism that serves it badly: without the baseline,
+adoption means a 2,000-line cleanup PR; without directives, permanent exceptions live in the
+baseline, invisible at the site and guaranteeing it never drains.
+
+*Reverses if:* the two suppression surfaces develop genuinely different needs -- per-site expiry
+dates, say -- at which point the shared engine is the wrong unification and they should be split
+honestly rather than parameterized.
+
+## D72 - Directives are node-scoped, rule-named, and never touch residue
+**Decided.** Amends D67.
+
+`# rwr:ignore <rule-id>`, trailing on a line or leading above one.
+
+**D67 said comments are never matched or rewritten, and it stands.** Its prohibitions are on
+treating comments as *code* (matching them is ripgrep with extra steps) and on rewriting prose
+(which mention is meant is unknowable). A directive addressed to rwr is a third category:
+instructions, not prose. They are read, never matched, never rewritten, and never counted as
+residue. **Directives suppress findings and edits; they cannot touch the residue report**, which
+is the account of blind spots and is the product.
+
+**The unit is the node, not the line.** A directive attaches to its own line when code precedes
+it and otherwise to the next line carrying code (comment lines skipped so it reaches past a doc
+block; a blank line ends the search, per D35's adjacency). It then covers the *outermost node
+starting on that line*. Line scoping was implemented first and was wrong in the common case: a
+directive above `def three` covered only the signature while the violation sat in the body, so
+it suppressed nothing and reported itself stale. Line scoping in a structural tool leaves the
+whole advantage on the table -- rwr has the tree, and no line-based tool can offer this.
+
+**No block form.** A `disable`/`enable` pair with a forgotten terminator silently suppresses the
+rest of a file, which is the invisible blind spot this tool exists to refuse. A mandatory
+terminator only converts that into "hope the reviewer notices it is 400 lines down". Node
+scoping gets the useful part of a block with nothing to forget to close.
+
+**Rule ids are mandatory.** A bare `# rwr:ignore` is a blanket blind spot that no staleness
+check can audit, so it is reported as malformed and suppresses nothing. A directive naming a
+rule outside the current run is left alone: it belongs to another pack, and it is neither
+honoured nor stale. A bare-pattern run has no id and is not covered -- suppression is for
+standing enforcement, and an ad-hoc query is exploration by someone who typed the pattern
+seconds ago.
+
+**`rewrite` honours directives identically to `check`**, because `check` is the preview of
+`rewrite` (D29) and a preview that disagreed would be a lie. Draining is spelled by fixing the
+code, not by a flag. Deletion (D66) takes a directive with it for free: a trailing one is on the
+match's own line and a leading one is a comment directly above, both already inside the unit.
+
+**Stale directives are reported, not failed.** The count and the sites print unconditionally,
+never behind `-e`. They do not set the exit code: a stale directive cannot keep silencing
+anything -- its finding is already gone -- so what remains is tidying, and tidying should not
+block a commit. The recorded tradeoff is that nothing then *forces* the drain, which is the
+mechanism by which todo files calcify; the self-expiring scope means a stale directive is inert
+rather than dangerous, so the failure mode is clutter rather than silence.
+
+*Reverses if:* real packs show a legitimate need for a wider-than-node exception that neither a
+predicate nor a baseline serves -- the evidence would be users stacking many identical
+directives in one file -- or if stale directives accumulate in real repos, in which case failing
+on them is a one-line change and should be an amendment here rather than a flag.
