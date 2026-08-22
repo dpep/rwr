@@ -167,13 +167,45 @@ and `Company#display_name` are different methods. The rule renamed both. Add a
 prints why for each; `--unsafe` runs them anyway. Read the reasons before
 passing it.
 
-**`N template file(s) were not searched`.** ERB and Haml embed Ruby that rwr
-does not parse, so the completeness claim covers `.rb` and friends only. In a
-Rails app a real share of call sites lives there and needs checking by hand.
+**`N occurrence(s) ... found by text search rather than parsed`.** ERB is parsed
+like Ruby, so a rename reaches inside a view. Haml is not: those files are
+text-searched and reported as their own, weaker class. Treat anything in that
+block as a lead to check by hand, not a fact.
 
 Rules whose output needs a newer Ruby than the codebase targets are also held
 back — detected from `.ruby-version`, a Gemfile `ruby` line, or a gemspec's
 `required_ruby_version`, and overridable with `--ruby X.Y`.
+
+## Deleting
+
+```sh
+rwr rewrite 'def legacy_total($A); $B; end' -d
+```
+
+Removes the definition *and* the doc comment above it, plus one of the blank
+lines that separated it, so the survivors keep their spacing. `-r ''` means the
+same thing. A match that does not occupy whole lines of its own is refused —
+deleting `a.name` out of `x = a.name` would leave `x = ` and swallow the line
+below.
+
+## Rules that only report
+
+A rule with no `rewrite:` is a **finding**: it prints its matches with its
+`description` and proposes no edit, and still exits 1 so a gate can act on it.
+Use it for shapes where the right answer depends on something rwr cannot see.
+
+`contains:` puts a whole sub-pattern inside a constraint, with shared
+metavariables required to refer to the same thing:
+
+```yaml
+match: $R.each { |$X| $B }
+where:
+  $B: { contains: $X.$ASSOC.$FIELD }
+```
+
+Inside `{ ... }`, a comma, brace or bracket belongs to YAML — quote such a
+pattern or use indented keys. rwr refuses loudly rather than running a rule that
+silently matches nothing.
 
 ## Exit codes
 
@@ -182,7 +214,7 @@ back — detected from `.ruby-version`, a Gemfile `ruby` line, or a gemspec's
 | 0 | matched (`find`) / nothing to change (`check`) / applied (`rewrite`) |
 | 1 | no match (`find`) / there is work to do (`check`) |
 | 2 | usage error |
-| 3 | the pattern or rule is wrong |
+| 3 | the pattern or rule is wrong — including an unknown field, a constraint on a capture the pattern never binds, or a template metavariable that was never captured |
 | 4 | retryable — an edit sat inside a wider one; **run again** |
 | 5 | refused — ambiguity, and zero edits were made |
 
