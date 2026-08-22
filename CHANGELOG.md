@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+**A `contains:` rule now reaches templates from any position in a set.** The ERB pass built
+every rule's criteria from the *first* rule's sub-pattern map, so a set whose second rule used
+`contains:` silently matched nothing in `.erb` files -- while the identical rule matched the
+identical code in a `.rb` file, and matched fine as a set of one. Exit 0, no diagnostic.
+
 **`--diff` no longer eats a path.** It took an optional revision, so `rwr check all --diff app/`
 built the range `app/...` and failed inside git. `--diff` now takes **no value** and the new
 `--since REV` requires one, so no token's role depends on what it looks like. `--diff main`

@@ -1364,12 +1364,7 @@ fn cmd_apply(
                 let Some(p_root) = matcher::pattern_root(&p_node) else {
                     continue;
                 };
-                // FIXME: index 0 rather than `index` -- a set whose second
-                // rule uses `contains:` gets the first rule's sub-patterns.
-                // Preserved verbatim through the Engine extraction so this
-                // commit changes structure only; fixed next.
-                let _ = index;
-                let criteria = engine.criteria(0, &context);
+                let criteria = engine.criteria(index, &context);
                 let hits = matcher::search(&p_root, &ruby.node(), prepared, &criteria);
 
                 // Residue first: it reads the *current* text either way.

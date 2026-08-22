@@ -671,6 +671,63 @@ fn diff_outside_a_repository_is_an_error() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
 
+/// A rule's `contains:` sub-patterns are its own, wherever it sits in the set.
+///
+/// The ERB pass built every rule's criteria from the *first* rule's sub-pattern
+/// map, so a set whose second rule used `contains:` silently matched nothing in
+/// templates -- while the identical rule matched the identical code in a `.rb`
+/// file, and alone in a set of one.
+#[test]
+fn a_contains_rule_reaches_templates_from_any_position() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("rules.yml"),
+        "- id: first\n  \
+           description: Matches nothing here.\n  \
+           match: never_called($Z)\n  \
+           where:\n    $Z: { contains: nothing_at_all }\n  \
+           rewrite: gone($Z)\n\
+         - id: second\n  \
+           description: Log calls that mention a widget.\n  \
+           match: log($M)\n  \
+           where:\n    $M: { contains: widget }\n  \
+           rewrite: audit($M)\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("page.erb"),
+        "<div>\n  <% log(widget.name) %>\n</div>\n",
+    )
+    .expect("write");
+    std::fs::write(path.join("plain.rb"), "log(widget.name)\n").expect("write");
+
+    let rules = path.join("rules.yml");
+    let run = |target: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["check", rules.to_str().unwrap(), target])
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    // The same rule, the same call, in the two file kinds.
+    let ruby = run("plain.rb");
+    assert_eq!(ruby.status.code(), Some(1), "{}", stderr(&ruby));
+    let erb = run("page.erb");
+    assert_eq!(
+        erb.status.code(),
+        Some(1),
+        "the template too: {}",
+        String::from_utf8_lossy(&erb.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&erb.stdout).contains("page.erb"),
+        "{}",
+        String::from_utf8_lossy(&erb.stdout)
+    );
+}
+
 /// ERB is parsed and Haml is searched, and the report distinguishes them.
 ///
 /// A Rails app keeps a large share of its call sites in templates, and a rename
