@@ -831,6 +831,33 @@ fn a_pattern_yaml_truncated_refuses_loudly() {
     assert_ne!(ok.status.code(), Some(3), "{}", stderr(&ok));
 }
 
+/// A template whose tags do not stitch into valid Ruby is not silently skipped.
+///
+/// It falls back to the text search, which says it is weaker -- the one thing
+/// that must not happen is for the file to vanish from the account, because
+/// then a rename under-reports and says nothing about it.
+#[test]
+fn an_unstitchable_template_falls_back_to_text() {
+    let dir = fixture("class Account\n  def display_name; 1; end\nend\n");
+    // `end` with nothing opened: valid ERB, not valid Ruby.
+    std::fs::write(
+        dir.path().join("broken.html.erb"),
+        "<% end %>\n<p><%= account.display_name %></p>\n",
+    )
+    .expect("write");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(&rule, "method: Account#display_name\nrename: full_name\n").expect("write");
+
+    let out = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(err.contains("found by text search"), "{err}");
+    assert!(err.contains("broken.html.erb"), "{err}");
+}
+
 /// No arguments is a usage error, not a silent no-op.
 #[test]
 fn bare_invocation_explains_itself() {

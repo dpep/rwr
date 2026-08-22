@@ -55,6 +55,60 @@ fn rwr(args: &[&str]) -> std::process::Output {
 ///
 /// A wrong offset here produces output that still parses -- so reparse-verify
 /// cannot catch it, and only comparing against the input can.
+/// The same property over ERB, where it guards something harder.
+///
+/// A rewrite through a template computes edits against a *stitched* Ruby
+/// buffer and maps them back through a fragment map. An off-by-one anywhere in
+/// that map corrupts the template while still producing valid output, and
+/// nothing else in the suite would notice. An identity rewrite has to come back
+/// byte-identical.
+#[test]
+fn an_identity_rewrite_through_erb_changes_nothing() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cases: &[&str] = &[
+        "<h1><%= account.display_name %></h1>\n",
+        // Two tags on one line: the map has to keep them apart.
+        "<p><%= a.display_name %> and <%= b.display_name %></p>\n",
+        // Control flow, which only parses because the tags are stitched.
+        "<% accounts.each do |account| %>\n  <li><%= account.display_name %></li>\n<% end %>\n",
+        // Trim markers and sigils are not part of the Ruby.
+        "<%- if x -%>\n<%== account.display_name %>\n<%- end -%>\n",
+        // A comment tag holds prose, and `<%%` is an escaped literal.
+        "<%# display_name is mentioned here %>\n<%%= not_a_tag %>\n<%= account.display_name %>\n",
+        // No Ruby at all.
+        "<h1>just html</h1>\n",
+    ];
+
+    for (index, source) in cases.iter().enumerate() {
+        let view = dir.path().join(format!("v{index}.html.erb"));
+        std::fs::write(&view, source).expect("write");
+    }
+
+    for pattern in ["$R.display_name", "$R.each { |$P| $B }", "account.$M"] {
+        let out = rwr(&[
+            "rewrite",
+            pattern,
+            "-r",
+            pattern,
+            dir.path().to_str().expect("utf8"),
+        ]);
+        assert!(
+            out.status.code() != Some(2),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        for (index, source) in cases.iter().enumerate() {
+            let view = dir.path().join(format!("v{index}.html.erb"));
+            let after = std::fs::read_to_string(&view).expect("read");
+            assert_eq!(
+                after, *source,
+                "pattern {pattern:?} changed case {index} under an identity rewrite"
+            );
+        }
+    }
+}
+
 #[test]
 fn an_identity_rewrite_changes_nothing() {
     let Some((dir, files)) = scratch_copy(&corpus_root().join("rails"), 400) else {
