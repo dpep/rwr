@@ -262,4 +262,7 @@ an `is:`/`length:` constraint — the installed binary predates the skill rather
 than lacking the feature. Check `rwr --version`, update, and retry before
 concluding the tool can't do it.
 
+Shell completions, for a human at a terminal: `rwr --completions` (uses
+`$SHELL`) or `rwr --completions zsh`.
+
 Source and issues: <https://github.com/dpep/rwr>.

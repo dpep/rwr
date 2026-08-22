@@ -211,6 +211,16 @@ pack rather than only those that need no caveat, takes about **1.4 s**.
 
 `--profile` reports where the time went. See [docs/scaling.md](docs/scaling.md).
 
+## Shell completions
+
+```bash
+rwr --completions            # the shell you are in
+rwr --completions zsh        # or name one: bash, zsh, fish, elvish, powershell
+```
+
+Bare `--completions` reads `$SHELL`, since naming your own shell to a tool
+already running inside it is friction with no purpose.
+
 ## Documentation
 
 - [claude/INSTALL.md](claude/INSTALL.md) — installing the Claude skill, which

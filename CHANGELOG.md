@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Shell completions**: `rwr --completions` prints a script for the shell you are in, or
+`rwr --completions zsh` names one. `clap_complete` had been a dependency since the first
+commit without ever being called.
+
 ## 0.5.0 — 2026-08-21
 
 **A `contains:` pattern YAML truncated now refuses loudly.** Inside a flow mapping,

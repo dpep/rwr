@@ -858,6 +858,46 @@ fn an_unstitchable_template_falls_back_to_text() {
     assert!(err.contains("broken.html.erb"), "{err}");
 }
 
+/// Completions, and `--completions` on its own uses the shell you are in --
+/// naming your own shell to a tool already running inside it is friction
+/// nobody reports and everybody feels.
+#[test]
+fn completions_generate_and_default_to_the_current_shell() {
+    for shell in ["bash", "zsh", "fish"] {
+        let out = rwr(&["--completions", shell]);
+        assert_eq!(out.status.code(), Some(0), "{shell}: {}", stderr(&out));
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("rwr"),
+            "{shell} script does not mention the binary"
+        );
+    }
+
+    let guessed = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .arg("--completions")
+        .env("SHELL", "/bin/zsh")
+        .output()
+        .expect("binary runs");
+    assert_eq!(guessed.status.code(), Some(0), "{}", stderr(&guessed));
+    assert!(
+        String::from_utf8_lossy(&guessed.stdout).contains("#compdef"),
+        "should have produced a zsh script"
+    );
+
+    // A shell it cannot name is a usage error saying what to pass, not a
+    // silent empty script that looks like it worked.
+    let unknown = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .arg("--completions")
+        .env("SHELL", "/opt/nonesuch")
+        .output()
+        .expect("binary runs");
+    assert_eq!(unknown.status.code(), Some(2), "{}", stderr(&unknown));
+    assert!(
+        stderr(&unknown).contains("--completions bash"),
+        "{}",
+        stderr(&unknown)
+    );
+}
+
 /// No arguments is a usage error, not a silent no-op.
 #[test]
 fn bare_invocation_explains_itself() {

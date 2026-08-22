@@ -10,7 +10,7 @@ use crate::residue;
 use crate::rewrite;
 use crate::rule;
 use crate::source;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::process::ExitCode;
@@ -136,6 +136,14 @@ pub(crate) struct Common {
     profile: bool,
 }
 
+/// The shell rwr is being run from, if `$SHELL` names one it can generate for.
+///
+/// Naming your own shell to a tool that is already running inside it is the
+/// kind of small friction nobody reports and everybody feels.
+fn current_shell() -> Option<clap_complete::Shell> {
+    clap_complete::Shell::from_shell_path(std::env::var_os("SHELL")?)
+}
+
 /// The replacement a run was given, with `--delete` spelled as the empty one.
 fn template(replace: Option<&str>, delete: bool) -> Option<&str> {
     if delete { Some("") } else { replace }
@@ -221,6 +229,10 @@ struct Cli {
     #[arg(short = 'd', long = "delete", conflicts_with = "replace")]
     delete: bool,
 
+    /// Print a shell completion script. Defaults to the shell you are in.
+    #[arg(long, value_name = "SHELL", num_args = 0..=1)]
+    completions: Option<Option<clap_complete::Shell>>,
+
     #[command(flatten)]
     common: Common,
 }
@@ -304,6 +316,21 @@ enum Command {
 /// Parse arguments and dispatch. Returns the process exit status.
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
+
+    // First: this prints a script and exits, so it must not depend on the rest
+    // of the arguments making sense.
+    if let Some(asked) = cli.completions {
+        let Some(shell) = asked.or_else(current_shell) else {
+            eprintln!(
+                "rwr: cannot tell which shell this is — name one: \
+                 --completions bash|zsh|fish|elvish|powershell"
+            );
+            return Exit::Error.into();
+        };
+        clap_complete::generate(shell, &mut Cli::command(), "rwr", &mut std::io::stdout());
+        return Exit::Ok.into();
+    }
+
     let out = cli.common.output();
     profile::enable_from(cli.common.profile);
 
