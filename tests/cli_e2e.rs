@@ -1909,3 +1909,85 @@ fn a_rewrite_that_would_shadow_a_local_refuses() {
     assert!(after.contains("def full_name"), "{after}");
     assert!(after.contains("full_name.upcase"), "{after}");
 }
+
+/// Sorbet signatures narrow a receiver, end to end.
+///
+/// `sigs.rs` had unit tests proving signatures *parse* and nothing proving a
+/// `type:` constraint uses one -- the integration was untested while the parsing
+/// was well covered. D62 measured 76% of a real monolith's methods carrying a
+/// signature, which makes this the highest-value resolution path in the tool.
+#[test]
+fn a_sorbet_signature_narrows_a_receiver() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("rule.yml"),
+        "id: t/sorbet\nmatch: $R.legacy_total\nwhere:\n  $R:\n    type: Account\nrewrite: $R.total\n",
+    )
+    .expect("write");
+    let run = |file: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["check", "rule.yml", file])
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    // Resolved through *two* signatures: `widget` returns Widget, whose `owner`
+    // returns Account. Neither receiver is a constructor or a constant.
+    std::fs::write(
+        path.join("chain.rb"),
+        "# typed: true\nclass Widget\n  extend T::Sig\n\n  sig { returns(Account) }\n  \
+         def owner\n    @owner\n  end\nend\n\n\
+         class Account\n  def legacy_total\n    1\n  end\nend\n\n\
+         class Report\n  extend T::Sig\n\n  sig { returns(Widget) }\n  def widget\n    @w\n  end\n\n  \
+         def totals\n    widget.owner.legacy_total\n  end\nend\n",
+    )
+    .expect("write");
+    let out = run("chain.rb");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("1 site(s)"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // A same-named method on an unrelated class stays untouched: narrowing only
+    // ever narrows, and an unresolved receiver is not a match.
+    std::fs::write(
+        path.join("other.rb"),
+        "class Other\n  def legacy_total\n    2\n  end\nend\n\nx = Other.new\nx.legacy_total\n",
+    )
+    .expect("write");
+    assert_eq!(run("other.rb").status.code(), Some(0), "unrelated class");
+
+    // A `T::Struct` declares typed readers with no `sig` block anywhere -- but
+    // the *receiver* has to resolve first. `row` as a bare parameter has no
+    // type, so the field type cannot help, and declining is correct.
+    let struct_body = "# typed: true\nclass Account\n  def legacy_total\n    1\n  end\nend\n\n\
+         class Row < T::Struct\n  const :account, Account\nend\n\n";
+    std::fs::write(
+        path.join("untyped.rb"),
+        format!("{struct_body}def go(row)\n  row.account.legacy_total\nend\n"),
+    )
+    .expect("write");
+    assert_eq!(
+        run("untyped.rb").status.code(),
+        Some(0),
+        "an untyped receiver does not resolve, so the field type cannot apply"
+    );
+
+    // Given a receiver it can resolve, the field type carries the rest.
+    std::fs::write(
+        path.join("struct.rb"),
+        format!("{struct_body}row = Row.new(account: Account.new)\nrow.account.legacy_total\n"),
+    )
+    .expect("write");
+    let out = run("struct.rb");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "T::Struct field: {}",
+        stderr(&out)
+    );
+}
