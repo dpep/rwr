@@ -407,15 +407,14 @@ fn report_text_residue(found: &[Residue], templates: usize) {
     }
     if found.is_empty() {
         eprintln!(
-            "\n{templates} template file(s) were searched by text and mention nothing. \
-             rwr cannot parse .erb/.haml, so this is weaker than the account above."
+            "\n{templates} template file(s) could not be parsed and were searched by \
+             text instead; they mention nothing."
         );
         return;
     }
     eprintln!(
-        "\n{} occurrence(s) in {templates} template file(s), found by text search \
-         rather than parsed -- rwr does not read .erb/.haml, so these may be \
-         comments or unrelated text:",
+        "\n{} occurrence(s) in {templates} template file(s) that could not be parsed, \
+         found by text search instead -- these may be comments or unrelated text:",
         found.len()
     );
     for r in found.iter().take(RESIDUE_DETAIL_CAP) {
@@ -884,6 +883,14 @@ struct Report<'a> {
     residue: &'a [Residue],
     /// Template files not searched, since they embed Ruby rwr does not read.
     templates_skipped: usize,
+}
+
+/// What running the rules over one template produced.
+struct TemplateOutcome {
+    file: String,
+    sites: usize,
+    rewritten: Option<Vec<u8>>,
+    residue: Vec<Residue>,
 }
 
 /// A match of a rule that proposes no edit -- a lint rather than a rewrite.
@@ -1487,10 +1494,121 @@ fn cmd_apply(
         });
     }
 
+    // Templates *can* be parsed, where their tags stitch into a valid program
+    // (95% of them do). Those get the same structural treatment as Ruby, and
+    // only the rest fall back to the text search below.
+    let template_outcomes: Vec<TemplateOutcome> = templates
+        .par_iter()
+        .filter_map(|path| {
+            let source = source::open(path);
+            let original = source.bytes().to_vec();
+            let mut current = original.clone();
+            let mut sites = 0usize;
+            let mut residue = Vec::new();
+            let mut parsed_ok = false;
+
+            // Naive by design: re-translate per rule. There are a few hundred
+            // templates and they are small, so the simple version costs nothing
+            // worth the complexity of threading a live map through the loop.
+            for (rule, prepared) in rules.iter().zip(&prepareds) {
+                // No tags at all: a page of static HTML, nothing to do.
+                let translated = crate::erb::translate(&current)?;
+                let ruby = ruby_prism::parse(&translated.ruby);
+                if ruby.errors().count() > 0 {
+                    // Stitching failed: leave it to the text search, which is
+                    // weaker and says so.
+                    return None;
+                }
+                parsed_ok = true;
+                if !filters.iter().any(|f| f.may_contribute(&translated.ruby)) {
+                    continue;
+                }
+                let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+                let p_node = p_parsed.node();
+                let Some(p_root) = matcher::pattern_root(&p_node) else {
+                    continue;
+                };
+                let criteria = matcher::Criteria {
+                    constraints: &rule.constraints,
+                    contained: &contained[0],
+                    scope: &rule.scope,
+                    hierarchy: &hierarchy,
+                    sigs: &sigs,
+                };
+                let hits = matcher::search(&p_root, &ruby.node(), prepared, &criteria);
+
+                // Residue first: it reads the *current* text either way.
+                if claims_completeness {
+                    let anchors = residue::anchors(&p_root, prepared);
+                    if !anchors.is_empty() {
+                        for o in residue::find(&ruby.node(), &anchors, &[], &translated.ruby) {
+                            let Some(at) = crate::erb::template_offset(&translated, o.byte_start)
+                            else {
+                                continue;
+                            };
+                            let (line, col) = source::line_col(&current, at);
+                            residue.push(Residue {
+                                file: path.display().to_string(),
+                                line,
+                                col,
+                                context: o.context,
+                                rule: rule.id.clone(),
+                                text: source::line_at(&current, at),
+                            });
+                        }
+                    }
+                }
+
+                let Some(template) = rule.rewrite.as_deref() else {
+                    continue;
+                };
+                if hits.is_empty() {
+                    continue;
+                }
+                let Ok(planned) = rewrite::plan(
+                    &hits,
+                    &p_root,
+                    prepared,
+                    template,
+                    &translated.ruby,
+                    &rule.constant_captures(),
+                ) else {
+                    continue;
+                };
+                // An edit spanning two tags covers template text that is not
+                // Ruby; `splice` refuses it rather than writing HTML into an
+                // expression.
+                if let Some(next) = crate::erb::splice(&translated, &current, &planned.edits) {
+                    sites += planned.sites;
+                    current = next;
+                }
+            }
+
+            // A rename expands to several rules and each anchors on the same
+            // name, so one occurrence is found once per rule.
+            residue.sort_by_key(|r| (r.line, r.col));
+            residue.dedup_by_key(|r| (r.line, r.col));
+
+            // Produced whenever the template *parsed*, findings or not: this is
+            // also the record of which templates need no text fallback, and a
+            // clean template is exactly one with nothing to report.
+            parsed_ok.then(|| TemplateOutcome {
+                file: path.display().to_string(),
+                sites,
+                rewritten: (sites > 0).then(|| current.clone()),
+                residue,
+            })
+        })
+        .collect();
+
     // Templates cannot be parsed, but they can be searched. This is what turns
     // "356 files were not searched" into "here are the three views that mention
     // the name you are renaming" -- the difference between naming a blind spot
     // and doing something about it.
+    // A template rwr parsed needs no text search: it has real evidence.
+    let parsed_templates: std::collections::HashSet<&str> =
+        template_outcomes.iter().map(|o| o.file.as_str()).collect();
+
     let mut left_over_text: Vec<Residue> = Vec::new();
     if claims_completeness && !templates.is_empty() {
         let anchors: Vec<(Option<String>, Vec<u8>)> = rules
@@ -1511,9 +1629,12 @@ fn cmd_apply(
         left_over_text = templates
             .par_iter()
             .flat_map_iter(|path| {
+                let mut here = Vec::new();
+                if parsed_templates.contains(path.display().to_string().as_str()) {
+                    return here.into_iter();
+                }
                 let bytes = source::open(path);
                 let bytes = bytes.bytes().to_vec();
-                let mut here = Vec::new();
                 for (rule, anchor) in &anchors {
                     for at in source::identifier_offsets(&bytes, anchor) {
                         let (line, col) = source::line_col(&bytes, at);
@@ -1534,6 +1655,23 @@ fn cmd_apply(
         left_over_text.dedup_by_key(|r| (r.file.clone(), r.line, r.col));
     }
 
+    for outcome in &template_outcomes {
+        if write
+            && let Some(text) = &outcome.rewritten
+            && let Err(e) = std::fs::write(&outcome.file, text)
+        {
+            eprintln!("rwr: cannot write {}: {e}", outcome.file);
+            return Exit::Error.into();
+        }
+        if outcome.sites > 0 {
+            changed.push(Changed {
+                file: outcome.file.clone(),
+                sites: outcome.sites,
+                rules: Vec::new(),
+            });
+        }
+    }
+
     let mut findings: Vec<Finding> = outcomes
         .iter()
         .flat_map(|o| o.flagged.iter().cloned())
@@ -1544,6 +1682,11 @@ fn cmd_apply(
         .iter()
         .flat_map(|o| o.residue.iter().cloned())
         .collect();
+    left_over.extend(
+        template_outcomes
+            .iter()
+            .flat_map(|o| o.residue.iter().cloned()),
+    );
     left_over.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     changed.sort_by(|a, b| a.file.cmp(&b.file));
 
@@ -1563,7 +1706,9 @@ fn cmd_apply(
             );
             report_unsafe(&changed, &rules);
             report_residue(&left_over);
-            report_text_residue(&left_over_text, templates.len());
+            // Only the templates that fell back: one rwr parsed has real
+            // evidence and does not belong in a paragraph about guesses.
+            report_text_residue(&left_over_text, templates.len() - parsed_templates.len());
         }
         _ => {
             // Residue is the product, not a diagnostic, so it cannot be text-only:

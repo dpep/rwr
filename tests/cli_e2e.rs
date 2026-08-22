@@ -507,11 +507,12 @@ fn diff_outside_a_repository_is_an_error() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
 
-/// The residue report claims to account for everything, so it has to say what
-/// it never read. A Rails app keeps a large share of its call sites in ERB and
-/// Haml (Q11).
+/// ERB is parsed and Haml is searched, and the report distinguishes them.
+///
+/// A Rails app keeps a large share of its call sites in templates, and a rename
+/// that misses them under-reports -- the dangerous direction (Q11).
 #[test]
-fn templates_are_reported_as_unread() {
+fn erb_is_parsed_and_haml_is_searched() {
     let dir = fixture("class Account\n  def display_name; 1; end\nend\n");
     std::fs::write(
         dir.path().join("show.html.erb"),
@@ -528,13 +529,16 @@ fn templates_are_reported_as_unread() {
         dir.path().to_str().unwrap(),
     ]);
     let err = stderr(&out);
-    // Templates cannot be parsed, so they are *searched* -- grep-grade evidence,
-    // labelled as weaker. Saying nothing about them would make a rename
-    // under-report, which is the dangerous direction.
-    assert!(err.contains("2 template file(s)"), "{err}");
-    assert!(err.contains("found by text search"), "{err}");
+    // ERB is parsed: its tags stitch into a Ruby program, so the call site is
+    // real evidence and appears in the account proper.
     assert!(err.contains("show.html.erb"), "the ERB call site: {err}");
+    // Haml is not, so it falls back to a text search that says it is weaker.
     assert!(err.contains("index.haml"), "the Haml call site: {err}");
+    assert!(err.contains("found by text search"), "{err}");
+    assert!(
+        err.contains("1 template file(s)"),
+        "only Haml fell back: {err}"
+    );
 }
 
 /// A `.rake` file is Ruby, and was invisible until it was not.
@@ -667,6 +671,35 @@ fn residue_names_the_rule_it_belongs_to() {
     // the second rule's account entirely.
     assert!(err.contains("[rename-account]"), "{err}");
     assert!(err.contains("[rename-company]"), "{err}");
+}
+
+/// The point of parsing ERB rather than searching it: rwr can rewrite through
+/// a template and leave the HTML exactly where it was.
+#[test]
+fn a_rewrite_reaches_inside_erb() {
+    let dir = fixture("class Account\n  def display_name; 1; end\nend\n");
+    let view = dir.path().join("show.html.erb");
+    std::fs::write(
+        &view,
+        "<h1><%= @account.display_name %></h1>\n         <% @accounts.each do |account| %>\n         <li><%= account.display_name %></li>\n         <% end %>\n",
+    )
+    .expect("write");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(&rule, "match: $R.display_name\nrewrite: $R.full_name\n").expect("write");
+
+    let out = rwr(&[
+        "rewrite",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let after = std::fs::read_to_string(&view).expect("read");
+    assert_eq!(
+        after,
+        "<h1><%= @account.full_name %></h1>\n         <% @accounts.each do |account| %>\n         <li><%= account.full_name %></li>\n         <% end %>\n",
+        "both call sites rewritten, every byte of HTML untouched"
+    );
 }
 
 /// No arguments is a usage error, not a silent no-op.

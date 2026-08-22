@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**ERB templates are parsed, matched and rewritten.** Their tags are stitched into one Ruby
+program — 95% of real templates parse that way — so a rename reaches inside a view and leaves
+every byte of HTML where it was. An edit spanning two tags is refused, since those bytes are
+not Ruby. A template that does not stitch falls back to the text search, which says it is
+weaker. On discourse 114 of 124 templates parse; a rename of `User#name` finds 53 occurrences
+by parsing against 49 by text (D65).
+
 **`contains:` — a constraint that relates a sub-pattern to the outer match.** A pattern
 matches a shape; this says "and somewhere inside it, this", with shared metavariables
 required to refer to the same thing:

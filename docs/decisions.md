@@ -1338,3 +1338,38 @@ negative condition over a scope rwr does not analyse — usually a different met
 So the rule ships as a lint that finds *candidates*, and says so in its own description.
 
 *Reverses if:* nothing. It is opt-in per constraint and costs nothing where unused.
+
+## D65 - ERB is parsed by stitching its tags into one Ruby program
+**Decided**, after measuring the alternative first.
+
+**A tag on its own usually does not parse.** `<% posts.each do |p| %>` opens a block that
+`<% end %>` closes three tags later. Across discourse and mastodon, **60%** of tag bodies
+parse standalone; the failures are exactly the control-flow halves.
+
+**Stitched in document order they are one program, and 95% of templates parse** — 159 of
+168. That is the measurement the whole feature rests on, and it was taken before any of it
+was built.
+
+So: extract each tag body with its template byte range, join them, parse the result, and keep
+a fragment map. Matching, residue and rewriting all run on the Ruby; every edit is mapped
+back through the map to the template it came from.
+
+**An edit spanning two tags is refused.** Those bytes include template text that is not Ruby
+at all, and splicing through them would put HTML inside an expression. It is rare — an
+expression seldom spans two tags — and refusing is the only safe answer.
+
+**A template that does not stitch falls back to the text search**, which already existed and
+already says it is weaker. On discourse 114 of 124 templates parse and 10 fall back. On
+mastodon almost everything falls back, because mastodon is Haml.
+
+**Measured payoff.** For a rename of `User#name` over discourse's `app/`: 53 occurrences
+found by *parsing* templates against 49 by text. More than half the template account is now
+real evidence rather than a string that looked right — and the parsed half can be rewritten,
+which the text half never could.
+
+**Naive by design.** The template pass re-translates per rule rather than threading a live
+map through the rewrite loop. There are a few hundred templates and they are small; the
+simple version costs nothing worth the complexity.
+
+*Reverses if:* nothing here. Haml wants the same treatment and is a separate job — its Ruby
+is line-oriented rather than delimited, so extraction is a different problem.
