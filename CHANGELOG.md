@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+**A rename reaches an override whose parameter list has drifted.** `def display_name(format =
+:long)` overriding a zero-arity parent is the ordinary shape of legacy inheritance, and no
+pattern could express it — a definition pattern with no parameter list matched only a definition
+that had none, and `def foo(*$P)` matched nothing at all, because in a parameter position `*$P`
+is a real Ruby rest parameter rather than a sequence placeholder. It now means "with any
+parameters", including none, and the rename uses it.
+
+**A constant holding a list of symbols is a reach.** `COLUMNS = %i[display_name email].freeze`,
+read back through `public_send`, is the most ordinary dynamic dispatch a legacy exporter has —
+and it was dropped, because the symbols are an argument to nothing: the array is `freeze`'s
+receiver. Measured on discourse: 8 more residue entries out of 832, and it closes the last
+recall gap in the testbed.
+
 **`inside:` and `method:` name one class, by its qualified name.** Lexical nesting is
 *namespacing*, not membership — `class Account; class Row` declares `Account::Row`, a different
 class that does not inherit from `Account`. Matching any enclosing name meant a rule scoped to

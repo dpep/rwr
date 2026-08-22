@@ -144,24 +144,18 @@ fn every_dynamic_reach_is_reported() {
     // that is the corpus doing its job, and the original scored 2 of 7. What
     // must never happen is the number going up.
     //
-    // The one outstanding miss is a namespaced class in *compact* form:
-    // `class Account::Exporter` gives Prism the name `Exporter`, so its scope
-    // stack is `["Exporter"]` and nothing connects it to Account. Written
-    // nested, the same class scores. Both readings are wrong for the same
-    // reason -- a namespace is not the class -- and the divergence shows it was
-    // never decided (see ruby-situations.md E2).
-    const KNOWN_MISSES: usize = 1;
-    assert!(
-        missed.len() <= KNOWN_MISSES,
-        "recall regressed -- {} unreported, was {KNOWN_MISSES}: {missed:?}",
-        missed.len()
-    );
+    // Full recall. Keep it that way: this is a ratchet, and the assertion below
+    // fails on improvement too, so the day something new is reported the
+    // constant gets lowered rather than the gain going unrecorded.
+    const KNOWN_MISSES: usize = 0;
     assert_eq!(
+        missed.len(),
+        KNOWN_MISSES,
+        "recall is {} of {}, expected {} outstanding. Fewer means an improvement to \
+         lock in by lowering KNOWN_MISSES; more is a regression. Outstanding: {missed:?}",
         expected.len() - missed.len(),
-        expected.len() - KNOWN_MISSES,
-        "recall improved to {} of {} -- lower KNOWN_MISSES to lock it in. Outstanding: {missed:?}",
-        expected.len() - missed.len(),
-        expected.len()
+        expected.len(),
+        expected.len() - KNOWN_MISSES
     );
 }
 
@@ -195,10 +189,12 @@ fn every_site_that_must_change_changed() {
     // (`class Account::Exporter`) has the opposite fault and matches nothing --
     // both readings wrong for one reason, which is that it was never decided.
     //
-    // `archived_account.rb`: an override written `def display_name(format = ...)`
-    // is declined, because a rename's definition pattern carries no parameter
-    // list and `def foo(*$P)` is not expressible (ruby-situations.md A3).
-    let known: &[(&str, isize)] = &[("archived_account.rb", -1)];
+    // Nothing outstanding. The two entries that lived here -- `account/row.rb`
+    // over-rewriting because nesting was read as membership, and an
+    // arity-drifted override in `archived_account.rb` that no pattern could
+    // express -- are both fixed, and the list is kept so the next one has an
+    // obvious home rather than being absorbed into a total.
+    let known: &[(&str, isize)] = &[];
 
     let mut wrong = Vec::new();
     // Every file named anywhere, `known` included. Without that last part a
@@ -261,9 +257,7 @@ fn false_positives_stay_within_their_budget() {
     // - a HAML line, found by text search and labelled `text` because HAML has
     //   no delimiters to stitch. Honest, weaker evidence, and still a miss-by-
     //   noise;
-    // - a call inside `class << self`, correctly declined for rewriting and
-    //   then reported. Arguably a `notice`.
-    const KNOWN_NOISE: usize = 4;
+    const KNOWN_NOISE: usize = 3;
     assert!(
         wrong.len() <= KNOWN_NOISE,
         "precision regressed -- {} false positives, was {KNOWN_NOISE}: {wrong:?}",

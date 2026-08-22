@@ -658,6 +658,22 @@ fn align<'a, 'pr>(
     let mut triples = Vec::with_capacity(p_kids.len());
     let mut cursor = 0;
     for (p, t) in p_kids.iter().zip(t_kids) {
+        // `def foo(*$P)` carries the parameter list across untouched, and when
+        // the target has none it accounts for zero target children -- the same
+        // treatment a sequence placeholder gets, which is what it is here.
+        // Without this the alignment overran, the diff gave up, and the whole
+        // `def` was re-rendered: `def full_name()` with the body reflowed.
+        if let Some(name) = matcher::lone_rest_placeholder(p, prepared) {
+            if matcher::lone_rest_placeholder(t, t_prepared).as_deref() != Some(&name) {
+                return None;
+            }
+            match env.get(&name) {
+                Some(Bound::Many(nodes)) => cursor += nodes.len(),
+                Some(Bound::One(_)) => cursor += 1,
+                _ => return None,
+            }
+            continue;
+        }
         match matcher::splat_placeholder_name(p, prepared) {
             Some(name) => {
                 // The same sequence must sit at the same position in the

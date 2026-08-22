@@ -215,6 +215,23 @@ pub(crate) fn match_node<'pr>(
         };
     }
 
+    // `def foo(*$P)` means "with any parameters". In a parameter position `*$P`
+    // is real Ruby -- a rest parameter -- so the splat machinery that handles
+    // argument runs does not apply, and the pattern only matched a target whose
+    // parameter list was itself a lone rest. An override whose arity had drifted
+    // from its parent's, which is the ordinary shape of legacy inheritance, was
+    // therefore unmatchable by any spelling.
+    if matches!(pattern, Node::ParametersNode { .. })
+        // Only against another parameter list. Binding it to whatever sat in
+        // that position let `def foo(*$P)` swallow the `self` receiver of
+        // `def self.foo` and match it -- an instance rename renaming a class
+        // method, which is the one thing receiver narrowing exists to prevent.
+        && matches!(target, Node::ParametersNode { .. })
+        && let Some(name) = lone_rest_placeholder(pattern, prepared)
+    {
+        return bind(env, &name, Bound::One(generated::dup(target)), forbidden);
+    }
+
     // A lone metavariable standing for a body binds the *whole* body, whatever
     // shape that body has.
     //
@@ -336,6 +353,25 @@ fn match_children<'pr>(
         return false;
     }
 
+    // `def foo(*$P)` against a `def` that has no parameter list: Prism gives a
+    // zero-arity definition no `ParametersNode` at all, so the pattern carries a
+    // child the target lacks and positional alignment pairs the parameters
+    // against the body. "Any parameters" has to include none, so let it absorb
+    // nothing and carry on.
+    if let Some(name) = lone_rest_placeholder(head, prepared)
+        && !target
+            .first()
+            .is_some_and(|t| matches!(t, Node::ParametersNode { .. }))
+    {
+        let mut trial = env.clone();
+        if bind(&mut trial, &name, Bound::Many(Vec::new()), forbidden)
+            && match_children(rest, target, prepared, &mut trial, forbidden)
+        {
+            *env = trial;
+            return true;
+        }
+    }
+
     let Some((t_head, t_rest)) = target.split_first() else {
         // Target exhausted, pattern not. Prism gives `foo()` no arguments node
         // at all, so `foo(*$REST)` -- whose argument list can absorb nothing --
@@ -370,6 +406,12 @@ fn vanishes<'pr>(
             None => true,
             Some(name) => bind(env, &name, Bound::Many(Vec::new()), forbidden),
         };
+    }
+    // `def foo(*$P)` against a target with no parameter list at all: Prism gives
+    // a zero-arity `def` no `ParametersNode`, so the pattern has one child the
+    // target lacks. "Any parameters" has to include none.
+    if let Some(name) = lone_rest_placeholder(pattern, prepared) {
+        return bind(env, &name, Bound::Many(Vec::new()), forbidden);
     }
     // A container with no atoms of its own vanishes if everything inside it does.
     generated::atoms(pattern).is_empty()
@@ -982,6 +1024,23 @@ pub(crate) fn scope_name_of(node: &Node<'_>) -> Option<String> {
         Node::SingletonClassNode { .. } => Some(SINGLETON.to_string()),
         _ => None,
     }
+}
+
+/// The metavariable a parameter list's lone `*$P` stands for.
+///
+/// `def foo(*$P)` parses as a `ParametersNode` whose only content is a rest
+/// parameter named after the placeholder -- not a splat over a run, which is
+/// what `*$P` means in an argument list.
+pub(crate) fn lone_rest_placeholder(node: &Node<'_>, prepared: &Prepared) -> Option<String> {
+    let parameters = node.as_parameters_node()?;
+    let kids = generated::children(node);
+    if kids.len() != 1 {
+        return None;
+    }
+    let rest = parameters.rest()?;
+    let name = rest.as_rest_parameter_node()?.name()?;
+    let key = std::str::from_utf8(name.as_slice()).ok()?;
+    prepared.bindings.get(key).and_then(|b| b.name.clone())
 }
 
 /// The marker a singleton class body pushes onto the scope stack.

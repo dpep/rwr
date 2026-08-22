@@ -424,6 +424,12 @@ impl MethodRename {
             c
         };
 
+        // `(*$P)` rather than a bare `def name`: an override whose parameter
+        // list has drifted from its parent's is the ordinary shape of legacy
+        // inheritance, and a pattern with no parameter list matches only a
+        // definition that has none. Leaving those to the residue report meant a
+        // rename declined the one occurrence guaranteed to break.
+        //
         // `class << self` puts an ordinary-looking `def` in singleton context,
         // so the definition rules have to say which context they mean. Left
         // unconstrained, a `#` rename rewrote a class method defined that way --
@@ -436,22 +442,22 @@ impl MethodRename {
         };
         let definitions = match kind {
             Kind::Instance => vec![Rule {
-                pattern: format!("def {name}; $B; end"),
-                rewrite: Some(format!("def {new}; $B; end")),
+                pattern: format!("def {name}(*$P); $B; end"),
+                rewrite: Some(format!("def {new}(*$P); $B; end")),
                 scope: in_singleton(false),
                 ..Default::default()
             }],
             Kind::Class => vec![
                 Rule {
-                    pattern: format!("def self.{name}; $B; end"),
-                    rewrite: Some(format!("def self.{new}; $B; end")),
+                    pattern: format!("def self.{name}(*$P); $B; end"),
+                    rewrite: Some(format!("def self.{new}(*$P); $B; end")),
                     scope: scope(),
                     ..Default::default()
                 },
                 // The same method, spelled the other way.
                 Rule {
-                    pattern: format!("def {name}; $B; end"),
-                    rewrite: Some(format!("def {new}; $B; end")),
+                    pattern: format!("def {name}(*$P); $B; end"),
+                    rewrite: Some(format!("def {new}(*$P); $B; end")),
                     scope: in_singleton(true),
                     ..Default::default()
                 },
@@ -852,7 +858,7 @@ mod tests {
             3,
             "definition, explicit receiver, implicit self"
         );
-        assert_eq!(rules[0].pattern, "def display_name; $B; end");
+        assert_eq!(rules[0].pattern, "def display_name(*$P); $B; end");
         assert_eq!(rules[0].scope.inside.as_deref(), Some("Account"));
         assert_eq!(rules[1].pattern, "$R.display_name");
         assert_eq!(rules[1].constraints["$R"].kind, Some(Kind::Instance));
@@ -868,11 +874,11 @@ mod tests {
             rename: "full_name".into(),
         };
         let rules = rename.expand();
-        assert_eq!(rules[0].pattern, "def self.display_name; $B; end");
+        assert_eq!(rules[0].pattern, "def self.display_name(*$P); $B; end");
         // The same method spelled the other way: `class << self` puts an
         // ordinary-looking `def` in singleton context, and without this rule a
         // `.` rename missed the definition while a `#` rename rewrote it.
-        assert_eq!(rules[1].pattern, "def display_name; $B; end");
+        assert_eq!(rules[1].pattern, "def display_name(*$P); $B; end");
         assert_eq!(rules[1].scope.singleton, Some(true));
 
         let calls = rules
@@ -900,7 +906,7 @@ mod tests {
             rename: "full_name".into(),
         };
         let rules = rename.expand();
-        assert_eq!(rules[0].pattern, "def display_name; $B; end");
+        assert_eq!(rules[0].pattern, "def display_name(*$P); $B; end");
         assert_eq!(
             rules[0].scope.singleton,
             Some(false),

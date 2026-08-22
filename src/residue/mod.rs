@@ -407,6 +407,18 @@ pub(crate) fn find(
             .into_owned();
             (a.location().start_offset(), a.location().end_offset(), name)
         });
+        // A constant assigned a list of symbols is a name table -- `COLUMNS =
+        // %i[display_name email]`, read back through `public_send`. It is the
+        // most ordinary dynamic reach a legacy exporter has, stated entirely in
+        // literals, and it was dropped because the symbols are an argument to
+        // nothing: the array is `freeze`'s receiver, or the write's value.
+        let constant = match &node {
+            Node::ConstantWriteNode { .. } => node
+                .as_constant_write_node()
+                .map(|c| String::from_utf8_lossy(c.name().as_slice()).into_owned()),
+            _ => None,
+        };
+
         // A hash key names a parameter, not a method to dispatch on. Without
         // this, every `render json: { name: x }` in the corpus counted as a
         // reach for a rename of `name` -- 57% of a 15,587-entry report on
@@ -430,8 +442,9 @@ pub(crate) fn find(
                     (loc.start_offset() >= *start && loc.end_offset() <= *end).then(|| name.clone())
                 }
                 // Not a call: whatever label we arrived with still applies, so a
-                // symbol nested in an array inside `delegate(...)` keeps it.
-                None => via.clone(),
+                // symbol nested in an array inside `delegate(...)` keeps it --
+                // or the constant this subtree is being assigned to.
+                None => constant.clone().or_else(|| via.clone()),
             };
             stack.push((child, inner.clone(), child_via));
         }

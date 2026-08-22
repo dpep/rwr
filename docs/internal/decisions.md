@@ -1921,3 +1921,49 @@ definition of what a class is.
 `Billing::Account`, the way Ruby's own constant lookup would. That is a real argument, and the
 answer would be lexical resolution rather than a suffix match -- guessing which `Account` was
 meant is exactly what this decision removes.
+
+## D83 - `(*$P)` means any parameter list, including none
+**Decided.**
+
+An override whose arity has drifted from its parent's -- `def display_name(format = :long)` over
+a zero-arity parent -- is ordinary legacy inheritance and was unmatchable by any spelling. A
+definition pattern with no parameter list matched only a definition that had none; `def
+foo(*$P)` matched nothing, because in a *parameter* position `*$P` is a real Ruby rest parameter
+rather than the sequence placeholder it is in an argument list, so the splat machinery never
+applied.
+
+A lone rest-placeholder now means "any parameter list", and absorbs an absent one -- Prism gives
+a zero-arity `def` no `ParametersNode` at all, so the pattern carries a child the target lacks.
+The rename expansion uses it, which turns the one occurrence *guaranteed* to break into a
+rewrite rather than a residue line.
+
+**Three places had to agree, and getting two of them right produced a wrong rewrite.** The
+matcher binds it; `match_children` lets it absorb nothing; `rewrite::align` carries it across so
+the diff stays minimal. With only the first two, the zero-arity case fell through to whole-node
+re-rendering and emitted `def full_name()` with the body reflowed. With the matcher rule left
+unconstrained, it bound the `self` receiver of `def self.foo` and an *instance* rename renamed a
+class method -- the one thing receiver narrowing exists to prevent, reintroduced by a fix.
+
+Both were caught by the testbed within a minute of being written, which is the argument for
+ground truth that scores per file: the second would have been invisible in a total.
+
+*Reverses if:* nothing plausible. The spelling was already the one users would guess.
+
+## D84 - A constant list of symbols is a name table
+**Decided.**
+
+`COLUMNS = %i[display_name email].freeze`, read back through `public_send`, is the most ordinary
+dynamic reach a legacy exporter has, and it is stated entirely in literals -- nothing about it
+needs inference. It was dropped from the report because residue labels a symbol by the call it
+is an argument to, and these are an argument to nothing: the array is `freeze`'s receiver, or the
+constant write's value.
+
+A constant write now labels its own subtree, so those symbols are a reach like any other symbol
+handed to something.
+
+**Measured before shipping, because a heuristic that widens the report is a precision cost.** On
+discourse's `app/`, a real rename went from 832 residue entries to 840 -- eight more, one
+percent -- and it closed the last recall gap on the testbed. A gap worth one percent.
+
+*Reverses if:* the ratio goes the other way on a corpus with large constant tables of
+non-method symbols. The measurement is cheap to repeat and the rule is one match arm.
