@@ -44,6 +44,31 @@ pub(crate) struct Finding {
     pub(crate) text: String,
 }
 
+/// A site the pattern matched, then a constraint declined -- as reported.
+///
+/// Field names follow the standing contract: `file`, `line`, `rule` mean what
+/// they mean everywhere else.
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct Rejection {
+    pub(crate) file: String,
+    pub(crate) line: usize,
+    pub(crate) col: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rule: Option<String>,
+    /// Which capture was refused. Absent for a scope miss, which is about the
+    /// match as a whole.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) capture: Option<String>,
+    /// Which predicate declined it: `name`, `type`, `is`, `contains`, `length`,
+    /// `same_name_as`, `inside`, `singleton`, or `rule-bug`.
+    pub(crate) constraint: &'static str,
+    /// What it wanted, and what it saw.
+    pub(crate) detail: String,
+    /// The source text of the refused binding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bound: Option<String>,
+}
+
 /// A prepared rule set, ready to apply to any number of sources.
 ///
 /// Everything checkable before a source is read is checked in [`Engine::new`]:
@@ -106,6 +131,8 @@ pub(crate) enum ScanOutcome {
 #[derive(Default)]
 pub(crate) struct Scanned {
     pub(crate) sites: usize,
+    /// Why candidates were declined. Empty unless `-e` asked.
+    pub(crate) rejections: Vec<Rejection>,
     /// Classes this source's matched receivers resolved to, for the
     /// cross-class warning. Empty unless the rule set narrows by none.
     pub(crate) spread: Vec<String>,
@@ -185,6 +212,7 @@ impl Engine {
     /// assemble them differently from the way `scan` does.
     pub(crate) fn criteria<'a>(&'a self, index: usize, ctx: &'a Context) -> matcher::Criteria<'a> {
         matcher::Criteria {
+            explain: false,
             constraints: &self.rules[index].constraints,
             contained: &self.contained[index],
             scope: &self.rules[index].scope,
@@ -270,6 +298,7 @@ impl Engine {
         bytes: &[u8],
         ctx: &Context,
         only: Option<Only<'_>>,
+        explain: bool,
     ) -> ScanOutcome {
         let mut current = bytes.to_vec();
         let mut total = 0usize;
@@ -277,6 +306,7 @@ impl Engine {
         let mut by_rule = vec![0usize; self.rules.len()];
         let mut spread: Vec<String> = Vec::new();
         let mut flagged: Vec<Finding> = Vec::new();
+        let mut rejections: Vec<Rejection> = Vec::new();
 
         // One parse serves every rule until a rule actually rewrites something.
         // It used to be one parse *per rule*, so a ten-rule pack parsed each
@@ -319,14 +349,34 @@ impl Engine {
                                 // different binding rather than discarding the
                                 // match (Q13).
                                 let criteria = matcher::Criteria {
+                                    explain,
                                     constraints: &rule.constraints,
                                     contained: &self.contained[index],
                                     scope: &rule.scope,
                                     hierarchy: &ctx.hierarchy,
                                     sigs: &ctx.sigs,
                                 };
-                                let mut hits =
-                                    matcher::search(&p_root, &parsed.node(), prepared, &criteria);
+                                let (mut hits, declined) = matcher::search_explaining(
+                                    &p_root,
+                                    &parsed.node(),
+                                    prepared,
+                                    &criteria,
+                                );
+                                for r in declined {
+                                    let (line, col) = source::line_col(&current, r.start);
+                                    rejections.push(Rejection {
+                                        file: label.to_string(),
+                                        line,
+                                        col,
+                                        rule: rule.id.clone(),
+                                        capture: r.verdict.capture(),
+                                        constraint: r.verdict.constraint(),
+                                        detail: r.verdict.detail(),
+                                        bound: r.bound.map(|(a, b)| {
+                                            String::from_utf8_lossy(&current[a..b]).into_owned()
+                                        }),
+                                    });
+                                }
                                 if let Some(only) = only {
                                     hits.retain(|m| {
                                         let (start, end) = rewrite::effective_range(&m.node);
@@ -424,11 +474,12 @@ impl Engine {
         }
 
         let residue = self.residue(label, &current, ctx);
-        if total == 0 && residue.is_empty() && flagged.is_empty() {
+        if total == 0 && residue.is_empty() && flagged.is_empty() && rejections.is_empty() {
             return ScanOutcome::Quiet;
         }
         ScanOutcome::Scanned(Box::new(Scanned {
             sites: total,
+            rejections,
             spread,
             flagged,
             by_rule,

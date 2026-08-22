@@ -1548,3 +1548,48 @@ production, which is the drift this feature exists to kill.
 and if authors find themselves unable to write those snippets, the answer is a declared context
 block rather than abandoning the feature. Deliberately not built yet: two cases is not a
 pattern.
+
+## D70 - `-e` reports why a candidate was declined
+**Decided.**
+
+`--explain`'s own help had said it explains "which constraint rejected a candidate" since it
+shipped, and it did not: a site declined by `type: Widget` produced no output at all. The
+matcher computed the reason -- `Verdict::BadBinding` drives the rebind loop (Q13) -- and threw
+it away once rebinding was exhausted. The work was surfacing it, not deriving it.
+
+**A scoped `-e`, not a new verb.** `rwr check r.yml app.rb:5 -e` is the rule-authoring loop, and
+both halves already existed: line addressing from D68 and a global `-e`. A `rwr why` verb would
+duplicate scoping, rule loading and output framing to deliver what two orthogonal features
+compose into.
+
+**Behind the flag, deliberately, and this is not a breach of principle 3.** Residue reports
+unconditionally because it is the account of what rwr *could not see*. A rejection is the
+opposite: a site the rule correctly refused, and the report says so. Detail about correct
+behaviour is debugging; the blind-spot account stays unconditional.
+
+**The distinction worth the whole feature is `Type { resolved: None }`.** Receiver narrowing is
+conservative -- a receiver rwr cannot resolve does not match -- which makes "could not resolve
+this at all" and "resolved to the wrong class" different problems with different fixes. They
+were indistinguishable, and the first is the most-documented source of surprise in the design.
+A third case joins them: resolved to the right class, but as the other of instance/class than
+the rule means.
+
+**A rule bug is no longer a scope miss.** `verdict()` returned `WrongScope` for a constraint
+naming an unbound capture and for a `contains:` that failed to prepare. Both are pre-validated
+by `Rule::validate`, so reaching them means the pre-validation has a hole -- and reporting them
+as a scope miss sent an author looking at their `scope:` for a typo'd `where:` key. They are
+`Verdict::Bug` now, reported as constraint `rule-bug`.
+
+**Rejections are buffered per candidate and discarded when one binding works.** A node may admit
+several bindings and only a later one may satisfy the rule; a site that ultimately matched has
+nothing to explain, and reporting the attempts would make successful backtracking look like
+failure.
+
+**Report schema 3.** `rejections` is absent without `-e` rather than empty: nobody asking is not
+the same as nothing being declined, which is the same present-versus-absent convention `residue`
+already uses. One schema number across the CLI contract rather than one per command, since the
+field names are shared.
+
+*Reverses if:* a repo-wide `-e` proves too loud to use -- the obvious next move would be a cap
+like residue's, but rejections only exist where a pattern matched structurally and a constraint
+refused, so the volume is bounded by how narrow the rule already is.

@@ -366,14 +366,65 @@ pub(crate) fn pattern_root<'pr>(root: &Node<'pr>) -> Option<Node<'pr>> {
 /// bindings are already known by then, and keeping the two separate means a
 /// constraint can never change *what* matched, only whether it counts.
 /// Why a match was rejected, and whether a different binding could help.
+///
+/// The detail exists to be *reported*: a rule author iterating on a `where:`
+/// clause needs to know which constraint declined a site and what the binding
+/// actually was. It was computed and discarded until `-e` learned to print it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
     Ok,
     /// The match is in the wrong place; no rebinding can fix that.
-    WrongScope,
+    WrongScope(ScopeMiss),
     /// This capture's binding failed a constraint. A different binding of the
     /// same metavariable might satisfy it, so the match is worth retrying.
-    BadBinding(String),
+    BadBinding {
+        capture: String,
+        miss: ConstraintMiss,
+    },
+    /// A rule that `Rule::validate` should have refused before any file was
+    /// read. Reaching here means the pre-validation has a hole -- distinct from
+    /// a scope miss, which it used to be reported as.
+    Bug(&'static str),
+}
+
+/// Why the match was in the wrong place.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ScopeMiss {
+    Inside { wanted: String, found: Vec<String> },
+    Singleton { wanted: bool },
+}
+
+/// Which constraint declined the binding, and what it saw.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ConstraintMiss {
+    Name {
+        actual: Option<String>,
+        allowed: Vec<String>,
+    },
+    /// `resolved: None` is the distinction worth having: receiver narrowing is
+    /// conservative, so "rwr could not resolve this receiver at all" and "it
+    /// resolved to the wrong class" are different problems with different
+    /// fixes, and they were indistinguishable.
+    Type {
+        resolved: Option<String>,
+        wanted: String,
+        /// Resolved to the right class, but `Account.foo` where the rule means
+        /// `account.foo` or the reverse.
+        wrong_kind: bool,
+    },
+    Is {
+        wanted: NodeKind,
+    },
+    Contains {
+        pattern: String,
+    },
+    Length {
+        actual: Option<usize>,
+        wanted: usize,
+    },
+    SameNameAs {
+        other: String,
+    },
 }
 
 pub(crate) fn satisfies(
@@ -400,13 +451,16 @@ pub(crate) fn verdict(
             s == wanted || (scope.subclasses.unwrap_or(false) && hierarchy.descends_from(s, wanted))
         });
         if !reached {
-            return Verdict::WrongScope;
+            return Verdict::WrongScope(ScopeMiss::Inside {
+                wanted: wanted.clone(),
+                found: found.scope.clone(),
+            });
         }
     }
     if let Some(wanted) = scope.singleton
         && found.singleton != wanted
     {
-        return Verdict::WrongScope;
+        return Verdict::WrongScope(ScopeMiss::Singleton { wanted });
     }
 
     for (key, constraint) in constraints {
@@ -414,16 +468,23 @@ pub(crate) fn verdict(
         let Some(bound) = found.env.get(&short) else {
             // A constraint naming a metavariable the pattern does not bind is a
             // rule bug. Refuse rather than silently ignoring it.
-            return Verdict::WrongScope;
+            return Verdict::Bug("a constraint names a capture the pattern never binds");
         };
 
         if let Some(other) = &constraint.same_name_as {
             let Some(other_bound) = found.env.get(other.trim_start_matches('$')) else {
-                return Verdict::WrongScope;
+                return Verdict::Bug("`same_name_as:` names a capture the pattern never binds");
             };
             match (identifier_of(bound), identifier_of(other_bound)) {
                 (Some(a), Some(b)) if a == b => {}
-                _ => return Verdict::BadBinding(short),
+                _ => {
+                    return Verdict::BadBinding {
+                        capture: short,
+                        miss: ConstraintMiss::SameNameAs {
+                            other: other.clone(),
+                        },
+                    };
+                }
             }
         }
 
@@ -433,27 +494,48 @@ pub(crate) fn verdict(
                 Bound::One(node) => bare_name(node),
                 Bound::Many(_) => None,
             };
-            if !actual.is_some_and(|a| allowed.iter().any(|n| n.as_bytes() == a.as_slice())) {
-                return Verdict::BadBinding(short);
+            if !actual
+                .as_ref()
+                .is_some_and(|a| allowed.iter().any(|n| n.as_bytes() == a.as_slice()))
+            {
+                return Verdict::BadBinding {
+                    capture: short,
+                    miss: ConstraintMiss::Name {
+                        actual: actual.map(|a| String::from_utf8_lossy(&a).into_owned()),
+                        allowed: allowed.clone(),
+                    },
+                };
             }
         }
 
         if let Some(wanted) = constraint.is
             && !is_kind(bound, wanted)
         {
-            return Verdict::BadBinding(short);
+            return Verdict::BadBinding {
+                capture: short,
+                miss: ConstraintMiss::Is { wanted },
+            };
         }
 
         if constraint.contains.is_some() {
             let Some(sub) = contained.get(&short) else {
                 // A `contains:` whose pattern did not prepare is a rule bug.
-                return Verdict::WrongScope;
+                return Verdict::Bug("a `contains:` sub-pattern failed to prepare");
+            };
+            let miss = || ConstraintMiss::Contains {
+                pattern: sub.source.clone(),
             };
             let Bound::One(node) = bound else {
-                return Verdict::BadBinding(short);
+                return Verdict::BadBinding {
+                    capture: short,
+                    miss: miss(),
+                };
             };
             if !holds_within(node, sub, &found.env) {
-                return Verdict::BadBinding(short);
+                return Verdict::BadBinding {
+                    capture: short,
+                    miss: miss(),
+                };
             }
         }
 
@@ -461,16 +543,37 @@ pub(crate) fn verdict(
             // Counted in characters rather than bytes: `tr` maps characters, so
             // a two-byte `é` is still one of them.
             let Some(content) = literal_content(bound) else {
-                return Verdict::BadBinding(short);
+                return Verdict::BadBinding {
+                    capture: short,
+                    miss: ConstraintMiss::Length {
+                        actual: None,
+                        wanted,
+                    },
+                };
             };
-            if content.chars().count() != wanted {
-                return Verdict::BadBinding(short);
+            let actual = content.chars().count();
+            if actual != wanted {
+                return Verdict::BadBinding {
+                    capture: short,
+                    miss: ConstraintMiss::Length {
+                        actual: Some(actual),
+                        wanted,
+                    },
+                };
             }
         }
 
         if let Some(wanted) = &constraint.receiver_type {
+            let unresolved = |wrong_kind: bool, resolved: Option<String>| Verdict::BadBinding {
+                capture: short.clone(),
+                miss: ConstraintMiss::Type {
+                    resolved,
+                    wanted: wanted.clone(),
+                    wrong_kind,
+                },
+            };
             let Bound::One(node) = bound else {
-                return Verdict::BadBinding(short);
+                return unresolved(false, None);
             };
             // Unresolved means "not known to be this type", never "assume yes".
             let at = Where {
@@ -480,18 +583,18 @@ pub(crate) fn verdict(
                 sigs,
             };
             let Some(resolved) = resolve_type(node, &at) else {
-                return Verdict::BadBinding(short);
+                return unresolved(false, None);
             };
             let matches_class = resolved.class_name() == wanted.as_str()
                 || (constraint.subclasses.unwrap_or(false)
                     && hierarchy.descends_from(resolved.class_name(), wanted));
             if !matches_class {
-                return Verdict::BadBinding(short);
+                return unresolved(false, Some(resolved.class_name().to_string()));
             }
             // `Account.foo` and `account.foo` are different methods, so a
             // constraint must say which it means.
             if resolved.is_instance() != constraint.wants_instance() {
-                return Verdict::BadBinding(short);
+                return unresolved(true, Some(resolved.class_name().to_string()));
             }
         }
     }
@@ -839,6 +942,8 @@ pub(crate) struct Criteria<'a> {
     pub scope: &'a Scope,
     pub hierarchy: &'a Hierarchy,
     pub sigs: &'a crate::sigs::Signatures,
+    /// Whether to record why candidates were declined. Off, nothing is built.
+    pub explain: bool,
 }
 
 /// The unconstrained defaults, held once so `Criteria::none()` can borrow them.
@@ -864,6 +969,7 @@ impl Criteria<'_> {
             )
         });
         Criteria {
+            explain: false,
             constraints,
             contained,
             scope,
@@ -879,14 +985,151 @@ pub(crate) fn search<'pr>(
     prepared: &Prepared,
     criteria: &Criteria<'_>,
 ) -> Vec<Match<'pr>> {
+    search_explaining(pattern, target, prepared, criteria).0
+}
+
+/// As [`search`], also returning why candidates were declined.
+///
+/// Empty unless `criteria.explain` is set.
+pub(crate) fn search_explaining<'pr>(
+    pattern: &Node<'_>,
+    target: &Node<'pr>,
+    prepared: &Prepared,
+    criteria: &Criteria<'_>,
+) -> (Vec<Match<'pr>>, Vec<Rejection>) {
     let mut state = WalkState {
         scope: Vec::new(),
         locals: HashMap::new(),
         singleton: false,
         out: Vec::new(),
+        rejections: Vec::new(),
     };
     walk(pattern, target, prepared, criteria, &mut state);
-    state.out
+    (state.out, state.rejections)
+}
+
+impl Verdict {
+    /// The capture this verdict is about, if it is about one.
+    pub(crate) fn capture(&self) -> Option<String> {
+        match self {
+            Verdict::BadBinding { capture, .. } => Some(format!("${capture}")),
+            _ => None,
+        }
+    }
+
+    /// Which predicate declined the match, as a stable field value.
+    pub(crate) fn constraint(&self) -> &'static str {
+        match self {
+            Verdict::Ok => "none",
+            Verdict::Bug(_) => "rule-bug",
+            Verdict::WrongScope(ScopeMiss::Inside { .. }) => "inside",
+            Verdict::WrongScope(ScopeMiss::Singleton { .. }) => "singleton",
+            Verdict::BadBinding { miss, .. } => match miss {
+                ConstraintMiss::Name { .. } => "name",
+                ConstraintMiss::Type { .. } => "type",
+                ConstraintMiss::Is { .. } => "is",
+                ConstraintMiss::Contains { .. } => "contains",
+                ConstraintMiss::Length { .. } => "length",
+                ConstraintMiss::SameNameAs { .. } => "same_name_as",
+            },
+        }
+    }
+
+    /// What the constraint wanted and what it saw, in one line.
+    pub(crate) fn detail(&self) -> String {
+        match self {
+            Verdict::Ok => String::new(),
+            Verdict::Bug(why) => (*why).to_string(),
+            Verdict::WrongScope(ScopeMiss::Inside { wanted, found }) => {
+                let found = if found.is_empty() {
+                    "the top level".to_string()
+                } else {
+                    found.join("::")
+                };
+                format!("needs `inside: {wanted}`, found {found}")
+            }
+            Verdict::WrongScope(ScopeMiss::Singleton { wanted }) => {
+                format!(
+                    "needs `singleton: {wanted}`, found {}",
+                    if *wanted {
+                        "an instance method"
+                    } else {
+                        "a singleton method"
+                    }
+                )
+            }
+            Verdict::BadBinding { miss, .. } => match miss {
+                ConstraintMiss::Name { actual, allowed } => match actual {
+                    Some(a) => format!("`{a}` is not one of {}", allowed.join(", ")),
+                    None => format!(
+                        "no identifier here; `name:` wants one of {}",
+                        allowed.join(", ")
+                    ),
+                },
+                // The distinction that matters most in this whole report:
+                // receiver narrowing is conservative, so an unresolved receiver
+                // is a different problem from a wrongly-resolved one, and they
+                // read identically until you say which happened.
+                ConstraintMiss::Type {
+                    resolved: None,
+                    wanted,
+                    ..
+                } => format!(
+                    "receiver did not resolve; `type: {wanted}` only matches receivers rwr can resolve"
+                ),
+                ConstraintMiss::Type {
+                    resolved: Some(got),
+                    wanted,
+                    wrong_kind,
+                } => {
+                    if *wrong_kind {
+                        format!(
+                            "resolved to {got}, but as the other of instance/class than `type: {wanted}` means"
+                        )
+                    } else {
+                        format!("resolved to {got}, not {wanted}")
+                    }
+                }
+                ConstraintMiss::Is { wanted } => format!("not {wanted:?}"),
+                ConstraintMiss::Contains { pattern } => {
+                    format!("does not contain `{pattern}`")
+                }
+                ConstraintMiss::Length { actual, wanted } => match actual {
+                    Some(a) => format!("{a} character(s), not {wanted}"),
+                    None => format!("not a literal, so `length: {wanted}` cannot apply"),
+                },
+                ConstraintMiss::SameNameAs { other } => {
+                    format!("does not name the same identifier as {other}")
+                }
+            },
+        }
+    }
+}
+
+/// Where a binding sits in the source, for a report to quote it.
+fn bound_range(bound: &Bound<'_>) -> Option<(usize, usize)> {
+    match bound {
+        Bound::One(node) => {
+            let loc = node.location();
+            Some((loc.start_offset(), loc.end_offset()))
+        }
+        // A name capture has no node, and a run of them has no single range.
+        Bound::Name(_) | Bound::Many(_) => None,
+    }
+}
+
+/// A site the pattern matched structurally, then a constraint declined.
+///
+/// Only recorded when `-e` asked for it: rejections are debugging detail about
+/// sites a rule correctly refused, not a blind spot -- the account of what rwr
+/// could not see stays unconditional.
+#[derive(Debug)]
+pub(crate) struct Rejection {
+    /// Byte offset of the candidate, for the caller to turn into a line.
+    pub start: usize,
+    pub verdict: Verdict,
+    /// Byte range of the binding that was refused, for the caller to slice.
+    pub bound: Option<(usize, usize)>,
 }
 
 /// Everything the walk carries down the tree and mutates as it goes.
@@ -898,6 +1141,7 @@ struct WalkState<'pr> {
     /// Inside `def self.x` or `class << self`, which decides what `self` means.
     singleton: bool,
     out: Vec<Match<'pr>>,
+    rejections: Vec<Rejection>,
 }
 
 fn walk<'pr>(
@@ -918,6 +1162,9 @@ fn walk<'pr>(
     // (Q13). Forbidding the rejected binding forces backtracking to a different
     // one, and terminates because bindings are finite.
     let mut forbidden = Forbidden::new();
+    // Buffered rather than pushed directly: a later binding may satisfy the
+    // rule, and a site that ultimately matched has nothing to explain.
+    let mut attempts: Vec<Rejection> = Vec::new();
     for _ in 0..MAX_REBINDS {
         let mut env = Env::new();
         if !match_node(pattern, target, prepared, &mut env, &forbidden) {
@@ -940,16 +1187,42 @@ fn walk<'pr>(
         ) {
             Verdict::Ok => {
                 state.out.push(candidate);
+                attempts.clear();
                 break;
             }
             // Wrong place, not wrong binding -- no rebinding can fix it.
-            Verdict::WrongScope => break,
-            Verdict::BadBinding(key) => match candidate.env.get(&key) {
-                Some(bound) => forbidden.entry(key).or_default().push(fingerprint(bound)),
-                None => break,
-            },
+            verdict @ (Verdict::WrongScope(_) | Verdict::Bug(_)) => {
+                if criteria.explain {
+                    attempts.push(Rejection {
+                        start: target.location().start_offset(),
+                        verdict,
+                        bound: None,
+                    });
+                }
+                break;
+            }
+            Verdict::BadBinding { capture, miss } => {
+                let Some(bound) = candidate.env.get(&capture) else {
+                    break;
+                };
+                if criteria.explain {
+                    attempts.push(Rejection {
+                        start: target.location().start_offset(),
+                        bound: bound_range(bound),
+                        verdict: Verdict::BadBinding {
+                            capture: capture.clone(),
+                            miss,
+                        },
+                    });
+                }
+                forbidden
+                    .entry(capture)
+                    .or_default()
+                    .push(fingerprint(bound));
+            }
         }
     }
+    state.rejections.append(&mut attempts);
 
     let entered = scope_name(target);
     if let Some(name) = &entered {
@@ -1034,6 +1307,7 @@ mod tests {
         .0;
         let contained = rule.contained().expect("sub-pattern prepares");
         let criteria = Criteria {
+            explain: false,
             constraints: &rule.constraints,
             contained: &contained,
             scope: &rule.scope,
@@ -1250,6 +1524,47 @@ end
     /// match. Binding `$K` to an already-shortened `name:` fails
     /// `same_name_as` -- an implicit value has no identifier -- and the `size`
     /// pair, which would satisfy it, must still be found.
+    /// An unresolved receiver and a wrongly-resolved one are different problems
+    /// with different fixes, and they read identically until the report says
+    /// which happened. Receiver narrowing is conservative, so this is the most
+    /// common surprise the design produces.
+    #[test]
+    fn an_unresolved_receiver_reads_differently_from_a_wrong_one() {
+        let unresolved = Verdict::BadBinding {
+            capture: "R".to_string(),
+            miss: ConstraintMiss::Type {
+                resolved: None,
+                wanted: "Widget".to_string(),
+                wrong_kind: false,
+            },
+        };
+        let wrong = Verdict::BadBinding {
+            capture: "R".to_string(),
+            miss: ConstraintMiss::Type {
+                resolved: Some("Gadget".to_string()),
+                wanted: "Widget".to_string(),
+                wrong_kind: false,
+            },
+        };
+        assert!(unresolved.detail().contains("did not resolve"));
+        assert!(wrong.detail().contains("Gadget"));
+        assert_ne!(unresolved.detail(), wrong.detail());
+        // Both name the same predicate, so a machine consumer groups them.
+        assert_eq!(unresolved.constraint(), "type");
+        assert_eq!(wrong.constraint(), "type");
+    }
+
+    /// A rule bug is not a scope miss. Both used to report as `WrongScope`,
+    /// which sent an author looking at their `scope:` for a typo'd `where:` key.
+    #[test]
+    fn a_rule_bug_is_distinct_from_a_scope_miss() {
+        assert_eq!(Verdict::Bug("x").constraint(), "rule-bug");
+        assert_eq!(
+            Verdict::WrongScope(ScopeMiss::Singleton { wanted: true }).constraint(),
+            "singleton"
+        );
+    }
+
     #[test]
     fn a_rejected_binding_is_retried_not_abandoned() {
         let prepared = prepare("{**$B, $K: $V, **$A}").expect("prepares");
@@ -1270,6 +1585,7 @@ end
         let sigs = crate::sigs::Signatures::default();
         let contained = std::collections::HashMap::new();
         let criteria = Criteria {
+            explain: false,
             constraints: &constraints,
             contained: &contained,
             scope: &scope,

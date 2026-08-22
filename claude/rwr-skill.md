@@ -287,9 +287,12 @@ converge if it did.
 - Generated and vendored code is skipped; `--include-vendored` overrides.
 - Ruby means more than `.rb`: `.rake`, `.ru`, `.gemspec`, `.jbuilder`,
   `Rakefile`, `Gemfile` and friends are searched too.
-- `-e/--explain` says which constraint rejected a candidate and how a residue
-  occurrence was classified — reach for it when a rule matches less than you
-  expected.
+- `-e/--explain` says which constraint declined a candidate. Point it at one
+  site while writing a rule: `rwr check r.yml app/x.rb:42 -e` prints the capture,
+  what it bound, and what the constraint wanted. Under `-j` it is a `rejections`
+  array. A `type:` miss distinguishes "resolved to the wrong class" from
+  "receiver did not resolve at all" — the second may not be fixable by changing
+  the rule, since narrowing is conservative by design.
 - rwr does **not** format. Indentation, alignment and trailing commas are
   presentation; it only repairs layout it disturbed itself.
 

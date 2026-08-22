@@ -838,7 +838,10 @@ fn structured_output_names_its_own_shape() {
         let text = String::from_utf8_lossy(&out.stdout);
         let doc: serde_json::Value = serde_json::from_str(&text).expect("json");
         assert!(doc.is_object(), "a document, not a list of one: {text}");
-        assert_eq!(doc["schema"], 2, "{text}");
+        // One version across the CLI contract, not one per command: field
+        // names are shared, so a consumer branches on a single number. 3 added
+        // `rejections` to check's report.
+        assert_eq!(doc["schema"], 3, "{text}");
         assert_eq!(doc["rwr_version"], env!("CARGO_PKG_VERSION"), "{text}");
     }
 }
@@ -1255,4 +1258,85 @@ fn a_finding_rule_asserts_how_many_it_finds() {
     );
     let out = test_run(dir.path(), &rule);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+/// `-e` on a scoped run is the rule-authoring loop: one site, one reason.
+///
+/// The flag's own help had promised this since it shipped, and a site declined
+/// by a constraint produced silence.
+#[test]
+fn explain_says_which_constraint_declined_a_site() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("rule.yml"),
+        "id: t/widget\nmatch: $R.legacy_total\nwhere:\n  $R:\n    type: Widget\nrewrite: $R.total\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("app.rb"),
+        "w = Widget.new\nw.legacy_total\n\ng = Gadget.new\ng.legacy_total\n\nwhatever.legacy_total\n",
+    )
+    .expect("write");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    // Scoped to the rejected line alone.
+    let out = run(&["check", "rule.yml", "app.rb:5", "-e"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Gadget"), "names what it resolved to: {text}");
+
+    // The distinction the report exists for: a receiver that resolved to the
+    // wrong class, and one that did not resolve at all, are different problems.
+    let out = run(&["check", "rule.yml", "app.rb", "-e"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("resolved to Gadget"), "{text}");
+    assert!(text.contains("did not resolve"), "{text}");
+
+    // Without -e it stays quiet: a rejection is debugging detail about a site
+    // the rule correctly refused, not a blind spot.
+    let out = run(&["check", "rule.yml", "app.rb"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("declined"), "{text}");
+}
+
+/// Machine consumers get the same account, with stable field names.
+#[test]
+fn rejections_are_structured_and_opt_in() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("rule.yml"),
+        "id: t/name\nmatch: xs.$SEL { |$P| $B }.first\n\
+         where:\n  $SEL: { name: [select, find_all] }\nrewrite: xs.detect { |$P| $B }\n",
+    )
+    .expect("write");
+    std::fs::write(path.join("app.rb"), "xs.filter { |x| x.ok? }.first\n").expect("write");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    let out = run(&["check", "rule.yml", "app.rb", "-e", "-j"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let first = &doc["rejections"][0];
+    assert_eq!(first["capture"], "$SEL");
+    assert_eq!(first["constraint"], "name");
+    assert_eq!(first["rule"], "t/name");
+
+    // Absent rather than empty without the flag: nobody asked is not the same
+    // as nothing was declined.
+    let out = run(&["check", "rule.yml", "app.rb", "-j"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(doc.get("rejections").is_none(), "{doc}");
 }

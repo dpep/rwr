@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+**`-e` says which constraint declined a site.** The flag's own help had promised this since it
+shipped and it produced silence: a site rejected by `type: Widget` printed nothing at all. The
+matcher had the answer and discarded it once rebinding was exhausted. Scoped to a line, this is
+the rule-authoring loop:
+
+```
+$ rwr check rule.yml app.rb:5 -e
+app.rb:5:1: t/widget: matched, then declined
+  $R bound `g` -- resolved to Gadget, not Widget
+```
+
+Three cases that were one silence are now three answers: a receiver that **resolved to the
+wrong class**, one that **did not resolve at all** (receiver narrowing is conservative, and this
+may not be fixable by editing the rule), and one that resolved correctly but as the other of
+instance/class than the rule means.
+
+A rule *bug* — a constraint naming a capture the pattern never binds, a `contains:` that failed
+to prepare — no longer reports as a scope miss. It said `WrongScope`, which sent an author
+looking at their `scope:` for a typo'd `where:` key.
+
+Report schema is **3**: `check -j -e` carries a `rejections` array with `capture`, `constraint`,
+`detail` and `bound`. Absent without `-e`, since nobody asking is not the same as nothing being
+declined. Rejections stay behind the flag deliberately — they describe sites a rule *correctly*
+refused, which is debugging detail, not a blind spot; the account of what rwr could not see
+stays unconditional.
+
 **`rwr test` runs a rule's own fixtures.** A rule file may carry `tests:` -- an input snippet
 plus `output:`, `unchanged: true`, or `finds: N` -- and `rwr test rule.yml` (or a directory, or
 a built-in name) checks them. It exits 1 on a failure with a diff, so a custom rule can be

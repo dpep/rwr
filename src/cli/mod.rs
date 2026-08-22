@@ -4,7 +4,7 @@
 //! `docs/cli-conventions.md`. Conventions are inherited from `rq` so that an
 //! agent which has learned one of these tools has learned the others.
 
-use crate::engine::{Finding, Residue};
+use crate::engine::{Finding, Rejection, Residue};
 use crate::pattern::{matcher, prefilter, prepare};
 use crate::profile;
 use crate::residue;
@@ -100,8 +100,11 @@ pub(crate) struct Common {
     #[arg(long, global = true)]
     include_vendored: bool,
 
-    /// Explain each result: which constraint rejected a candidate, which
-    /// conflict suppressed a match, how a residue occurrence was classified.
+    /// Explain each result: which constraint declined a candidate, and why a
+    /// rule was held back.
+    ///
+    /// Scoped, this is the rule-authoring loop: `rwr check r.yml app.rb:5 -e`
+    /// says what stopped the match at one site.
     #[arg(short = 'e', long, global = true)]
     explain: bool,
 
@@ -558,6 +561,32 @@ fn report_by_rule(changed: &[Changed]) {
     println!();
     for (id, n) in &totals {
         println!("  {id:<width$}  {n} site(s)");
+    }
+}
+
+/// Say why candidates were declined.
+///
+/// Behind `-e`, unlike residue: a rejection is detail about a site the rule
+/// *correctly* refused, not a blind spot. The account of what rwr could not see
+/// stays unconditional; this is debugging.
+fn report_rejections(rejections: &[Rejection]) {
+    if rejections.is_empty() {
+        return;
+    }
+    println!();
+    for r in rejections {
+        let rule = r.rule.as_deref().unwrap_or("pattern");
+        println!(
+            "{}:{}:{}: {rule}: matched, then declined",
+            r.file, r.line, r.col
+        );
+        match (&r.capture, &r.bound) {
+            (Some(capture), Some(bound)) => {
+                println!("  {capture} bound `{bound}` -- {}", r.detail);
+            }
+            (Some(capture), None) => println!("  {capture} -- {}", r.detail),
+            _ => println!("  {}", r.detail),
+        }
     }
 }
 
@@ -1033,7 +1062,7 @@ struct Changed {
 /// schema number is what it can branch on without a version comparison.
 ///
 /// 1 was a bare array of changed files, with no account of residue at all.
-const REPORT_SCHEMA: u32 = 2;
+const REPORT_SCHEMA: u32 = 3;
 
 /// Everything a `check` or `rewrite` run has to say, for machine consumers.
 ///
@@ -1056,6 +1085,10 @@ struct Report<'a> {
     residue: &'a [Residue],
     /// Template files not searched, since they embed Ruby rwr does not read.
     templates_skipped: usize,
+    /// Why candidates were declined. Present only under `-e` -- absent means
+    /// nobody asked, not that nothing was declined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rejections: Option<&'a [Rejection]>,
 }
 
 /// What running the rules over one template produced.
@@ -1285,7 +1318,7 @@ fn cmd_apply(
                 .zip(absolute.as_ref())
                 .map(|(changed, absolute)| crate::engine::Only { changed, absolute });
 
-            match engine.scan(&file, mapped, &context, only) {
+            match engine.scan(&file, mapped, &context, only, common.explain) {
                 crate::engine::ScanOutcome::Unparseable | crate::engine::ScanOutcome::Quiet => None,
                 crate::engine::ScanOutcome::Refused(reason) => Some(Outcome {
                     file,
@@ -1560,6 +1593,12 @@ fn cmd_apply(
         }
     }
 
+    let mut rejections: Vec<Rejection> = outcomes
+        .iter()
+        .flat_map(|o| o.scanned.rejections.iter().cloned())
+        .collect();
+    rejections.sort_by(|a, b| (&a.file, a.line, a.col).cmp(&(&b.file, b.line, b.col)));
+
     let mut findings: Vec<Finding> = outcomes
         .iter()
         .flat_map(|o| o.scanned.flagged.iter().cloned())
@@ -1593,6 +1632,7 @@ fn cmd_apply(
                     .collect::<Vec<_>>(),
             );
             report_unsafe(&changed, rules);
+            report_rejections(&rejections);
             report_residue(&left_over);
             // Only the templates that fell back: one rwr parsed has real
             // evidence and does not belong in a paragraph about guesses.
@@ -1614,6 +1654,7 @@ fn cmd_apply(
                 } else {
                     0
                 },
+                rejections: common.explain.then_some(rejections.as_slice()),
             };
             if emit_document(out, &report).is_some() {
                 return Exit::Error.into();
@@ -1780,7 +1821,7 @@ fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
         // signature writes it into the input, rather than being handed one.
         let sources = [source::Source::Owned(bytes.to_vec())];
         let context = engine.context(&sources);
-        let outcome = engine.scan("fixture.rb", bytes, &context, None);
+        let outcome = engine.scan("fixture.rb", bytes, &context, None, false);
 
         let (kind, actual, findings) = match &outcome {
             crate::engine::ScanOutcome::Unparseable => ("invalid_ruby", None, 0),
