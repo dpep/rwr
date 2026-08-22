@@ -1136,11 +1136,14 @@ useless as a gate: a pull request adding three lines fails on two thousand it di
 makes the tool adoptable without a todo file to go stale — RuboCop needed
 `--auto-gen-config` for the same reason, and that file is a liability the moment it exists.
 
-**Bare `--diff` is the uncommitted work; `--diff REV` is three-dot.** `git diff main` compares
+**`--diff` is the uncommitted work; `--since REV` is three-dot.** `git diff main` compares
 against main's *tip*, so anything main gained meanwhile is reported as though this branch had
 written it. `main...HEAD` is the change this branch introduces. Verified against a diverged
 branch: two-dot picked up an unrelated file committed to main, three-dot did not
 (`cli_e2e::a_named_base_excludes_what_the_base_gained`).
+
+*Amended by D68* — this was one flag, `--diff [<REV>]`, until the optional value was found to
+swallow a following path.
 
 **Overlap, not containment.** A match spanning a changed line and some unchanged ones belongs
 to the change. Containment would let a one-line edit inside a multi-line expression escape the
@@ -1440,3 +1443,57 @@ exact lines, the manual fix is cheap. That is the same trade the whole residue d
 
 *Reverses if:* never for matching. For rewriting, only if a rule could express *which* prose
 mentions it means, which is a natural-language problem rather than a structural one.
+
+## D68 - `--diff` and `--since` are two flags, and a path may name its lines
+**Decided.**
+
+D59 shipped one flag with an optional value, `--diff [<REV>]`. A flag that *may* take a value
+consumes the next token whatever it is, so `rwr check all --diff app/` built the revision range
+`app/...` and failed inside git. The bug was reported against the opposite ordering; the order
+the `--help` usage line implies (`--diff` last) always worked, which is a good illustration of
+how badly an optional-value flag reads.
+
+**The fix is to remove the optionality, not to disambiguate it.** `--diff` now takes no value
+and `--since REV` requires one. A flag taking zero arguments cannot consume the next token; one
+taking exactly one always does. No token's role depends on what it looks like, so nothing has to
+probe the filesystem to decide — which is the guess D31 already refused for `-r`. Requiring
+`--diff=REV` would have worked too, but two flags keep the space-separated spelling and make the
+combination below expressible.
+
+**Together they mean the merge base against the working tree.** `--since main` is
+commit-to-commit, so uncommitted work is silently outside it — measured, not assumed:
+`git diff --unified=0 main...` omits an unstaged line that `git diff $(git merge-base main HEAD)`
+reports. `--since main --diff` is "what this branch introduces, including what I have not
+committed", which is what a human at a terminal usually means and which one flag could not say.
+
+**Untracked files are in the uncommitted scope.** `git diff` cannot see a file git is not
+tracking, so a brand-new file full of violations reported as a clean tree — the pre-commit case
+failing exactly when a change is largest. `git ls-files --others --exclude-standard` folds them
+in, every line of a new file being a new line.
+
+**A path that does not exist is an error.** `rwr check all app/typo` exited 0 and reported a
+clean tree; in CI that is a green gate that checked no files at all. This is the same vacuous
+pass that ruled out inferring a default branch (below), and it is now exit 2.
+
+**`PATH:N` and `PATH:N-M` name lines directly.** The same scope git produces, supplied by hand.
+rwr already *prints* `file:line`, so an output line pastes back in as an input. A filename that
+genuinely ends in `:3` is the fallback reading rather than a coin flip, and when neither reading
+exists the error names both. Mixing a bare path with a scoped one is refused: a `Changed` covers
+the files it names and nothing else, so `app/ lib/x.rb:3` would check three lines and call `app/`
+clean. Combining it with `--diff`/`--since` is refused for the same reason — two answers to which
+lines to check, and picking one silently is how a scoped run becomes an unscoped one.
+
+**Rejected: inferring the default branch.** `--diff` could have defaulted to
+`origin/HEAD...HEAD`, saving the four characters of `main`. Measured: `origin/HEAD` is present in
+all seven local repos here, and *absent* after a `--single-branch` clone — which is
+`actions/checkout`'s shape, so it fails in CI, the one place it would matter. CI does not need it
+either, since a pull-request gate is handed `$GITHUB_BASE_REF`, and that is *more* correct than
+the default branch for a PR targeting a release branch or a stacked PR. The fallbacks are worse:
+guessing `main`-then-`master` picks silently wrong in a repo that has both — a wrong scope with a
+clean exit, which is the failure this decision spends its length avoiding. It also has nowhere to
+live: hanging it off bare `--diff` would turn a pre-commit hook's scope from "the three lines I am
+about to commit" into "everything across ten commits", silently.
+
+*Reverses if:* `--since main` proves to be typed often enough to want a spelling that infers the
+base — in which case it wants its own flag, taking no value, reading `origin/HEAD` only and
+erring when that is absent rather than guessing.

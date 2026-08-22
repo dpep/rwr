@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+**`--diff` no longer eats a path.** It took an optional revision, so `rwr check all --diff app/`
+built the range `app/...` and failed inside git. `--diff` now takes **no value** and the new
+`--since REV` requires one, so no token's role depends on what it looks like. `--diff main`
+becomes an error naming `--since main`. Together — `--since main --diff` — they mean the merge
+base against the working tree, which is what this branch introduces *including* what you have
+not committed; neither flag said that before.
+
+**`--diff` sees brand-new files.** `git diff` cannot see a file git is not tracking, so an
+untracked file full of violations reported as a clean tree — the pre-commit case failing exactly
+when the change is largest. Untracked files are now in scope.
+
+**A path that does not exist is an error.** `rwr check all app/typo` exited 0 and reported a
+clean tree; in CI that is a green gate that checked nothing. It is now exit 2.
+
+**`PATH:N` and `PATH:N-M` scope a run to those lines**, the `file:line` rwr already prints, so
+an output line pastes back in as an input.
+
 **Shell completions**: `rwr --completions` prints a script for the shell you are in, or
 `rwr --completions zsh` names one. `clap_complete` had been a dependency since the first
 commit without ever being called.

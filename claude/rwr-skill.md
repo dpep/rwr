@@ -156,9 +156,23 @@ change touched — otherwise a rule with two thousand pre-existing sites fails a
 change that added three:
 
 ```sh
-rwr check all --diff          # uncommitted work
-rwr check all --diff main     # what this branch introduces (main...HEAD)
+rwr check all --diff                # uncommitted work, untracked files included
+rwr check all --since main          # what this branch introduces (main...HEAD)
+rwr check all --since main --diff   # both: merge base against the working tree
+rwr check all app/x.rb:3-15         # those lines, named directly
 ```
+
+`--diff` takes **no value** — `--diff main` reads `main` as a path. Use `--since`
+for a revision. In CI that is `--since "$GITHUB_BASE_REF"`, which is more correct
+than the default branch for a PR targeting a release branch.
+
+`--since main` alone is commit-to-commit, so your uncommitted work sits outside
+it; add `--diff` to include the working tree.
+
+`PATH:N` and `PATH:N-M` are the `file:line` rwr itself prints, so an output line
+pastes back in. Every path must name lines or none may, and they cannot be
+combined with `--diff`/`--since` — two answers to which lines to check is a
+refusal, not a precedence rule.
 
 Works with `find`, `check` and `rewrite`.
 

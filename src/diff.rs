@@ -38,20 +38,108 @@ impl Changed {
     pub(crate) fn files(&self) -> usize {
         self.by_file.len()
     }
+
+    /// Restrict to lines named on the command line, as `file.rb:3` or
+    /// `file.rb:3-15`.
+    ///
+    /// The same scope git produces, supplied by hand: rwr *prints* `file:line`,
+    /// so an output line pastes back in as an input.
+    pub(crate) fn from_lines(named: Vec<(PathBuf, (u32, u32))>) -> Self {
+        let mut by_file: HashMap<PathBuf, Vec<(u32, u32)>> = HashMap::new();
+        for (path, range) in named {
+            by_file.entry(path).or_default().push(range);
+        }
+        Changed { by_file }
+    }
 }
 
-/// What `--diff` was given, as a git revision range.
+/// A path and the lines named after it, as `file.rb:3` or `file.rb:3-15`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Lines<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) range: (u32, u32),
+}
+
+/// Split a `PATH:N` or `PATH:N-M` argument into its path and line range.
 ///
-/// Bare `--diff` is the uncommitted work -- the pre-commit case. `--diff main`
+/// Returns `None` when there is no line suffix at all, which is the ordinary
+/// case. A malformed one (`foo.rb:` or `foo.rb:9-3`) is an error rather than a
+/// filename, because silently reading it as a path is how a scoped run turns
+/// into an unscoped one.
+pub(crate) fn split_lines(arg: &str) -> Result<Option<Lines<'_>>, String> {
+    // `rfind`, so a Windows-style `C:\...` or any earlier colon is left alone.
+    let Some(colon) = arg.rfind(':') else {
+        return Ok(None);
+    };
+    let (path, suffix) = (&arg[..colon], &arg[colon + 1..]);
+    // Not a line suffix at all -- a filename that happens to contain a colon.
+    if suffix.is_empty() || !suffix.starts_with(|c: char| c.is_ascii_digit()) {
+        return Ok(None);
+    }
+
+    let (start, end) = match suffix.split_once('-') {
+        Some((a, b)) => (a, b),
+        None => (suffix, suffix),
+    };
+    let parse = |s: &str| {
+        s.parse::<u32>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("{arg}: line numbers start at 1"))
+    };
+    let (start, end) = (parse(start)?, parse(end)?);
+    if end < start {
+        return Err(format!("{arg}: line range ends before it starts"));
+    }
+    Ok(Some(Lines {
+        path,
+        range: (start, end),
+    }))
+}
+
+/// What `--since` and `--diff` were given, as a git revision range.
+///
+/// `--diff` alone is the uncommitted work -- the pre-commit case. `--since main`
 /// is three-dot, `main...HEAD`, which is the change *this branch* introduces
 /// rather than every way it differs from main's tip; two-dot would drag in
 /// whatever main gained meanwhile and report it as yours.
-fn spec(rev: Option<&str>) -> String {
-    match rev {
-        None => "HEAD".to_string(),
-        Some(rev) if rev.contains("..") => rev.to_string(),
-        Some(rev) => format!("{rev}..."),
+///
+/// Together they are the merge base against the *working tree*: what this branch
+/// introduces including what is not committed yet. Neither flag says that alone,
+/// and it is what a human at a terminal usually means -- `--since main` on its
+/// own is commit-to-commit and silently leaves your unstaged work out of scope.
+fn spec(since: Option<&str>, uncommitted: bool, root: &Path) -> Result<String, String> {
+    match (since, uncommitted) {
+        (None, _) => Ok("HEAD".to_string()),
+        // An explicit range is passed through rather than doubled.
+        (Some(rev), false) if rev.contains("..") => Ok(rev.to_string()),
+        (Some(rev), false) => Ok(format!("{rev}...")),
+        // A range already names both ends, so there is no merge base to take
+        // and no honest way to fold the working tree into it.
+        (Some(rev), true) if rev.contains("..") => Err(format!(
+            "--since {rev} is already a range; drop --diff, or name a single revision"
+        )),
+        (Some(rev), true) => merge_base(rev, root),
     }
+}
+
+/// Where this branch left the base, as a sha.
+///
+/// `git diff <sha>` compares a commit against the working tree, which is the
+/// only spelling that reaches uncommitted lines -- `<rev>...` does not.
+fn merge_base(rev: &str, root: &Path) -> Result<String, String> {
+    let out = Command::new("git")
+        .args(["merge-base", rev, "HEAD"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("cannot run git merge-base: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git merge-base {rev} HEAD failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Ask git which lines changed, in the repository containing `start`.
@@ -59,7 +147,11 @@ fn spec(rev: Option<&str>) -> String {
 /// `start` rather than the process's own directory: `rwr check ~/other/repo
 /// --diff` must ask *that* repository, and asking the current one silently
 /// scoped the run to a diff from somewhere else entirely.
-pub(crate) fn from_git(rev: Option<&str>, start: &Path) -> Result<Changed, String> {
+pub(crate) fn from_git(
+    since: Option<&str>,
+    uncommitted: bool,
+    start: &Path,
+) -> Result<Changed, String> {
     let start = start
         .canonicalize()
         .map_err(|e| format!("cannot resolve {}: {e}", start.display()))?;
@@ -79,7 +171,7 @@ pub(crate) fn from_git(rev: Option<&str>, start: &Path) -> Result<Changed, Strin
     }
     let root = PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
 
-    let range = spec(rev);
+    let range = spec(since, uncommitted, &root)?;
     let out = Command::new("git")
         .args(["diff", "--unified=0", "--no-color", &range])
         .current_dir(&root)
@@ -92,7 +184,41 @@ pub(crate) fn from_git(rev: Option<&str>, start: &Path) -> Result<Changed, Strin
         ));
     }
 
-    Ok(parse(&String::from_utf8_lossy(&out.stdout), &root))
+    let mut changed = parse(&String::from_utf8_lossy(&out.stdout), &root);
+    if uncommitted {
+        untracked(&root, &mut changed)?;
+    }
+    Ok(changed)
+}
+
+/// Fold in files git is not tracking yet.
+///
+/// `git diff` cannot see them at all, so a brand-new file full of violations
+/// reported as a clean tree -- the pre-commit case this flag exists for, failing
+/// exactly when a change is largest. Every line of a new file is a new line.
+fn untracked(root: &Path, changed: &mut Changed) -> Result<(), String> {
+    let out = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("cannot run git ls-files: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    for name in String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|n| !n.is_empty())
+    {
+        changed
+            .by_file
+            .entry(root.join(name))
+            .or_default()
+            .push((1, u32::MAX));
+    }
+    Ok(())
 }
 
 /// Read hunk headers out of a unified diff.
@@ -141,10 +267,38 @@ mod tests {
     /// A branch's own change, not every way it differs from the base's tip.
     #[test]
     fn a_named_revision_uses_merge_base_semantics() {
-        assert_eq!(spec(Some("main")), "main...");
-        assert_eq!(spec(None), "HEAD");
+        let root = Path::new(".");
+        assert_eq!(spec(Some("main"), false, root).unwrap(), "main...");
+        assert_eq!(spec(None, true, root).unwrap(), "HEAD");
         // An explicit range is passed through rather than doubled.
-        assert_eq!(spec(Some("main..HEAD")), "main..HEAD");
+        assert_eq!(spec(Some("main..HEAD"), false, root).unwrap(), "main..HEAD");
+        // A range has both ends already; folding the working tree in is not
+        // something it can mean.
+        assert!(spec(Some("a..b"), true, root).is_err());
+    }
+
+    /// `file.rb:3` and `file.rb:3-15`, the form rwr already prints.
+    #[test]
+    fn a_line_suffix_is_split_off_the_path() {
+        let at = |path, range| Some(Lines { path, range });
+        assert_eq!(split_lines("x.rb:3").unwrap(), at("x.rb", (3, 3)));
+        assert_eq!(split_lines("a/x.rb:3-15").unwrap(), at("a/x.rb", (3, 15)));
+        // No suffix, and a colon that is part of the name, are both just paths.
+        assert_eq!(split_lines("x.rb").unwrap(), None);
+        assert_eq!(split_lines("odd:name.rb").unwrap(), None);
+        // Malformed is an error, never silently the whole string as a path --
+        // that turns a scoped run into an unscoped one.
+        assert!(split_lines("x.rb:0").is_err());
+        assert!(split_lines("x.rb:9-3").is_err());
+    }
+
+    #[test]
+    fn named_lines_scope_the_files_they_name() {
+        let file = PathBuf::from("/repo/x.rb");
+        let changed = Changed::from_lines(vec![(file.clone(), (3, 5))]);
+        assert!(changed.touches(&file, 4, 4));
+        assert!(!changed.touches(&file, 6, 6));
+        assert!(!changed.covers(Path::new("/repo/other.rb")));
     }
 
     #[test]

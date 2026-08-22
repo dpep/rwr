@@ -11,7 +11,8 @@ rwr 'return nil'                       # find, whole repo
 rwr 'return nil' app/models            # find, scoped
 rwr '$R.select { |$P| $B }.first'      # metavariables
 rwr check all app/                     # every built-in rule, read-only
-rwr check all --diff main              # only the lines this branch touched
+rwr check all --since main             # only the lines this branch touched
+rwr check all app/x.rb:3-15            # only those lines
 rwr rewrite rule.yml app/              # apply
 rwr rewrite 'def legacy($A); $B; end' -d   # delete, doc comment and all
 ```
@@ -168,10 +169,19 @@ Everything that prints honors `-j`/`--json`, which emits one document —
 templates_skipped}`. `-J`/`--ndjson` streams instead: `find` writes a row per
 match, and `check`/`rewrite` write the report on a single line.
 
-`--diff` scopes a run to the lines a change touched, which is what makes `check`
-adoptable on a codebase that has never run it: three new sites fail, two
-thousand pre-existing ones do not. Bare `--diff` is the uncommitted work;
-`--diff main` is what this branch introduces.
+Scoping a run to the lines a change touched is what makes `check` adoptable on a
+codebase that has never run it: three new sites fail, two thousand pre-existing
+ones do not.
+
+| | Scope |
+|---|---|
+| `--diff` | what is not committed yet, untracked files included — the pre-commit case |
+| `--since main` | what this branch introduces, `main...HEAD` — the CI case, where `--since "$GITHUB_BASE_REF"` is the recipe |
+| `--since main --diff` | both: the merge base against the working tree |
+| `app/x.rb:3-15` | those lines, named directly. `:3` is a single line, and it is the `file:line` rwr prints |
+
+`--diff` takes no value: as `--diff [<REV>]` it swallowed a following path as its
+revision, and deciding by whether that path exists on disk would be a guess.
 
 Exit codes, which a caller can branch on before parsing any output:
 

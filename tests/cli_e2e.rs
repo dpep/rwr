@@ -453,7 +453,7 @@ fn diff_scoping_ignores_pre_existing_sites() {
     );
 }
 
-/// `--diff main` is `main...HEAD`, not `main..HEAD`. Two-dot reports whatever
+/// `--since main` is `main...HEAD`, not `main..HEAD`. Two-dot reports whatever
 /// the base gained meanwhile as though this branch had written it.
 #[test]
 fn a_named_base_excludes_what_the_base_gained() {
@@ -482,7 +482,7 @@ fn a_named_base_excludes_what_the_base_gained() {
         "check",
         "style/return-nil",
         path.to_str().unwrap(),
-        "--diff",
+        "--since",
         "main",
     ]);
     let text = String::from_utf8_lossy(&out.stdout);
@@ -491,6 +491,170 @@ fn a_named_base_excludes_what_the_base_gained() {
         !text.contains("theirs.rb"),
         "main's own work is not this branch's: {text}"
     );
+}
+
+/// The bug the split exists to make unrepresentable: as `--diff [<REV>]`, a
+/// following path was swallowed as the revision and `app.rb...` was handed to
+/// git. `--diff` now takes no value, so a path after it is a path.
+#[test]
+fn a_path_after_diff_is_a_path() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(path.join("app.rb"), "def one\n  1\nend\n").expect("write");
+    git(path, &["init", "-q", "--initial-branch=main", "."]);
+    git(path, &["config", "user.email", "t@e.st"]);
+    git(path, &["config", "user.name", "t"]);
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-qm", "base"]);
+    std::fs::write(path.join("app.rb"), "def one\n  return nil\nend\n").expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "style/return-nil", "--diff", "app.rb"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("1 site(s)"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// `--since main` is commit-to-commit, so uncommitted work sits outside it.
+/// With `--diff` the range runs from the merge base to the working tree, which
+/// is the only spelling that covers both.
+#[test]
+fn since_with_diff_reaches_uncommitted_work() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(path.join("app.rb"), "def one\n  1\nend\n").expect("write");
+    git(path, &["init", "-q", "--initial-branch=main", "."]);
+    git(path, &["config", "user.email", "t@e.st"]);
+    git(path, &["config", "user.name", "t"]);
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-qm", "base"]);
+
+    git(path, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(path.join("committed.rb"), "def a\n  return nil\nend\n").expect("write");
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-qm", "committed"]);
+    std::fs::write(
+        path.join("app.rb"),
+        "def one\n  1\nend\n\ndef b\n  return nil\nend\n",
+    )
+    .expect("write");
+
+    let since = rwr(&[
+        "check",
+        "style/return-nil",
+        path.to_str().unwrap(),
+        "--since",
+        "main",
+    ]);
+    let text = String::from_utf8_lossy(&since.stdout);
+    assert!(text.contains("committed.rb"), "{text}");
+    assert!(!text.contains("app.rb"), "commit-to-commit: {text}");
+
+    let both = rwr(&[
+        "check",
+        "style/return-nil",
+        path.to_str().unwrap(),
+        "--since",
+        "main",
+        "--diff",
+    ]);
+    let text = String::from_utf8_lossy(&both.stdout);
+    assert!(text.contains("committed.rb"), "{text}");
+    assert!(text.contains("app.rb"), "the working tree too: {text}");
+}
+
+/// `git diff` cannot see a file it is not tracking, so a brand-new file full of
+/// violations reported as a clean tree -- the pre-commit case failing exactly
+/// when the change is largest.
+#[test]
+fn a_brand_new_file_is_in_the_uncommitted_scope() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(path.join("app.rb"), "def one\n  1\nend\n").expect("write");
+    git(path, &["init", "-q", "--initial-branch=main", "."]);
+    git(path, &["config", "user.email", "t@e.st"]);
+    git(path, &["config", "user.name", "t"]);
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-qm", "base"]);
+
+    std::fs::write(path.join("brand_new.rb"), "def b\n  return nil\nend\n").expect("write");
+
+    let out = rwr(&[
+        "check",
+        "style/return-nil",
+        path.to_str().unwrap(),
+        "--diff",
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("brand_new.rb"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// A typo'd path used to walk nothing and exit 0 -- in CI, a green gate that
+/// checked no files at all.
+#[test]
+fn a_path_that_does_not_exist_is_an_error() {
+    let dir = fixture("def a\n  return nil\nend\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "style/return-nil", "typo-dir"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("no such path"), "{}", stderr(&out));
+}
+
+/// `file.rb:3-15` scopes to those lines -- the form rwr already prints, pasted
+/// back in.
+#[test]
+fn a_line_range_scopes_the_run() {
+    let dir = fixture("def one\n  return nil\nend\n\ndef two\n  return nil\nend\n");
+    let run = |arg: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["check", "style/return-nil", arg])
+            .current_dir(dir.path())
+            .output()
+            .expect("binary runs")
+    };
+
+    let all = run("fixture.rb");
+    assert!(
+        String::from_utf8_lossy(&all.stdout).contains("2 site(s)"),
+        "{}",
+        String::from_utf8_lossy(&all.stdout)
+    );
+
+    let scoped = run("fixture.rb:1-3");
+    assert!(
+        String::from_utf8_lossy(&scoped.stdout).contains("1 site(s)"),
+        "only the first def: {}",
+        String::from_utf8_lossy(&scoped.stdout)
+    );
+
+    // A single line is a range of one.
+    let one = run("fixture.rb:6");
+    assert!(
+        String::from_utf8_lossy(&one.stdout).contains("1 site(s)"),
+        "{}",
+        String::from_utf8_lossy(&one.stdout)
+    );
+
+    // Two ways to say which lines is a refusal, not a silent precedence rule.
+    let both = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "style/return-nil", "fixture.rb:1-3", "--diff"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
 }
 
 /// Outside a repository, `--diff` has no answer -- and "no lines changed" and

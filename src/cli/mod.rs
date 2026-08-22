@@ -104,14 +104,26 @@ pub(crate) struct Common {
     #[arg(short = 'e', long, global = true)]
     explain: bool,
 
-    /// Restrict to lines a change touched. Bare, that is the uncommitted work;
-    /// with a revision, what this branch introduces (`main...HEAD`).
+    /// Restrict to lines that are not committed yet -- the pre-commit case.
     ///
     /// What makes `check` adoptable on a codebase that has never run it: a rule
     /// with two thousand pre-existing sites must not fail a pull request that
     /// added three.
-    #[arg(long, global = true, value_name = "REV", num_args = 0..=1, default_missing_value = "")]
-    diff: Option<String>,
+    ///
+    /// Takes no value, deliberately. As `--diff [<REV>]` it swallowed a
+    /// following path as its revision, so `--diff app/` built the range
+    /// `app/...` and failed inside git. Deciding by looking at whether `app/`
+    /// exists on disk would be the guess D31 already refused for `-r`.
+    #[arg(long, global = true)]
+    diff: bool,
+
+    /// Restrict to lines this branch introduces, as `REV...HEAD`. With
+    /// `--diff`, the working tree too.
+    ///
+    /// The CI half of the pair: a pull-request gate knows its base branch
+    /// (`--since "$GITHUB_BASE_REF"`) but not which lines moved.
+    #[arg(long, global = true, value_name = "REV")]
+    since: Option<String>,
 
     /// The Ruby version to target, e.g. `3.1`.
     ///
@@ -158,6 +170,74 @@ fn scope_start(paths: &[String], common: &Common) -> std::path::PathBuf {
         .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from)
 }
 
+/// The paths a run was given, resolved into somewhere to walk and -- when they
+/// carried `:N` or `:N-M` suffixes -- the lines to restrict to.
+///
+/// A path that does not exist is an error rather than an empty walk. `rwr check
+/// all app/typo` exited 0 and reported a clean tree, which in CI is a green gate
+/// that checked nothing: the same vacuous pass that ruled out guessing a default
+/// branch.
+fn targets(
+    paths: &[String],
+    common: &Common,
+) -> Result<(Vec<String>, Option<crate::diff::Changed>), String> {
+    let mut walk: Vec<String> = Vec::new();
+    let mut lines: Vec<(std::path::PathBuf, (u32, u32))> = Vec::new();
+    let mut bare: Vec<&str> = Vec::new();
+
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    for arg in paths.iter().chain(common.path.iter()) {
+        match crate::diff::split_lines(arg)? {
+            // A file named `foo.rb:3` is legal and vanishingly rare, so the
+            // literal reading is the fallback rather than a coin flip -- and
+            // when neither reading exists the error names both.
+            Some(crate::diff::Lines { path, range }) if exists(path) => {
+                let absolute = std::path::Path::new(path)
+                    .canonicalize()
+                    .map_err(|e| format!("cannot resolve {path}: {e}"))?;
+                lines.push((absolute, range));
+                walk.push(path.to_string());
+            }
+            Some(crate::diff::Lines { path, .. }) if !exists(arg) => {
+                return Err(format!("no such path: {path} (nor {arg})"));
+            }
+            // `--diff main` used to work. It now reads `main` as a path,
+            // which is right but unhelpful on its own.
+            _ if !exists(arg) && common.diff => {
+                return Err(format!(
+                    "no such path: {arg} -- for a revision, --since {arg}"
+                ));
+            }
+            _ if !exists(arg) => return Err(format!("no such path: {arg}")),
+            _ => {
+                bare.push(arg);
+                walk.push(arg.clone());
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        return Ok((walk, None));
+    }
+    // Mixing the two would silently drop the unscoped paths: a `Changed` covers
+    // the files it names and nothing else, so `app/ lib/x.rb:3` would check
+    // three lines and call `app/` clean.
+    if let Some(unscoped) = bare.first() {
+        return Err(format!(
+            "{unscoped} names no lines, but another path does -- give every path \
+             a `:N` range, or none"
+        ));
+    }
+    if common.diff || common.since.is_some() {
+        return Err(
+            "--diff/--since and a `:N` range are two answers to which lines to check; \
+             give one"
+                .to_string(),
+        );
+    }
+    Ok((walk, Some(crate::diff::Changed::from_lines(lines))))
+}
+
 /// Narrow a walked file list to the files a change touched.
 ///
 /// Cheap and first: a diff-scoped run over a large repo should not read files
@@ -183,11 +263,10 @@ impl Common {
     /// and "git could not tell me" produce the same clean exit otherwise, and
     /// only one of them means the tree is clean.
     fn changed(&self, start: &std::path::Path) -> Result<Option<crate::diff::Changed>, String> {
-        let Some(rev) = self.diff.as_deref() else {
+        if !self.diff && self.since.is_none() {
             return Ok(None);
-        };
-        let rev = (!rev.is_empty()).then_some(rev);
-        crate::diff::from_git(rev, start).map(Some)
+        }
+        crate::diff::from_git(self.since.as_deref(), self.diff, start).map(Some)
     }
 
     pub(crate) fn output(&self) -> Output {
@@ -733,16 +812,24 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
     // `find` takes a bare pattern, so it has no rule to draw a class from.
     let class_anchor: Option<&str> = None;
 
-    let changed = match common.changed(&scope_start(paths, common)) {
-        Ok(c) => c,
+    let (scoped, named) = match targets(paths, common) {
+        Ok(t) => t,
         Err(e) => {
             eprintln!("rwr: {e}");
             return Exit::Error.into();
         }
     };
+    let changed = match named {
+        Some(c) => Some(c),
+        None => match common.changed(&scope_start(&scoped, common)) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("rwr: {e}");
+                return Exit::Error.into();
+            }
+        },
+    };
 
-    let mut scoped: Vec<String> = paths.to_vec();
-    scoped.extend(common.path.iter().cloned());
     let (files, _templates) = profile::span_noted(
         "walk",
         || {
@@ -1008,12 +1095,22 @@ fn cmd_apply(
     common: &Common,
     out: Output,
 ) -> ExitCode {
-    let changed = match common.changed(&scope_start(paths, common)) {
-        Ok(c) => c,
+    let (scoped, named) = match targets(paths, common) {
+        Ok(t) => t,
         Err(e) => {
             eprintln!("rwr: {e}");
             return Exit::Error.into();
         }
+    };
+    let changed = match named {
+        Some(c) => Some(c),
+        None => match common.changed(&scope_start(&scoped, common)) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("rwr: {e}");
+                return Exit::Error.into();
+            }
+        },
     };
 
     let rules = match rule::load_all(rule_arg, replace) {
@@ -1065,7 +1162,7 @@ fn cmd_apply(
                 return Exit::Error.into();
             }
         },
-        None => crate::ruby::detect(&scope_start(paths, common)),
+        None => crate::ruby::detect(&scope_start(&scoped, common)),
     };
 
     // Checked before the gate below, which would otherwise read an unparseable
@@ -1196,8 +1293,6 @@ fn cmd_apply(
             .is_some_and(|root| residue::defines_a_method(&root, prepared))
     });
 
-    let mut scoped: Vec<String> = paths.to_vec();
-    scoped.extend(common.path.iter().cloned());
     let (files, templates) = profile::span_noted(
         "walk",
         || {
@@ -1918,7 +2013,8 @@ mod tests {
             ndjson: true,
             path: vec![],
             include_vendored: false,
-            diff: None,
+            diff: false,
+            since: None,
             explain: false,
             ruby: None,
             unsafe_rules: false,
