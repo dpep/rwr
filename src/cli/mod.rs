@@ -578,14 +578,25 @@ fn report_residue(residues: &[Residue]) {
         [one] => format!("`{one}`"),
         many => format!("{} rules ({})", many.len(), many.join(", ")),
     };
+    // Every class the report can hold, so a category cannot go missing from the
+    // summary while its entries sit in the list below it.
+    let breakdown: Vec<String> = [
+        ("symbol", residue::Context::Symbol),
+        ("string", residue::Context::String),
+        ("call", residue::Context::Call),
+        ("definition", residue::Context::Definition),
+        ("comment", residue::Context::Comment),
+    ]
+    .iter()
+    .filter_map(|(label, context)| match count(*context) {
+        0 => None,
+        n => Some(format!("{n} {label}")),
+    })
+    .collect();
     eprintln!(
-        "\n{} occurrence(s) {whose} could not account for \
-         ({} symbol, {} string, {} call, {} definition):",
+        "\n{} occurrence(s) {whose} could not account for ({}):",
         residues.len(),
-        count(residue::Context::Symbol),
-        count(residue::Context::String),
-        count(residue::Context::Call),
-        count(residue::Context::Definition),
+        breakdown.join(", ")
     );
     for r in residues.iter().take(RESIDUE_DETAIL_CAP) {
         // The rule is shown per line only when several contributed, since
@@ -1455,6 +1466,11 @@ fn cmd_apply(
                         continue;
                     }
                     let mut occurrences = residue::find(&parsed.node(), &anchors, &[], &current);
+                    // Comments live beside the tree, not in it, so they need
+                    // their own pass -- and a rename that leaves
+                    // `# returns the display_name` behind has left something
+                    // stale that this report is supposed to name.
+                    occurrences.extend(residue::in_comments(&parsed, &anchors, &current));
                     // Each rule scopes by *its own* class. Taking the set's
                     // first meant a pack of two renames reported everything
                     // against the first one's class and dropped the second's
@@ -1589,7 +1605,10 @@ fn cmd_apply(
                 if claims_completeness {
                     let anchors = residue::anchors(&p_root, prepared);
                     if !anchors.is_empty() {
-                        for o in residue::find(&ruby.node(), &anchors, &[], &translated.ruby) {
+                        let mut found =
+                            residue::find(&ruby.node(), &anchors, &[], &translated.ruby);
+                        found.extend(residue::in_comments(&ruby, &anchors, &translated.ruby));
+                        for o in found {
                             let Some(at) = crate::erb::template_offset(&translated, o.byte_start)
                             else {
                                 continue;

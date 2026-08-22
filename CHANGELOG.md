@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**Stale comments are reported.** A rename left `# Returns the display_name` behind and rwr
+said nothing — comments are not in Prism's tree, so neither the matcher nor the residue pass
+saw them. They now have a pass of their own, scoped by position so an unrelated class's
+prose stays out of the report.
+
+They are still never *matched* (that is the whole thesis: `rwr 'return nil'` finds 22 sites
+on rails where ripgrep reports 40) and never *rewritten*, because `# See also #display_name
+on Company` is about a different class and nothing in the prose says so (D67).
+
 **Deletion.** `rwr rewrite 'def legacy; $B; end' -d` removes a definition — along with the
 doc comment written above it, its line, and one of the blank lines that separated it, so the
 survivors keep their spacing. `-r ''` and `rewrite: ''` mean the same thing.

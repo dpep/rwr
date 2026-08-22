@@ -31,6 +31,14 @@ pub(crate) enum Context {
     Call,
     /// A definition of that name.
     Definition,
+    /// The name appears in a comment.
+    ///
+    /// Reported, never rewritten. A name in prose may be a reference, an
+    /// example, or an ordinary English word, and rwr cannot tell which --
+    /// rewriting it would be a guess where reporting it is a fact. A rename
+    /// that leaves `# returns the display_name` behind has left something
+    /// stale, and saying so is the whole job of this report.
+    Comment,
     /// Found by text search in a file rwr cannot parse -- a template, where
     /// Ruby is embedded rather than written.
     ///
@@ -205,6 +213,71 @@ pub(crate) fn anchors(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
 fn is_metavariable(node: &Node<'_>, prepared: &Prepared) -> bool {
     matcher::placeholder_name(node, prepared).is_some()
         || matcher::splat_placeholder_name(node, prepared).is_some()
+}
+
+/// Occurrences of `anchors` inside comments.
+///
+/// Comments are not in the tree -- Prism carries them alongside it -- so they
+/// need their own pass. Without one, a rename silently leaves every doc comment
+/// that named the method stale, and the account that claims to list what was
+/// left over does not mention them at all.
+pub(crate) fn in_comments(
+    parsed: &ruby_prism::ParseResult<'_>,
+    anchors: &[Vec<u8>],
+    source: &[u8],
+) -> Vec<Occurrence> {
+    // A comment is not in the tree, so its lexical scope has to come from its
+    // position. Without it every comment would escape the class scoping that
+    // keeps the rest of the report from filling the screen.
+    let mut enclosing: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    let mut stack: Vec<(Node<'_>, Vec<String>)> =
+        vec![(generated::dup(&parsed.node()), Vec::new())];
+    while let Some((node, here)) = stack.pop() {
+        let mut inner = here.clone();
+        if let Some(name) = scope_name(&node) {
+            inner.push(name);
+            let location = node.location();
+            enclosing.push((
+                location.start_offset(),
+                location.end_offset(),
+                inner.clone(),
+            ));
+        }
+        for child in generated::children(&node) {
+            stack.push((child, inner.clone()));
+        }
+    }
+
+    let mut out = Vec::new();
+    for comment in parsed.comments() {
+        let location = comment.location();
+        let (start, end) = (location.start_offset(), location.end_offset());
+        let Some(text) = source.get(start..end) else {
+            continue;
+        };
+        // The innermost class or module whose body contains the comment.
+        let scope = enclosing
+            .iter()
+            .filter(|(from, to, _)| start >= *from && end <= *to)
+            .min_by_key(|(from, to, _)| to - from)
+            .map(|(_, _, names)| names.clone())
+            .unwrap_or_default();
+
+        for anchor in anchors {
+            for at in crate::source::identifier_offsets(text, anchor) {
+                out.push(Occurrence {
+                    context: Context::Comment,
+                    byte_start: start + at,
+                    byte_end: start + at + anchor.len(),
+                    scope: scope.clone(),
+                    implicit: false,
+                    via: None,
+                });
+            }
+        }
+    }
+    out.sort_by_key(|o| o.byte_start);
+    out
 }
 
 /// Occurrences of `anchors` that fall outside every matched range.
@@ -399,6 +472,30 @@ mod tests {
             scoped.iter().any(|o| o.context == Context::Call),
             "an unresolved call is a blind spot and must survive"
         );
+    }
+
+    /// A rename leaves every doc comment that named the method stale, and
+    /// comments are not in the tree -- so without a pass of their own the
+    /// report that claims to list what was left over never mentions them.
+    #[test]
+    fn comments_that_name_the_method_are_reported() {
+        let src = "class Account\n  # Returns the display_name.\n                     def display_name; 1; end\nend\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let found = in_comments(&parsed, &[b"display_name".to_vec()], src.as_bytes());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].context, Context::Comment);
+        // Scoped by position, since a comment has no place in the tree to read
+        // its scope from -- without this every comment escapes class scoping.
+        assert_eq!(found[0].scope, vec!["Account".to_string()]);
+    }
+
+    /// Whole identifiers only. `display_names` is a different word, and a
+    /// report that cannot tell them apart is one people stop reading.
+    #[test]
+    fn a_longer_word_is_not_the_name() {
+        let src = "# display_names and display_name_for\nx = 1\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        assert!(in_comments(&parsed, &[b"display_name".to_vec()], src.as_bytes()).is_empty());
     }
 
     /// A rule with no identifier to track reports nothing. That is the correct

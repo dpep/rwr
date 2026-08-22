@@ -1400,3 +1400,33 @@ So a deletion whose match does not occupy whole lines of its own is refused
 
 *Reverses if:* nothing. Deleting a sub-expression has no correct answer to fall back on --
 there is no "smaller" thing to do than refuse.
+
+## D67 - Comments are reported, never matched or rewritten
+**Decided.** The question was whether rwr can match and rewrite comments. It reports them
+instead, and the distinction is the product.
+
+**The gap was real.** Renaming `Account#display_name` left `# Returns the display_name for
+the header.` behind and rwr said *nothing at all* — comments are not in Prism's tree, so
+neither the matcher nor the residue pass saw them. A report that claims to list what was left
+over was silently omitting a whole category.
+
+Fixed: comments get their own pass, scoped by position. A comment has no place in the tree to
+read its lexical scope from, so the innermost class or module whose span contains it supplies
+one — without that, every comment would escape the class scoping that keeps the rest of the
+report readable. On discourse, renaming `Topic#slug` finds 3 comment occurrences, all
+genuinely stale; renaming `User#name` finds none, because the scoping holds.
+
+**Matching stays off, deliberately, and this is the whole thesis.** `rwr 'return nil'` finds
+22 sites on rails where ripgrep reports 40, because comments and strings are not code. A
+matcher that read comments would be ripgrep with extra steps.
+
+**Rewriting stays off for a different reason: it would be a guess.** A name in prose may be a
+reference, an example, a changelog entry, or an ordinary English word. `# See also
+#display_name on Company` is about a *different class* and must not change; `# Returns the
+display_name` must. Nothing in the text distinguishes them, and rwr does not guess.
+
+Reporting is a fact and rewriting would be a guess, so rwr reports — and having named the
+exact lines, the manual fix is cheap. That is the same trade the whole residue design makes.
+
+*Reverses if:* never for matching. For rewriting, only if a rule could express *which* prose
+mentions it means, which is a natural-language problem rather than a structural one.
