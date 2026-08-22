@@ -163,9 +163,10 @@ from the account is the dangerous direction.
 
 ## For agents, hooks and CI
 
-Everything that prints honors `-j`/`--json` — one document,
+Everything that prints honors `-j`/`--json`, which emits one document —
 `{schema, rwr_version, changed, residue, findings, template_residue,
-templates_skipped}` — and `-J`/`--ndjson`, a tagged row per line for streaming.
+templates_skipped}`. `-J`/`--ndjson` streams instead: `find` writes a row per
+match, and `check`/`rewrite` write the report on a single line.
 
 `--diff` scopes a run to the lines a change touched, which is what makes `check`
 adoptable on a codebase that has never run it: three new sites fail, two
@@ -203,9 +204,10 @@ rules RuboCop cannot express because its patterns are purely syntactic.
 
 Cost tracks how many files mention an identifier, not repository size: a literal
 prefilter skips any file that cannot contribute. Over discourse's 11,006 files,
-five warm runs — `find` on a single pattern **175 ms**, a rename **272 ms**, the
-whole shipped pack **565 ms**, each discovering, reading, searching, parsing the
-survivors and matching structurally.
+five warm runs — `find` on a single pattern **175 ms**, a rename **292 ms**, the
+pack's safe rules **478 ms**, each discovering, reading, searching, parsing the
+survivors and matching structurally. `--unsafe`, which runs every rule in the
+pack rather than the four that need no caveat, takes about **1.4 s**.
 
 `--profile` reports where the time went. See [docs/scaling.md](docs/scaling.md).
 

@@ -2,6 +2,12 @@
 
 What rwr does when a repository is too large to parse whole, measured rather than assumed.
 
+> **Reading the numbers.** This file is partly a record of how the cost model was *found*, so
+> its figures were taken at different times against different corpora and are not all
+> comparable with each other. The current headline figures live in the README and in Q7;
+> where a section here reports something older, it is kept because the reasoning that
+> produced it still holds, not because the millisecond count is live.
+
 ## The shape of the cost
 
 ```sh
@@ -181,6 +187,9 @@ files, which means an index -- deferred, with the threshold recorded above.
 
 `--profile` had reported `scan` as one block at ~80% of a pack run for months, which named a
 phase without decomposing it. Three cuts, measured five warm runs each on discourse:
+
+*(The pack held ten rules when this was measured; it holds seventeen now, and the
+per-rule marginal cost is what carries over — see Q7.)*
 
 | | pack (4 rules) | 10 rules |
 |---|---|---|
