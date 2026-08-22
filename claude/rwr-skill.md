@@ -67,8 +67,14 @@ rename: full_name
 ```
 
 ```sh
-rwr check rename.yml app/ && rwr rewrite rename.yml app/
+rwr check rename.yml app/      # read the diff and the residue report
+rwr rewrite rename.yml app/    # then apply
 ```
+
+Two commands, not one chained with `&&`: `check` exits **1** when there is work
+to do, so `check && rewrite` would apply the rename only when there was nothing
+to rename. The polarity is deliberate — it is what makes `check` usable as a
+gate — and it is the opposite of what a shell pipeline reads like.
 
 That one line expands to the whole rename: the definition, subclass overrides,
 explicit-receiver calls, and implicit-self calls inside the class. It leaves
@@ -77,8 +83,9 @@ different methods — the receiver narrowing no other Ruby structural tool does.
 
 **Read the residue report.** Anything it could not account for — a symbol
 reaching `delegate`, a `send("display_name")`, a call whose receiver it could not
-resolve — is listed with its file, line, and classification. Those are the sites
-that will break, and handling them is part of finishing the rename.
+resolve, a doc comment still naming the old method — is listed with its file,
+line, and classification. Those are the sites that will break or go stale, and
+handling them is part of finishing the rename.
 
 ## Applying the built-in rules
 
