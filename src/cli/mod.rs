@@ -1036,6 +1036,10 @@ fn cmd_apply(
     // Each rule is prepared once; they apply in order, each seeing the
     // previous one's output. A rename genuinely needs a set, since the
     // definition and the call sites are different shapes.
+    // Sub-patterns for `contains:`, prepared once per rule rather than per
+    // candidate match -- preparing is a parse-and-retry loop.
+    let contained: Vec<std::collections::HashMap<String, prepare::Prepared>> =
+        rules.iter().map(rule::Rule::contained).collect();
     let mut prepareds = Vec::with_capacity(rules.len());
     for r in &rules {
         match prepare::prepare_with(&r.pattern, &r.constant_captures()) {
@@ -1245,6 +1249,7 @@ fn cmd_apply(
                                     // (Q13).
                                     let criteria = matcher::Criteria {
                                         constraints: &rule.constraints,
+                                        contained: &contained[index],
                                         scope: &rule.scope,
                                         hierarchy: &hierarchy,
                                         sigs: &sigs,

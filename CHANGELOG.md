@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+**`contains:` — a constraint that relates a sub-pattern to the outer match.** A pattern
+matches a shape; this says "and somewhere inside it, this", with shared metavariables
+required to refer to the same thing:
+
+```yaml
+match: $R.each { |$X| $B }
+where:
+  $B: { contains: '$X.$ASSOC.$FIELD' }
+```
+
+It ships `performance/possible-n-plus-one`, a lint that narrows discourse's 637 `each`/`map`
+blocks to 51 candidates. It flags the N+1 *shape* and cannot see whether the relation was
+eager-loaded, which its description says (D64).
+
 **Templates are searched, not just counted.** rwr cannot parse `.erb`/`.haml`, so a rename
 used to say "356 template file(s) were not searched" and stop. It now searches them for the
 name at whole-identifier boundaries and reports what it finds as its own class — grep-grade

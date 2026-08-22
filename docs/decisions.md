@@ -1298,3 +1298,43 @@ failure, and it would have to be re-derived after every change of this kind.
 *Reverses if:* the pack grows enough that per-rule tree walks dominate again, at which point
 the multi-pattern matcher stops being premature and its cost to rule-authoring is worth
 paying.
+
+## D64 - `contains:` relates a sub-pattern to the outer bindings
+**Decided.** A pattern matches a *shape*; this is how a rule says "and somewhere inside it,
+this".
+
+```yaml
+match: $R.each { |$X| $B }
+where:
+  $B: { contains: '$X.$ASSOC.$FIELD' }
+```
+
+**The agreement is the feature.** A containment that ignored the outer bindings would match
+any call on anything inside the block, which is nearly vacuous. Metavariables shared between
+the two patterns must refer to the same thing, so `other.customer.name` inside
+`orders.each { |order| ... }` does *not* match.
+
+**Agreement is by identifier where both bindings name one, and by span otherwise.** This is
+the part that took a wrong turn first: in `$R.each { |$X| $B }` the outer `$X` binds the
+block's **parameter** and the inner one binds a **read** of it. Same variable, different
+nodes, different spans — and comparing spans said they disagreed, so nothing matched at all.
+
+**What it costs.** Sub-patterns are prepared once per rule rather than per candidate match,
+since preparing is a parse-and-retry loop. The search itself runs only on the bound subtree
+of a match that already passed everything else.
+
+**What it unlocked, measured.** `performance/possible-n-plus-one` narrows discourse's 637
+`each`/`map` blocks to **51 candidates** — a 92% cut, and reviewable. About half are real:
+`posts.map { |p| p.topic.category_id }` is a textbook N+1. The rest are conversion chains
+like `names.map { |n| n.to_s.downcase }`, which the shape cannot distinguish.
+
+This corrects an estimate made before building it, that a containment-only N+1 rule would
+"flag every block" and be useless. Requiring two levels of reach *through the block's own
+parameter* turns out to be a strong filter. The estimate was wrong in the useful direction,
+and only measuring said so.
+
+**What it still cannot do.** N+1 proper needs "and nothing upstream eager-loaded this", a
+negative condition over a scope rwr does not analyse — usually a different method entirely.
+So the rule ships as a lint that finds *candidates*, and says so in its own description.
+
+*Reverses if:* nothing. It is opt-in per constraint and costs nothing where unused.

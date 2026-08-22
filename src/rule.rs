@@ -113,6 +113,21 @@ pub(crate) struct Constraint {
     #[serde(default)]
     pub length: Option<usize>,
 
+    /// The capture's subtree must contain a match of this pattern.
+    ///
+    /// A pattern matches a *shape*, and until now there was no way to say "and
+    /// somewhere inside it, this". Metavariables shared with the outer pattern
+    /// must bind to the same thing, which is what lets a block's body be tied
+    /// to the block's own parameter:
+    ///
+    /// ```yaml
+    /// match: $R.each { |$X| $B }
+    /// where:
+    ///   $B: { contains: '$X.$INNER' }
+    /// ```
+    #[serde(default)]
+    pub contains: Option<String>,
+
     /// This capture must name the same identifier as another.
     ///
     /// `{foo: foo}` -> `{foo:}` needs a symbol key compared against a
@@ -341,6 +356,22 @@ impl Rule {
                 .values()
                 .find_map(|c| c.receiver_type.clone())
         })
+    }
+
+    /// Sub-patterns this rule's `contains:` constraints need, prepared once.
+    ///
+    /// Preparing is a parse-and-retry loop, so doing it per candidate match
+    /// would put it in the hot path for the sake of a pattern that never
+    /// changes.
+    pub(crate) fn contained(&self) -> HashMap<String, crate::pattern::prepare::Prepared> {
+        self.constraints
+            .iter()
+            .filter_map(|(key, c)| {
+                let text = c.contains.as_ref()?;
+                let prepared = crate::pattern::prepare::prepare(text).ok()?;
+                Some((key.trim_start_matches('$').to_string(), prepared))
+            })
+            .collect()
     }
 
     /// Captures the rule declares to be constants.

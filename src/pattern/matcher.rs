@@ -383,12 +383,14 @@ pub(crate) fn satisfies(
     hierarchy: &Hierarchy,
     sigs: &crate::sigs::Signatures,
 ) -> bool {
-    verdict(found, constraints, scope, hierarchy, sigs) == Verdict::Ok
+    verdict(found, constraints, &HashMap::new(), scope, hierarchy, sigs) == Verdict::Ok
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn verdict(
     found: &Match<'_>,
     constraints: &HashMap<String, Constraint>,
+    contained: &HashMap<String, Prepared>,
     scope: &Scope,
     hierarchy: &Hierarchy,
     sigs: &crate::sigs::Signatures,
@@ -442,6 +444,19 @@ pub(crate) fn verdict(
             return Verdict::BadBinding(short);
         }
 
+        if constraint.contains.is_some() {
+            let Some(sub) = contained.get(&short) else {
+                // A `contains:` whose pattern did not prepare is a rule bug.
+                return Verdict::WrongScope;
+            };
+            let Bound::One(node) = bound else {
+                return Verdict::BadBinding(short);
+            };
+            if !holds_within(node, sub, &found.env) {
+                return Verdict::BadBinding(short);
+            }
+        }
+
         if let Some(wanted) = constraint.length {
             // Counted in characters rather than bytes: `tr` maps characters, so
             // a two-byte `é` is still one of them.
@@ -481,6 +496,42 @@ pub(crate) fn verdict(
         }
     }
     Verdict::Ok
+}
+
+/// Whether `sub` matches somewhere inside `node`, agreeing with `outer` on
+/// every metavariable the two patterns share.
+///
+/// The agreement is what makes containment useful rather than merely true.
+/// `$R.each { |$X| $B }` with `$B` containing `$X.$INNER` has to mean *that*
+/// block's parameter; without the check it would match any call on anything.
+fn holds_within(node: &Node<'_>, sub: &Prepared, outer: &Env<'_>) -> bool {
+    let parsed = ruby_prism::parse(sub.source.as_bytes());
+    let root = parsed.node();
+    let Some(root) = pattern_root(&root) else {
+        return false;
+    };
+    // The sub-pattern carries no constraints of its own: agreement with the
+    // outer bindings is the only condition, and it is checked below.
+    let criteria = Criteria::none();
+    search(&root, node, sub, &criteria).iter().any(|hit| {
+        hit.env
+            .iter()
+            .all(|(name, bound)| outer.get(name).is_none_or(|theirs| agree(bound, theirs)))
+    })
+}
+
+/// Whether two bindings of the same metavariable refer to the same thing.
+///
+/// By *identifier* where both name one, and by source span otherwise. The
+/// distinction matters for the case containment exists to serve: in
+/// `$R.each { |$X| $B }` the outer `$X` binds the block's **parameter** while
+/// the inner one binds a **read** of it. Same variable, different nodes, and
+/// comparing spans would say they disagree.
+fn agree(a: &Bound<'_>, b: &Bound<'_>) -> bool {
+    match (identifier_of(a), identifier_of(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => fingerprint(a) == fingerprint(b),
+    }
 }
 
 /// Whether a binding is of the kind a constraint asked for.
@@ -783,22 +834,29 @@ fn scope_name(node: &Node<'_>) -> Option<String> {
 /// What a rule requires of a match, beyond matching structurally.
 pub(crate) struct Criteria<'a> {
     pub constraints: &'a HashMap<String, Constraint>,
+    /// Sub-patterns for `contains:` constraints, keyed by capture name.
+    pub contained: &'a HashMap<String, Prepared>,
     pub scope: &'a Scope,
     pub hierarchy: &'a Hierarchy,
     pub sigs: &'a crate::sigs::Signatures,
 }
 
+/// The unconstrained defaults, held once so `Criteria::none()` can borrow them.
+type Empty = (
+    HashMap<String, Constraint>,
+    HashMap<String, Prepared>,
+    Scope,
+    Hierarchy,
+    crate::sigs::Signatures,
+);
+
 impl Criteria<'_> {
     /// Criteria that accept any structural match.
     pub(crate) fn none() -> Criteria<'static> {
-        static EMPTY: std::sync::OnceLock<(
-            HashMap<String, Constraint>,
-            Scope,
-            Hierarchy,
-            crate::sigs::Signatures,
-        )> = std::sync::OnceLock::new();
-        let (constraints, scope, hierarchy, sigs) = EMPTY.get_or_init(|| {
+        static EMPTY: std::sync::OnceLock<Empty> = std::sync::OnceLock::new();
+        let (constraints, contained, scope, hierarchy, sigs) = EMPTY.get_or_init(|| {
             (
+                HashMap::new(),
                 HashMap::new(),
                 Scope::default(),
                 Hierarchy::default(),
@@ -807,6 +865,7 @@ impl Criteria<'_> {
         });
         Criteria {
             constraints,
+            contained,
             scope,
             hierarchy,
             sigs,
@@ -874,6 +933,7 @@ fn walk<'pr>(
         match verdict(
             &candidate,
             criteria.constraints,
+            criteria.contained,
             criteria.scope,
             criteria.hierarchy,
             criteria.sigs,
@@ -972,8 +1032,10 @@ mod tests {
             source.as_bytes().to_vec(),
         )])
         .0;
+        let contained = rule.contained();
         let criteria = Criteria {
             constraints: &rule.constraints,
+            contained: &contained,
             scope: &rule.scope,
             hierarchy: &hierarchy,
             sigs: &sigs,
@@ -1206,8 +1268,10 @@ end
         let scope = Scope::default();
         let hierarchy = Hierarchy::default();
         let sigs = crate::sigs::Signatures::default();
+        let contained = std::collections::HashMap::new();
         let criteria = Criteria {
             constraints: &constraints,
+            contained: &contained,
             scope: &scope,
             hierarchy: &hierarchy,
             sigs: &sigs,
@@ -1682,6 +1746,33 @@ end
     #[test]
     fn search_is_reentrant() {
         assert_eq!(matches("foo($A)", "foo(foo(1))"), 2);
+    }
+
+    /// A pattern matches a shape; `contains:` says "and somewhere inside it,
+    /// this". Metavariables shared with the outer pattern must agree, which is
+    /// the whole difference between a useful containment and a vacuous one.
+    #[test]
+    fn contains_ties_a_subpattern_to_the_outer_bindings() {
+        let rule = "match: $R.each { |$X| $B }\nwhere:\n  $B:\n    contains: $X.$ASSOC.$FIELD\n";
+
+        assert_eq!(applied(rule, "xs.each { |o| puts o.customer.name }\n"), 1);
+        // Nothing of that shape inside.
+        assert_eq!(applied(rule, "xs.each { |o| puts \"plain\" }\n"), 0);
+        // The right shape on the *wrong* receiver: `other` is not the block's
+        // parameter, and without the agreement check this would match.
+        assert_eq!(
+            applied(rule, "xs.each { |o| puts other.customer.name }\n"),
+            0
+        );
+    }
+
+    /// The outer binding is the block's *parameter* and the inner one a *read*
+    /// of it -- same variable, different nodes, different spans. Comparing
+    /// spans would call them different.
+    #[test]
+    fn a_parameter_and_a_read_of_it_agree() {
+        let rule = "match: $R.each { |$X| $B }\nwhere:\n  $B:\n    contains: $X.$M\n";
+        assert_eq!(applied(rule, "xs.each { |thing| thing.save }\n"), 1);
     }
 
     /// The part of the chained-receiver bucket that carries its own answer.

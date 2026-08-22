@@ -1,0 +1,21 @@
+# A lint, and a noisy one by construction. `contains:` can say "this block
+# reaches through its own parameter", which is the N+1 *shape*; it cannot say
+# "and nothing upstream called `includes`", because that is a negative condition
+# over a scope rwr does not analyse -- usually a different method entirely.
+#
+# So this finds candidates, not defects. It is worth having anyway: the shape is
+# rare enough per file to skim, and every real N+1 is in here somewhere.
+id: performance/possible-n-plus-one
+description: >-
+  A block reaching through its own element to a further association -- the N+1
+  shape. rwr cannot see whether the relation was eager-loaded, so this is a
+  candidate to check, not a defect.
+unsafe: >-
+  Flags the shape only. A preloaded association is indistinguishable from a
+  lazy one without knowing what the caller did.
+match: $R.$ITER { |$X| $B }
+where:
+  $ITER:
+    name: [each, map, flat_map, select, filter_map, each_with_object, sum]
+  $B:
+    contains: $X.$ASSOC.$FIELD
