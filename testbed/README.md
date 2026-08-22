@@ -40,6 +40,30 @@ Written this way it scored **2 of 7** and found two real defects:
 - the report was scoped to the target class, which discards those same reaches,
   since a delegation lives in a *different* class from the method it names.
 
+## The second half of the principle, learned later
+
+Writing from the Ruby side is necessary and **not sufficient**. This testbed
+scored 7 of 7 and still missed the worst bug the project has shipped: the
+flagship one-line rename silently declined every method whose body assigned a
+local variable, because Prism carries a scope's local table on the node and rwr
+compared it as though it were syntax (D73).
+
+It missed it because `Account#display_name` was written as a single expression —
+`"#{first} #{last}"`. Every site around it was enumerated from Ruby, correctly,
+and the *definition itself* was unrepresentative. A method with a variable in it
+is too ordinary to occur to anyone as an edge case, which is exactly why nobody
+wrote one.
+
+So the rule has two halves:
+
+1. Derive expectations from **Ruby semantics**, never from what rwr does.
+2. Make the Ruby **representative**. Boring, ubiquitous constructs earn their
+   place here as much as gnarly ones — more, because nobody thinks to test them.
+
+When adding a case, ask what a reviewer would say if they saw it in a real pull
+request. If the answer is "nobody writes code that simple", the case is not
+pulling its weight.
+
 ## What it cannot measure
 
 **Precision at scale.** A fixture its own author wrote proves nothing about
