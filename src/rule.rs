@@ -156,6 +156,20 @@ pub(crate) struct Constraint {
     #[serde(default)]
     pub name: Option<Vec<String>>,
 
+    /// The capture must be none of these identifiers.
+    ///
+    /// A predicate, not an option (D57): it narrows what the pattern *means*,
+    /// in the rule file, indistinguishable in kind from `name:`. The ignore-list
+    /// alternative -- a flag or a sidecar naming exceptions -- would configure a
+    /// rule from outside it, which is the thing D57 refuses.
+    ///
+    /// Asymmetric with `name:` on purpose: `name:` needs an identifier and fails
+    /// without one, while this *passes* when the capture has none. Nothing that
+    /// is not an identifier can be one of the excluded ones, and a constraint
+    /// that widened on missing data would be a guess.
+    #[serde(default)]
+    pub name_not: Option<Vec<String>>,
+
     /// The capture's receiver must resolve to this class.
     ///
     /// The narrowing no other Ruby structural tool offers: `node_pattern` has
@@ -505,6 +519,14 @@ impl Rule {
             {
                 return Err(complain(format!(
                     "`same_name_as: {other}` names something `match:` never captures"
+                )));
+            }
+            // With an allowlist in hand the exclusion is either redundant or
+            // contradictory. Refuse rather than define an intersection nobody
+            // will remember reading.
+            if constraint.name.is_some() && constraint.name_not.is_some() {
+                return Err(complain(format!(
+                    "{key} has both `name:` and `name_not:` -- an allowlist already says which"
                 )));
             }
         }

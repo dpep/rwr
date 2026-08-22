@@ -401,6 +401,9 @@ pub(crate) enum ConstraintMiss {
         actual: Option<String>,
         allowed: Vec<String>,
     },
+    NameNot {
+        actual: String,
+    },
     /// `resolved: None` is the distinction worth having: receiver narrowing is
     /// conservative, so "rwr could not resolve this receiver at all" and "it
     /// resolved to the wrong class" are different problems with different
@@ -503,6 +506,25 @@ pub(crate) fn verdict(
                     miss: ConstraintMiss::Name {
                         actual: actual.map(|a| String::from_utf8_lossy(&a).into_owned()),
                         allowed: allowed.clone(),
+                    },
+                };
+            }
+        }
+
+        if let Some(excluded) = &constraint.name_not {
+            let actual = match bound {
+                Bound::Name(bytes) => Some(bytes.clone()),
+                Bound::One(node) => bare_name(node),
+                Bound::Many(_) => None,
+            };
+            // No identifier passes: nothing that is not one can be one of these.
+            if let Some(actual) = actual
+                && excluded.iter().any(|n| n.as_bytes() == actual.as_slice())
+            {
+                return Verdict::BadBinding {
+                    capture: short,
+                    miss: ConstraintMiss::NameNot {
+                        actual: String::from_utf8_lossy(&actual).into_owned(),
                     },
                 };
             }
@@ -1026,6 +1048,7 @@ impl Verdict {
             Verdict::WrongScope(ScopeMiss::Singleton { .. }) => "singleton",
             Verdict::BadBinding { miss, .. } => match miss {
                 ConstraintMiss::Name { .. } => "name",
+                ConstraintMiss::NameNot { .. } => "name_not",
                 ConstraintMiss::Type { .. } => "type",
                 ConstraintMiss::Is { .. } => "is",
                 ConstraintMiss::Contains { .. } => "contains",
@@ -1089,6 +1112,9 @@ impl Verdict {
                     } else {
                         format!("resolved to {got}, not {wanted}")
                     }
+                }
+                ConstraintMiss::NameNot { actual } => {
+                    format!("`{actual}` is excluded by `name_not:`")
                 }
                 ConstraintMiss::Is { wanted } => format!("not {wanted:?}"),
                 ConstraintMiss::Contains { pattern } => {

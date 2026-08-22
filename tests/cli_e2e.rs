@@ -1340,3 +1340,50 @@ fn rejections_are_structured_and_opt_in() {
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     assert!(doc.get("rejections").is_none(), "{doc}");
 }
+
+/// `name_not:` is the negation `name:` never had.
+///
+/// The alternative asked for was an ignore list -- a flag or sidecar naming
+/// exceptions -- which would configure a rule from outside the rule file (D57).
+/// A reviewer concluding that 118 names are genuinely unrelated has decided the
+/// rule over-matches, which is a narrowing, not a suppression.
+#[test]
+fn name_not_excludes_without_an_ignore_list() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    // Its own fixtures carry the assertion, so the rule is checked the way a
+    // user's rule would be.
+    std::fs::write(
+        path.join("freeze.yml"),
+        "id: t/freeze\nmatch: $C = $V\n\
+         where:\n  $C:\n    is: constant\n    name_not: [ALL, TYPES]\n\
+         rewrite: $C = $V.freeze\n\
+         tests:\n\
+         \x20 - input: \"WIDGET = \\\"a\\\"\\n\"\n\x20   output: \"WIDGET = \\\"a\\\".freeze\\n\"\n\
+         \x20 - input: \"ALL = \\\"b\\\"\\n\"\n\x20   unchanged: true\n\
+         \x20 - input: \"TYPES = \\\"c\\\"\\n\"\n\x20   unchanged: true\n",
+    )
+    .expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["test", "freeze.yml"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    // An allowlist already says which names count, so the exclusion is either
+    // redundant or contradictory -- refused rather than silently intersected.
+    std::fs::write(
+        path.join("both.yml"),
+        "id: t/both\nmatch: $C = $V\n\
+         where:\n  $C:\n    name: [WIDGET]\n    name_not: [ALL]\nrewrite: $C = $V.freeze\n",
+    )
+    .expect("write");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "both.yml", "."])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+}

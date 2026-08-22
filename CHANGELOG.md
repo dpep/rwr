@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**`name_not:` excludes identifiers.** `where:` could say `name: [a, b]` but had no negation, so
+a rule that over-matched on common tokens had nowhere to say so. Asymmetric with `name:` on
+purpose: `name:` fails a capture with no identifier, `name_not:` passes one -- nothing that is
+not an identifier can be one of the excluded ones, and widening on missing data would be a
+guess. `name:` and `name_not:` on the same capture is refused, since an allowlist already says
+which names count.
+
 **`-e` says which constraint declined a site.** The flag's own help had promised this since it
 shipped and it produced silence: a site rejected by `type: Widget` printed nothing at all. The
 matcher had the answer and discarded it once rebinding was exhausted. Scoped to a line, this is

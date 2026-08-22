@@ -127,6 +127,7 @@ rewrite: $R.detect { |$P| $B }
 | Key | Constrains |
 |---|---|
 | `name: [a, b]` | the capture is one of these identifiers |
+| `name_not: [a, b]` | the capture is none of these — narrow a rule that over-matches |
 | `type: Klass` | the receiver resolves to that class (conservative — unresolved never matches) |
 | `kind: instance\|class` | which method table `type:` means |
 | `subclasses: true` | admit descendants of `type:` |
