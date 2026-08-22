@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**A rename reaches a method whose body carries `rescue` or `ensure`.** Such a `def` has a
+`BeginNode` body rather than a `StatementsNode`, so it never met the body rule and the rename
+declined every method that touches I/O — reported as residue, so honest, but declined. Both
+halves needed fixing: the matcher binds a body-position metavariable whatever shape the body
+has, and the structural diff now recognises the same thing. Without the second, the diff called
+the body diverged and re-rendered the whole `def`, and that wider edit swallowed the correct
+one — leaving the file unchanged while the run claimed a rewrite and asked to be run again,
+forever.
+
 **A rewrite that would collide with an existing local refuses.** Renaming `display_name` to
 `full_name` where `full_name` was already a local produced `full_name = full_name if profile?`
 — a self-assignment that parses, runs, quietly evaluates to the local's old value, and passes

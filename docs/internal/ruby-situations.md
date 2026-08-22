@@ -484,27 +484,11 @@ Two entries were confirmed against the binary and are **not yet fixed**. Written
 down rather than left in a transcript, because a known bug that nobody recorded
 is indistinguishable from an unknown one.
 
-**A2 — a `rescue`/`ensure` body is declined.** A `def` carrying a `rescue` has a
-`BeginNode` body rather than a `StatementsNode`, so the D73 body fix does not
-reach it. The rename declines the definition and *reports* it as residue, so the
-run is honest rather than silent — but it declines every method that touches I/O.
-
-```ruby
-class Account
-  def display_name
-    remote.name
-  rescue Timeout::Error
-    email
-  end
-end
-```
-→ `rewrites: 0`, residue `[(2, 'definition')]`.
-
-The obvious fix — hoisting the body check above the discriminant comparison in
-`matcher::match_node` — makes the *match* succeed and then the rewrite path
-claims edits it does not make and never converges (exit 4 on every rerun, file
-unchanged). The splice side needs understanding first; a reported miss is
-strictly better than a retry loop that lies about its work.
+**A2 — a `rescue`/`ensure` body.** ✅ Fixed. Both halves were needed: the matcher binds a
+body-position metavariable whatever shape the body has, and `rewrite::structural_diff` carries
+the matching rule. Fixing only the matcher made the diff call the body diverged, re-render the
+whole `def`, and emit a wider edit that swallowed the correct one — a run that claimed a
+rewrite, changed nothing, and asked to be run again forever.
 
 **B15 — the rename target collides with an existing local.** The worst outcome in
 this document: working code with changed behaviour.

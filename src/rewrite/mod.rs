@@ -515,6 +515,23 @@ pub(crate) fn verify(rewritten: &str) -> Result<(), Refusal> {
 /// in atoms. That covers renames, the largest rule family. A shape-changing
 /// rewrite -- `$R.select { .. }.first` -> `$R.detect { .. }`, which drops an
 /// enclosing call -- still falls back to full replacement.
+/// The metavariable a body-position lone placeholder stands for.
+///
+/// `def foo; $B; end` parses its body as a `StatementsNode` holding one
+/// placeholder. The matcher binds that to the target's whole body whatever shape
+/// it has (D73), so the diff has to recognise the same thing or it will call the
+/// body diverged.
+fn lone_placeholder(node: &Node<'_>, prepared: &Prepared) -> Option<String> {
+    if !matches!(node, Node::StatementsNode { .. }) {
+        return None;
+    }
+    let kids = generated::children(node);
+    let [only] = kids.as_slice() else {
+        return None;
+    };
+    matcher::placeholder_name(only, prepared)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn structural_diff(
     pattern: &Node<'_>,
@@ -568,6 +585,21 @@ fn structural_diff(
             env,
             source,
         );
+    }
+
+    // A body that is the same lone metavariable on both sides is carried across
+    // untouched, whatever shape the target's body has. A `def` carrying `rescue`
+    // has a `BeginNode` body rather than a `StatementsNode`, so without this the
+    // diff called the body diverged, localized to the whole `def`, and emitted a
+    // second edit that *contained* the correct one -- which was then dropped as
+    // nested, leaving the file unchanged while the run claimed a rewrite and
+    // asked to be run again forever.
+    if let (Some(p_body), Some(t_body)) = (
+        lone_placeholder(pattern, prepared),
+        lone_placeholder(template, t_prepared),
+    ) && p_body == t_body
+    {
+        return Some(Vec::new());
     }
 
     if std::mem::discriminant(pattern) != std::mem::discriminant(target) {

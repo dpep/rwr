@@ -1849,3 +1849,46 @@ unchanged.
 
 *Reverses if:* nothing plausible. The alternative to refusing is writing code that runs and is
 wrong.
+
+## D80 - The diff carries the same body rule as the matcher
+**Decided.**
+
+D73 let a body-position metavariable bind a whole body, and stopped at the matcher. That was
+half a rule. `rewrite::structural_diff` compares the pattern against the template *and* the
+target, and it had its own discriminant check -- so a `def` carrying `rescue`, whose body is a
+`BeginNode` rather than a `StatementsNode`, was called diverged there even once the matcher
+accepted it.
+
+The consequence was worse than the original miss. The diff localized to the whole `def` and
+emitted a second, wider edit alongside the correct one; the planner drops a contained edit
+(D15), so the correct edit was dropped and the wider one applied -- and its text was the
+original, so the file did not change while the run reported "rewrote 1 site" and exit 4, asking
+to be run again forever. A silent miss became a loud lie.
+
+**A matching rule that lives in two places must be written in both.** The matcher and the diff
+each decide what "the same subtree" means, and they were allowed to disagree. Both now recognise
+a lone body-position placeholder; the comments point at each other, because the failure mode
+when they drift is not a failed match but a corrupt plan.
+
+**Found by fixing the matcher and measuring the result rather than assuming it.** The first
+attempt at D73's twin was reverted precisely because the rewrite path misbehaved, and the gap
+sat recorded for a day until the splice side was understood. Reverting a fix that half-worked
+was the right call: a reported miss is strictly better than a retry loop that lies about its
+work.
+
+*Reverses if:* nothing plausible.
+
+## D81 - The testbed scores per file, not by total
+**Decided.**
+
+`every_site_that_must_change_changed` compared the total rewrite count against the number of
+`GT:rewrite` markers, and passed at sixteen while two errors cancelled: a class nested inside
+`class Account` was being rewritten as though it were Account (two sites it should not have),
+and two definitions were being declined -- an arity-drifted override and a `rescue`-bearing body.
+Sixteen expected, sixteen counted, both halves wrong.
+
+A total is the one number that can be right while nothing else is. The check is per file now,
+with the two known divergences named in the test rather than absorbed into a sum.
+
+*Reverses if:* nothing plausible. Per-site would be better still; per-file is what the report's
+shape supports today.

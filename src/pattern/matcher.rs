@@ -215,11 +215,8 @@ pub(crate) fn match_node<'pr>(
         };
     }
 
-    if std::mem::discriminant(pattern) != std::mem::discriminant(target) {
-        return false;
-    }
-
-    // A lone metavariable standing for a body binds the *whole* body.
+    // A lone metavariable standing for a body binds the *whole* body, whatever
+    // shape that body has.
     //
     // Not an exception to D32's "one node" -- a Ruby body position holds a
     // statements sequence, and that sequence is one node. Comparing the two
@@ -227,13 +224,14 @@ pub(crate) fn match_node<'pr>(
     // single-statement methods, so the flagship rename declined every real
     // method (D73).
     //
-    // KNOWN GAP: a `def` carrying `rescue`/`ensure` has a `BeginNode` body, not
-    // a `StatementsNode`, so it does not reach here and the rename declines it
-    // -- reported as residue, not silently. Hoisting this above the discriminant
-    // check makes the match succeed and the *rewrite* path then claims edits it
-    // does not make and never converges (exit 4 forever), so the miss stays
-    // until the splice side is understood. See docs/internal/ruby-situations.md
-    // entry A2.
+    // Checked *before* the discriminant, because a `def` carrying `rescue` or
+    // `ensure` has a `BeginNode` body rather than a `StatementsNode` -- so a
+    // version of this that ran after the discriminant fixed the plain case and
+    // left its twin broken.
+    //
+    // `rewrite::structural_diff` carries the matching half of this rule. Without
+    // it the diff calls such a body diverged, re-renders the whole `def`, and
+    // that wider edit swallows the correct one.
     if matches!(pattern, Node::StatementsNode { .. }) {
         let statements = generated::children(pattern);
         if let [only] = statements.as_slice()
@@ -244,6 +242,10 @@ pub(crate) fn match_node<'pr>(
                 Some(name) => bind(env, &name, Bound::One(generated::dup(target)), forbidden),
             };
         }
+    }
+
+    if std::mem::discriminant(pattern) != std::mem::discriminant(target) {
+        return false;
     }
 
     if !match_atoms(pattern, target, prepared, env, forbidden) {
