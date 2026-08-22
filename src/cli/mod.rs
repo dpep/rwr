@@ -4,6 +4,7 @@
 //! `docs/cli-conventions.md`. Conventions are inherited from `rq` so that an
 //! agent which has learned one of these tools has learned the others.
 
+use crate::engine::{Finding, Residue};
 use crate::pattern::{matcher, prefilter, prepare};
 use crate::profile;
 use crate::residue;
@@ -760,19 +761,6 @@ fn degradation(residues: &[Residue]) {
 }
 
 /// One structural match, as reported.
-/// An occurrence the rule could not account for, as reported.
-#[derive(Debug, Serialize, Clone)]
-struct Residue {
-    file: String,
-    line: usize,
-    col: usize,
-    context: residue::Context,
-    /// The rule whose name this occurrence is, when the run has named rules.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rule: Option<String>,
-    text: String,
-}
-
 /// What a `find` run has to say, for machine consumers.
 #[derive(Debug, Serialize)]
 struct Matches<'a> {
@@ -1066,17 +1054,6 @@ struct TemplateOutcome {
     residue: Vec<Residue>,
 }
 
-/// A match of a rule that proposes no edit -- a lint rather than a rewrite.
-#[derive(Debug, Serialize, Clone)]
-struct Finding {
-    file: String,
-    line: usize,
-    col: usize,
-    rule: String,
-    note: String,
-    text: String,
-}
-
 /// One rule's share of a file's edits.
 #[derive(Debug, Serialize, Clone)]
 struct RuleHits {
@@ -1231,67 +1208,14 @@ fn cmd_apply(
     // "no edit proposed" plainly enough that a missing `rewrite:` announces
     // itself. A bare pattern with no `-r` never reaches here: it is not a path,
     // so it fails to resolve as a rule at all.
-    // A rule set that names no class cannot tell `Account#display_name` from
-    // `Company#display_name`, so its matches are tallied by resolved receiver.
-    let unnarrowed = !rules
-        .iter()
-        .any(|r| r.constraints.values().any(|c| c.receiver_type.is_some()));
-
-    // Each rule is prepared once; they apply in order, each seeing the
-    // previous one's output. A rename genuinely needs a set, since the
-    // definition and the call sites are different shapes.
-    // Sub-patterns for `contains:`, prepared once per rule rather than per
-    // candidate match -- preparing is a parse-and-retry loop.
-    let contained: Vec<std::collections::HashMap<String, prepare::Prepared>> =
-        match rules.iter().map(rule::Rule::contained).collect() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("rwr: {e}");
-                return Exit::PatternError.into();
-            }
-        };
-    let mut prepareds = Vec::with_capacity(rules.len());
-    for r in &rules {
-        match prepare::prepare_with(&r.pattern, &r.constant_captures()) {
-            Ok(p) => {
-                // Scoped so the parse's borrow of `p` ends before it moves.
-                let single = {
-                    let parsed = ruby_prism::parse(p.source.as_bytes());
-                    matcher::pattern_root(&parsed.node()).is_some()
-                };
-                if !single {
-                    eprintln!("rwr: a pattern must be a single expression: {}", r.pattern);
-                    return Exit::PatternError.into();
-                }
-                // Everything checkable before a file is read, checked here --
-                // a rule that is wrong should say so once, not run clean and
-                // do the wrong amount of work on every file.
-                if let Err(e) = r.validate(&p) {
-                    eprintln!("rwr: {e}");
-                    return Exit::PatternError.into();
-                }
-                prepareds.push(p);
-            }
-            Err(e) => {
-                eprintln!("rwr: {e}");
-                return Exit::PatternError.into();
-            }
+    let engine = match crate::engine::Engine::new(rules) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("rwr: {e}");
+            return Exit::PatternError.into();
         }
-    }
-
-    // Whether this run claims completeness at all. Residue applies to
-    // name-anchored rules only (D7), and the templates note is part of that
-    // claim -- a pack of shape rules makes no claim, so noting what it did not
-    // read there is noise on every run.
-    // Residue applies only where the rule set moves a *definition* (D7 as
-    // amended twice). A set that only rewrites call sites -- `gsub` to `tr` --
-    // leaves every name it did not touch working, so it has nothing to be
-    // incomplete about.
-    let claims_completeness = prepareds.iter().any(|prepared| {
-        let parsed = ruby_prism::parse(prepared.source.as_bytes());
-        matcher::pattern_root(&parsed.node())
-            .is_some_and(|root| residue::defines_a_method(&root, prepared))
-    });
+    };
+    let rules = engine.rules();
 
     let (files, templates) = profile::span_noted(
         "walk",
@@ -1316,94 +1240,23 @@ fn cmd_apply(
         )
     });
 
-    // Built per run rather than cached: a full rails parse is under 200ms
-    // (Phase 0 measurement (d)), so there is no staleness to manage.
-    let hierarchy = if rules.iter().any(|r| {
-        r.scope.subclasses.unwrap_or(false)
-            || r.constraints
-                .values()
-                .any(|c| c.subclasses.unwrap_or(false))
-    }) {
-        {
-            let started = profile::now();
-            // Only the part of the hierarchy reachable from the classes the
-            // rules name is needed, which is a handful rather than all of them.
-            let roots: Vec<String> = rules
-                .iter()
-                .filter_map(|r| {
-                    r.scope
-                        .inside
-                        .clone()
-                        .or_else(|| r.constraints.values().find_map(|c| c.receiver_type.clone()))
-                })
-                .collect();
-            let (h, parsed) = crate::hierarchy::Hierarchy::reachable_from(&sources, &roots);
-            let total = files.len();
-            profile::mark("hierarchy", started, || {
-                format!("{parsed} parsed, {} skipped", total.saturating_sub(parsed))
-            });
-            h
-        }
-    } else {
-        crate::hierarchy::Hierarchy::default()
-    };
+    let context = engine.context(&sources);
 
-    // Return types stated by Sorbet signatures. Built only when a rule narrows
-    // by receiver, and costing a single substring search per file in a
-    // repository that has none (D62).
-    let sigs = if rules
-        .iter()
-        .any(|r| r.constraints.values().any(|c| c.receiver_type.is_some()))
-    {
-        let started = profile::now();
-        let (found, parsed) = crate::sigs::Signatures::from_sources(&sources);
-        profile::mark("signatures", started, || {
-            format!("{} signature(s) from {parsed} file(s)", found.len())
-        });
-        found
-    } else {
-        crate::sigs::Signatures::default()
-    };
-
-    // Each file is independent: one refusal declines that file and is reported,
-    // rather than aborting work already proven safe elsewhere (DESIGN.md §4).
+    /// One source's result, with the label the report prints for it.
     struct Outcome {
         file: String,
-        sites: usize,
-        /// Classes this file's matched receivers resolved to, for the
-        /// cross-class warning. Empty unless the rule set narrows by none.
-        spread: Vec<String>,
-        /// Matches of rules that propose no edit.
-        flagged: Vec<Finding>,
-        /// Edits per rule, positionally. Attribution is per file because that
-        /// is where the work happened; totals aggregate from it.
-        by_rule: Vec<usize>,
-        rewritten: Option<String>,
+        scanned: crate::engine::Scanned,
         refusal: Option<String>,
-        residue: Vec<Residue>,
-        deferred: usize,
     }
 
-    // The class a rule set is about, used to scope its own residue report.
-
-    // Union across the rule set: a file kept by any rule must still be parsed.
-    // One filter per rule, checked disjunctively: any rule needing the file is
-    // enough to parse it.
-    let filters: Vec<prefilter::Filter> = rules
-        .iter()
-        .map(|r| prefilter::Filter::new(&prefilter::required(&r.pattern), &[]))
-        .collect();
     let skipped = std::sync::atomic::AtomicUsize::new(0);
-
     let scanning = profile::now();
     let outcomes: Vec<Outcome> = files
         .par_iter()
         .zip(&sources)
         .filter_map(|(path, mapped)| {
             let mapped = mapped.bytes();
-            // A rule set's literals are checked disjunctively -- any one rule
-            // matching is enough to need this file.
-            if !filters.iter().any(|f| f.may_contribute(mapped)) {
+            if !engine.may_contribute(mapped) {
                 skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return None;
             }
@@ -1415,255 +1268,24 @@ fn cmd_apply(
             let absolute = changed
                 .as_ref()
                 .map(|_| path.canonicalize().unwrap_or_else(|_| path.clone()));
-            let mut current = mapped.to_vec();
-            let mut total = 0usize;
-            // Matches a wider edit covered. Non-zero means a rerun makes
-            // further progress, which is the retryable outcome rather than a
-            // failure (D15).
-            let mut deferred = 0usize;
+            let only = changed
+                .as_ref()
+                .zip(absolute.as_ref())
+                .map(|(changed, absolute)| crate::engine::Only { changed, absolute });
 
-            let mut by_rule = vec![0usize; rules.len()];
-            let mut spread: Vec<String> = Vec::new();
-            let mut flagged: Vec<Finding> = Vec::new();
-            // One parse serves every rule until a rule actually rewrites
-            // something. It used to be one parse *per rule*, so a ten-rule pack
-            // parsed each candidate file ten times whether or not any rule
-            // matched -- measured at ~85 ms per additional rule on discourse,
-            // for rules that matched nothing at all.
-            let mut next = 0;
-            'generation: while next < rules.len() {
-                // What a rule changed, carried out of the parse's scope so
-                // `current` can be replaced once the borrow ends.
-                let mut applied: Option<(String, usize, usize, usize)> = None;
-                let step: Result<(), String> = {
-                    let parsed = ruby_prism::parse(&current);
-                    if parsed.errors().count() > 0 {
-                        return None;
-                    }
-                    let mut outcome = Ok(());
-                    for (index, (rule, prepared)) in
-                        rules.iter().zip(&prepareds).enumerate().skip(next)
-                    {
-                        // Each rule's own literals, not just the set's union.
-                        // The union decides whether to *read* the file; without
-                        // a per-rule gate every rule then walked the whole tree
-                        // of every file any rule wanted, which for a ten-rule
-                        // pack is nine wasted walks per file.
-                        if !filters[index].may_contribute(&current) {
-                            continue;
-                        }
-                        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
-                        let p_node = p_parsed.node();
-                        let found: Result<Option<(String, usize, usize)>, String> =
-                            match matcher::pattern_root(&p_node) {
-                                None => Ok(None),
-                                Some(p_root) => {
-                                    // Criteria are applied *inside* the search now, so a
-                                    // constraint rejection drives backtracking to a
-                                    // different binding rather than discarding the match
-                                    // (Q13).
-                                    let criteria = matcher::Criteria {
-                                        constraints: &rule.constraints,
-                                        contained: &contained[index],
-                                        scope: &rule.scope,
-                                        hierarchy: &hierarchy,
-                                        sigs: &sigs,
-                                    };
-                                    let mut hits = matcher::search(
-                                        &p_root,
-                                        &parsed.node(),
-                                        prepared,
-                                        &criteria,
-                                    );
-                                    if let Some(changed) = changed.as_ref() {
-                                        hits.retain(|m| {
-                                            let (start, end) = rewrite::effective_range(&m.node);
-                                            let (first, _) = source::line_col(&current, start);
-                                            let (last, _) = source::line_col(&current, end);
-                                            absolute.as_ref().is_some_and(|path| {
-                                                changed.touches(path, first, last)
-                                            })
-                                        });
-                                    }
-                                    // A rule that does not say which class it means may
-                                    // be renaming across several. Recorded here, warned
-                                    // about once at the end (Q10).
-                                    if unnarrowed {
-                                        for hit in &hits {
-                                            if let Some(class) = matcher::receiver_class(hit, &sigs)
-                                            {
-                                                spread.push(class);
-                                            }
-                                        }
-                                    }
-                                    // A finding rule proposes no edit: its
-                                    // matches are reported and the source left
-                                    // alone, so the parse still describes it.
-                                    // Some things are worth surfacing and not
-                                    // worth rewriting -- `.size` on a relation
-                                    // means one thing loaded and another not,
-                                    // and only the caller knows which.
-                                    if rule.rewrite.is_none() {
-                                        for hit in &hits {
-                                            let (start, _) = rewrite::effective_range(&hit.node);
-                                            let (line, col) = source::line_col(&current, start);
-                                            flagged.push(Finding {
-                                                file: file.clone(),
-                                                line,
-                                                col,
-                                                rule: rule.id.clone().unwrap_or_default(),
-                                                note: rule.description.clone().unwrap_or_default(),
-                                                text: source::line_at(&current, start),
-                                            });
-                                        }
-                                        Ok(None)
-                                    } else if hits.is_empty() {
-                                        Ok(None)
-                                    } else {
-                                        let template = rule.rewrite.as_deref().unwrap_or_default();
-                                        match rewrite::plan(
-                                            &hits,
-                                            &p_root,
-                                            prepared,
-                                            template,
-                                            &current,
-                                            &rule.constant_captures(),
-                                        ) {
-                                            Err(r) => Err(format!("{r:?}")),
-                                            Ok(planned) => {
-                                                let text = rewrite::apply(&current, &planned.edits);
-                                                match rewrite::verify(&text) {
-                                                    Err(r) => Err(format!("{r:?}")),
-                                                    Ok(()) => Ok(Some((
-                                                        text,
-                                                        planned.sites,
-                                                        planned.dropped,
-                                                    ))),
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            };
-
-                        match found {
-                            Err(refusal) => {
-                                outcome = Err(refusal);
-                                break;
-                            }
-                            // Nothing changed, so the parse still describes the
-                            // source and the next rule can reuse it.
-                            Ok(None) => {}
-                            Ok(Some((text, sites, dropped))) => {
-                                applied = Some((text, sites, dropped, index));
-                                break;
-                            }
-                        }
-                    }
-                    outcome
-                };
-
-                if let Err(refusal) = step {
-                    return Some(Outcome {
-                        file,
-                        sites: 0,
-                        spread: Vec::new(),
-                        flagged: Vec::new(),
-                        by_rule: Vec::new(),
-                        rewritten: None,
-                        refusal: Some(refusal),
-                        residue: Vec::new(),
-                        deferred: 0,
-                    });
-                }
-                match applied {
-                    // Every remaining rule left the source alone.
-                    None => break 'generation,
-                    Some((text, sites, dropped, index)) => {
-                        total += sites;
-                        by_rule[index] += sites;
-                        deferred += dropped;
-                        current = text.into_bytes();
-                        next = index + 1;
-                    }
-                }
+            match engine.scan(&file, mapped, &context, only) {
+                crate::engine::ScanOutcome::Unparseable | crate::engine::ScanOutcome::Quiet => None,
+                crate::engine::ScanOutcome::Refused(reason) => Some(Outcome {
+                    file,
+                    scanned: crate::engine::Scanned::default(),
+                    refusal: Some(reason),
+                }),
+                crate::engine::ScanOutcome::Scanned(scanned) => Some(Outcome {
+                    file,
+                    scanned: *scanned,
+                    refusal: None,
+                }),
             }
-
-            // Residue is computed whether or not this file changed. It used to
-            // sit behind an early return for `total == 0`, so a file containing
-            // *only* dynamic reaches -- a serializer full of `delegate` and
-            // `validates`, which is the dangerous case exactly -- was never
-            // looked at. Measured on the testbed: recall 4 of 7 to 7 of 7.
-            //
-            // Reported against the *rewritten* source, so an occurrence a rule
-            // already handled is not counted twice -- and so a subclass call
-            // site left behind by a rename is visible rather than silently
-            // broken.
-            let residue = if !claims_completeness {
-                Vec::new()
-            } else {
-                let parsed = ruby_prism::parse(&current);
-                let mut found = Vec::new();
-                for (rule, prepared) in rules.iter().zip(&prepareds) {
-                    let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
-                    let p_node = p_parsed.node();
-                    let Some(p_root) = matcher::pattern_root(&p_node) else {
-                        continue;
-                    };
-                    let anchors = residue::anchors(&p_root, prepared);
-                    if anchors.is_empty() {
-                        continue;
-                    }
-                    let mut occurrences = residue::find(&parsed.node(), &anchors, &[], &current);
-                    // Comments live beside the tree, not in it, so they need
-                    // their own pass -- and a rename that leaves
-                    // `# returns the display_name` behind has left something
-                    // stale that this report is supposed to name.
-                    occurrences.extend(residue::in_comments(&parsed, &anchors, &current));
-                    // Each rule scopes by *its own* class. Taking the set's
-                    // first meant a pack of two renames reported everything
-                    // against the first one's class and dropped the second's
-                    // entirely.
-                    if let Some(class) = rule.class_anchor() {
-                        occurrences = residue::scoped_to(occurrences, &class, &hierarchy);
-                    }
-                    found.extend(occurrences.into_iter().map(|o| {
-                        let (line, col) = source::line_col(&current, o.byte_start);
-                        Residue {
-                            file: file.clone(),
-                            line,
-                            col,
-                            context: o.context,
-                            // Which rule's name this is. A pack can run several
-                            // renames, and an unlabelled block leaves the reader
-                            // guessing which one an occurrence belongs to.
-                            rule: rule.id.clone(),
-                            text: source::line_at(&current, o.byte_start),
-                        }
-                    }));
-                }
-                found.sort_by_key(|r| (r.line, r.col));
-                found.dedup_by_key(|r| (r.line, r.col));
-                found
-            };
-
-            if total == 0 && residue.is_empty() && flagged.is_empty() {
-                return None;
-            }
-
-            Some(Outcome {
-                file,
-                sites: total,
-                spread,
-                flagged,
-                by_rule,
-                // Nothing to write when nothing changed, so the write path
-                // skips a file that only contributed residue.
-                rewritten: (total > 0).then(|| String::from_utf8_lossy(&current).into_owned()),
-                refusal: None,
-                residue,
-                deferred,
-            })
         })
         .collect();
     profile::mark("scan", scanning, || {
@@ -1679,20 +1301,21 @@ fn cmd_apply(
             continue;
         }
         if write
-            && let Some(text) = &outcome.rewritten
+            && let Some(text) = &outcome.scanned.rewritten
             && let Err(e) = std::fs::write(&outcome.file, text)
         {
             eprintln!("rwr: cannot write {}: {e}", outcome.file);
             return Exit::Error.into();
         }
         // A file that only contributed residue is not a changed file.
-        if outcome.sites == 0 {
+        if outcome.scanned.sites == 0 {
             continue;
         }
         changed.push(Changed {
             file: outcome.file.clone(),
-            sites: outcome.sites,
+            sites: outcome.scanned.sites,
             rules: outcome
+                .scanned
                 .by_rule
                 .iter()
                 .enumerate()
@@ -1723,7 +1346,7 @@ fn cmd_apply(
             // Naive by design: re-translate per rule. There are a few hundred
             // templates and they are small, so the simple version costs nothing
             // worth the complexity of threading a live map through the loop.
-            for (rule, prepared) in rules.iter().zip(&prepareds) {
+            for (index, (rule, prepared)) in engine.prepared().enumerate() {
                 // No tags at all: a page of static HTML, nothing to do.
                 let translated = crate::erb::translate(&current)?;
                 let ruby = ruby_prism::parse(&translated.ruby);
@@ -1733,7 +1356,7 @@ fn cmd_apply(
                     return None;
                 }
                 parsed_ok = true;
-                if !filters.iter().any(|f| f.may_contribute(&translated.ruby)) {
+                if !engine.may_contribute(&translated.ruby) {
                     continue;
                 }
                 let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
@@ -1741,17 +1364,16 @@ fn cmd_apply(
                 let Some(p_root) = matcher::pattern_root(&p_node) else {
                     continue;
                 };
-                let criteria = matcher::Criteria {
-                    constraints: &rule.constraints,
-                    contained: &contained[0],
-                    scope: &rule.scope,
-                    hierarchy: &hierarchy,
-                    sigs: &sigs,
-                };
+                // FIXME: index 0 rather than `index` -- a set whose second
+                // rule uses `contains:` gets the first rule's sub-patterns.
+                // Preserved verbatim through the Engine extraction so this
+                // commit changes structure only; fixed next.
+                let _ = index;
+                let criteria = engine.criteria(0, &context);
                 let hits = matcher::search(&p_root, &ruby.node(), prepared, &criteria);
 
                 // Residue first: it reads the *current* text either way.
-                if claims_completeness {
+                if engine.claims_completeness() {
                     let anchors = residue::anchors(&p_root, prepared);
                     if !anchors.is_empty() {
                         let mut found =
@@ -1826,10 +1448,53 @@ fn cmd_apply(
         template_outcomes.iter().map(|o| o.file.as_str()).collect();
 
     let mut left_over_text: Vec<Residue> = Vec::new();
-    if claims_completeness && !templates.is_empty() {
-        let anchors: Vec<(Option<String>, Vec<u8>)> = rules
-            .iter()
-            .zip(&prepareds)
+    if engine.claims_completeness() && !templates.is_empty() {
+        let anchors: Vec<(Option<String>, Vec<u8>)> = engine
+            .prepared()
+            .flat_map(|(rule, prepared)| {
+                let parsed = ruby_prism::parse(prepared.source.as_bytes());
+                let found = matcher::pattern_root(&parsed.node())
+                    .map(|root| residue::anchors(&root, prepared))
+                    .unwrap_or_default();
+                found
+                    .into_iter()
+                    .map(|a| (rule.id.clone(), a))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        left_over_text = templates
+            .par_iter()
+            .flat_map_iter(|path| {
+                let mut here = Vec::new();
+                if parsed_templates.contains(path.display().to_string().as_str()) {
+                    return here.into_iter();
+                }
+                let bytes = source::open(path);
+                let bytes = bytes.bytes().to_vec();
+                for (rule, anchor) in &anchors {
+                    for at in source::identifier_offsets(&bytes, anchor) {
+                        let (line, col) = source::line_col(&bytes, at);
+                        here.push(Residue {
+                            file: path.display().to_string(),
+                            line,
+                            col,
+                            context: residue::Context::Text,
+                            rule: rule.clone(),
+                            text: source::line_at(&bytes, at),
+                        });
+                    }
+                }
+                here.into_iter()
+            })
+            .collect();
+        left_over_text.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+        left_over_text.dedup_by_key(|r| (r.file.clone(), r.line, r.col));
+    }
+
+    if engine.claims_completeness() && !templates.is_empty() {
+        let anchors: Vec<(Option<String>, Vec<u8>)> = engine
+            .prepared()
             .flat_map(|(rule, prepared)| {
                 let parsed = ruby_prism::parse(prepared.source.as_bytes());
                 let found = matcher::pattern_root(&parsed.node())
@@ -1890,13 +1555,13 @@ fn cmd_apply(
 
     let mut findings: Vec<Finding> = outcomes
         .iter()
-        .flat_map(|o| o.flagged.iter().cloned())
+        .flat_map(|o| o.scanned.flagged.iter().cloned())
         .collect();
     findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
 
     let mut left_over: Vec<Residue> = outcomes
         .iter()
-        .flat_map(|o| o.residue.iter().cloned())
+        .flat_map(|o| o.scanned.residue.iter().cloned())
         .collect();
     left_over.extend(
         template_outcomes
@@ -1917,10 +1582,10 @@ fn cmd_apply(
             report_spread(
                 &outcomes
                     .iter()
-                    .flat_map(|o| o.spread.iter())
+                    .flat_map(|o| o.scanned.spread.iter())
                     .collect::<Vec<_>>(),
             );
-            report_unsafe(&changed, &rules);
+            report_unsafe(&changed, rules);
             report_residue(&left_over);
             // Only the templates that fell back: one rwr parsed has real
             // evidence and does not belong in a paragraph about guesses.
@@ -1937,7 +1602,7 @@ fn cmd_apply(
                 findings: &findings,
                 residue: &left_over,
                 template_residue: &left_over_text,
-                templates_skipped: if claims_completeness {
+                templates_skipped: if engine.claims_completeness() {
                     templates.len()
                 } else {
                     0
@@ -1950,7 +1615,7 @@ fn cmd_apply(
     }
 
     profile::report();
-    let deferred: usize = outcomes.iter().map(|o| o.deferred).sum();
+    let deferred: usize = outcomes.iter().map(|o| o.scanned.deferred).sum();
     if deferred > 0 {
         eprintln!(
             "rwr: {deferred} further match(es) sat inside a rewritten range; rerun to apply them"
