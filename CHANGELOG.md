@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-08-21
 
 **A `contains:` pattern YAML truncated now refuses loudly.** Inside a flow mapping,
 `{ contains: log($A, $B) }` arrives as `log($A` — the comma belongs to YAML. That pattern
