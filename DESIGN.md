@@ -390,7 +390,25 @@ Recorded so the design doesn't foreclose it. Not a roadmap.
   and deprecated it in v0.61.0, so this is a Phase 0 hypothesis, not a free win (Q8).
 - `rwr audit` — one-time repo-wide dynamic-dispatch inventory
 - Verification pipeline: format → typecheck → affected tests
-- Breadcrumbs; LSP
+- Breadcrumbs
+- **Editor integration** - "apply this rule here" on the file already open, since a lot of
+  real usage is a spot rewrite rather than a batch sweep. The architectural tension to settle
+  first: rwr is a single static binary with no daemon, no index and no persistent state (D5),
+  while an LSP is a long-running stateful process. The cheap version avoids that entirely --
+  a VS Code extension that shells out to `rwr check <rule> <file>:<line> -j` per invocation
+  buys the spot-rewrite affordance at zero architectural cost, because a single file is
+  already fast enough that a warm index buys nothing (see docs/scaling.md). Reach for a real
+  language server only when something needs to be *resident*, and say what that something is
+  before building it.
+- **GitHub integration, and the cheap path to it.** A Marketplace app is the expensive
+  spelling: hosting, OAuth, permissions, a webhook endpoint, a release channel rwr does not
+  otherwise need. The same outcome -- findings as annotations on a pull request -- is reached
+  by emitting **SARIF** from `check` and letting `github/codeql-action/upload-sarif` ingest
+  it, which is a self-contained output mode in a tool that already has two (D17's `-j`/`-J`).
+  Requested by a user in the same breath as the app, and it is the half worth building first:
+  it is a day of work, it composes with every other SARIF consumer, and it makes the app
+  question empirical rather than speculative. Do not build the app until SARIF-in-Actions is
+  in real use and something concrete is still missing.
 - **`rwr import`** - convert an ast-grep rule to canonical rwr syntax. Compatibility as a
   one-time conversion rather than a permanent second spelling; see D32's rejected-alias note.
   Build only if Phase 0 shows real migration demand.
