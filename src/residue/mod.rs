@@ -77,12 +77,10 @@ pub(crate) struct Occurrence {
 
 /// The class or module a node introduces, if any.
 fn scope_name(node: &Node<'_>) -> Option<String> {
-    let name = match node {
-        Node::ClassNode { .. } => node.as_class_node()?.name().as_slice().to_vec(),
-        Node::ModuleNode { .. } => node.as_module_node()?.name().as_slice().to_vec(),
-        _ => return None,
-    };
-    String::from_utf8(name).ok()
+    // Shared with the matcher, so a rule and the report it produces agree about
+    // which class a site sits in -- `class Account::Exporter` is
+    // `Account::Exporter`, not `Exporter`.
+    matcher::scope_name_of(node)
 }
 
 /// Calls whose symbol argument *defines* a method on the enclosing class rather
@@ -157,7 +155,7 @@ pub(crate) fn scoped_to(
             {
                 return false;
             }
-            o.scope.iter().any(|s| s == class)
+            matcher::enclosing_class(&o.scope).as_deref() == Some(class)
                 // A concern's contribution is the class's own code, written
                 // elsewhere. `included do`, an instance method in the module
                 // body, a `prepend`ed override, a `refine` block -- all have an
@@ -178,9 +176,8 @@ pub(crate) fn scoped_to(
                 // override the rename failed to reach is the one occurrence
                 // guaranteed to break, and an `alias` or a symbol table in a
                 // subclass names the same method the rule is moving.
-                || o.scope
-                    .last()
-                    .is_some_and(|enclosing| hierarchy.descends_from(enclosing, class))
+                || matcher::enclosing_class(&o.scope)
+                    .is_some_and(|enclosing| hierarchy.descends_from(&enclosing, class))
                 || o.context == Context::Call
                 // A symbol handed to a call is a reach wherever it lives, and
                 // scoping it away lost the whole Rails metaprogramming

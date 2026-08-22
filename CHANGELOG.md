@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**`inside:` and `method:` name one class, by its qualified name.** Lexical nesting is
+*namespacing*, not membership — `class Account; class Row` declares `Account::Row`, a different
+class that does not inherit from `Account`. Matching any enclosing name meant a rule scoped to
+`Account` rewrote code inside `Account::Row` and inside `Billing::Account`; the compact spelling
+`class Account::Exporter` had the opposite fault and was seen as plain `Exporter`. Both are
+fixed by the same change, and `inside: Billing::Account` now reaches the class it names. A
+`class << self` body stays transparent: it opens a context, not a class.
+
 **A rename reaches a method whose body carries `rescue` or `ensure`.** Such a `def` has a
 `BeginNode` body rather than a `StatementsNode`, so it never met the body rule and the rename
 declined every method that touches I/O — reported as residue, so honest, but declined. Both

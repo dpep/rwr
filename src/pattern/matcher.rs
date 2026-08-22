@@ -479,7 +479,8 @@ pub(crate) fn verdict(
     sigs: &crate::sigs::Signatures,
 ) -> Verdict {
     if let Some(wanted) = &scope.inside {
-        let reached = found.scope.iter().any(|s| {
+        let here = enclosing_class(&found.scope);
+        let reached = here.as_deref().is_some_and(|s| {
             s == wanted || (scope.subclasses.unwrap_or(false) && hierarchy.descends_from(s, wanted))
         });
         if !reached {
@@ -971,14 +972,58 @@ pub(crate) fn receiver_class(found: &Match<'_>, sigs: &crate::sigs::Signatures) 
 }
 
 /// The class or module a node introduces, if any.
-fn scope_name(node: &Node<'_>) -> Option<String> {
-    let name = match node {
-        Node::ClassNode { .. } => node.as_class_node()?.name().as_slice().to_vec(),
-        Node::ModuleNode { .. } => node.as_module_node()?.name().as_slice().to_vec(),
-        Node::SingletonClassNode { .. } => b"<<self".to_vec(),
-        _ => return None,
-    };
-    String::from_utf8(name).ok()
+pub(crate) fn scope_name_of(node: &Node<'_>) -> Option<String> {
+    match node {
+        // The *path*, not the last segment: `class Account::Exporter` names a
+        // class called `Account::Exporter`, and calling it `Exporter` loses the
+        // only thing distinguishing it from every other `Exporter` in the repo.
+        Node::ClassNode { .. } => qualified(&node.as_class_node()?.constant_path()),
+        Node::ModuleNode { .. } => qualified(&node.as_module_node()?.constant_path()),
+        Node::SingletonClassNode { .. } => Some(SINGLETON.to_string()),
+        _ => None,
+    }
+}
+
+/// The marker a singleton class body pushes onto the scope stack.
+///
+/// Not a class name: `class << self` opens a new *context*, not a new class, so
+/// it is transparent when asking which class encloses a match.
+const SINGLETON: &str = "<<self";
+
+/// A constant path rendered whole -- `Billing::Account` rather than `Account`.
+fn qualified(node: &Node<'_>) -> Option<String> {
+    match node {
+        Node::ConstantReadNode { .. } => {
+            String::from_utf8(node.as_constant_read_node()?.name().as_slice().to_vec()).ok()
+        }
+        Node::ConstantPathNode { .. } => {
+            let path = node.as_constant_path_node()?;
+            let last = String::from_utf8(path.name()?.as_slice().to_vec()).ok()?;
+            match path.parent() {
+                Some(parent) => Some(format!("{}::{last}", qualified(&parent)?)),
+                // `::Foo` -- rooted at the top level, which is where an
+                // unqualified name already lives.
+                None => Some(last),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The class a match sits in, fully qualified.
+///
+/// Lexical nesting is *namespacing*, not membership: `class Account; class Row`
+/// declares `Account::Row`, which is a different class from `Account` and does
+/// not inherit from it. Treating any enclosing name as a match meant a rule
+/// scoped to `Account` rewrote code inside `Account::Row` and inside
+/// `Billing::Account` -- two different classes that merely share a word.
+pub(crate) fn enclosing_class(scope: &[String]) -> Option<String> {
+    let named: Vec<&str> = scope
+        .iter()
+        .map(String::as_str)
+        .filter(|s| *s != SINGLETON)
+        .collect();
+    (!named.is_empty()).then(|| named.join("::"))
 }
 
 /// Every node in `target` matching `pattern`, with its lexical scope.
@@ -1279,7 +1324,7 @@ fn walk<'pr>(
     }
     state.rejections.append(&mut attempts);
 
-    let entered = scope_name(target);
+    let entered = scope_name_of(target);
     if let Some(name) = &entered {
         state.scope.push(name.clone());
         // Ruby does not care what order methods appear in, so neither should

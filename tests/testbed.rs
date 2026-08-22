@@ -198,14 +198,20 @@ fn every_site_that_must_change_changed() {
     // `archived_account.rb`: an override written `def display_name(format = ...)`
     // is declined, because a rename's definition pattern carries no parameter
     // list and `def foo(*$P)` is not expressible (ruby-situations.md A3).
-    let known: &[(&str, isize)] = &[("row.rb", 2), ("archived_account.rb", -1)];
+    let known: &[(&str, isize)] = &[("archived_account.rb", -1)];
 
     let mut wrong = Vec::new();
-    for file in wanted
-        .keys()
-        .chain(got.keys())
-        .collect::<std::collections::HashSet<_>>()
-    {
+    // Every file named anywhere, `known` included. Without that last part a
+    // file vanishing from both the markers and the report skips its own
+    // allowance check -- which is exactly what happened when the namespacing
+    // fix removed `account/row.rb`'s two false rewrites: the allowance went
+    // stale and nothing said so.
+    let mut files: Vec<String> = wanted.keys().cloned().collect();
+    files.extend(got.keys().cloned());
+    files.extend(known.iter().map(|(name, _)| (*name).to_string()));
+    files.sort();
+    files.dedup();
+    for file in &files {
         let allowance = known
             .iter()
             .find(|(name, _)| name == file)

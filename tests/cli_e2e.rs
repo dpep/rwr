@@ -1991,3 +1991,72 @@ fn a_sorbet_signature_narrows_a_receiver() {
         stderr(&out)
     );
 }
+
+/// `inside:` means one class, by its qualified name.
+///
+/// Lexical nesting is *namespacing*, not membership: `class Account; class Row`
+/// declares `Account::Row`, a different class that does not inherit from
+/// `Account`. Matching any enclosing name meant a rule scoped to `Account`
+/// rewrote code inside `Account::Row` and inside `Billing::Account` -- two
+/// classes that merely share a word with the target.
+///
+/// A singleton body stays transparent: `class << self` opens a context, not a
+/// class, so code in it is still the enclosing class's.
+#[test]
+fn inside_names_one_class_by_its_qualified_name() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    let source = "class Account\n  def own\n    helper(1)\n  end\n\n  \
+        class Row\n    def nested\n      helper(2)\n    end\n  end\n\n  \
+        class << self\n    def singleton_side\n      helper(3)\n    end\n  end\nend\n\n\
+        class Account::Exporter\n  def compact\n    helper(4)\n  end\nend\n\n\
+        module Billing\n  class Account\n    def other\n      helper(5)\n    end\n  end\nend\n";
+
+    let rewrite_with = |inside: &str, file: &str| {
+        std::fs::write(
+            path.join("rule.yml"),
+            format!(
+                "id: t/inside\nmatch: helper($A)\nscope:\n  inside: {inside}\nrewrite: helped($A)\n"
+            ),
+        )
+        .expect("write");
+        std::fs::write(path.join(file), source).expect("write");
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["rewrite", "rule.yml", file])
+            .current_dir(path)
+            .output()
+            .expect("binary runs");
+        std::fs::read_to_string(path.join(file)).expect("read")
+    };
+
+    let after = rewrite_with("Account", "a.rb");
+    assert!(after.contains("helped(1)"), "its own body: {after}");
+    assert!(
+        after.contains("helper(2)"),
+        "Account::Row is not Account: {after}"
+    );
+    assert!(
+        after.contains("helped(3)"),
+        "`class << self` is transparent: {after}"
+    );
+    assert!(
+        after.contains("helper(4)"),
+        "Account::Exporter is not Account: {after}"
+    );
+    assert!(
+        after.contains("helper(5)"),
+        "Billing::Account is not Account: {after}"
+    );
+
+    // And a qualified `inside:` reaches the class it names, and only that one.
+    let after = rewrite_with("Billing::Account", "b.rb");
+    assert!(after.contains("helped(5)"), "{after}");
+    assert!(
+        after.contains("helper(1)"),
+        "the top-level Account is a different class: {after}"
+    );
+
+    let after = rewrite_with("Account::Row", "c.rb");
+    assert!(after.contains("helped(2)"), "{after}");
+    assert!(after.contains("helper(1)"), "{after}");
+}

@@ -1892,3 +1892,32 @@ with the two known divergences named in the test rather than absorbed into a sum
 
 *Reverses if:* nothing plausible. Per-site would be better still; per-file is what the report's
 shape supports today.
+
+## D82 - A class is its qualified name, and nesting is not membership
+**Decided.**
+
+`scope: inside: Account` matched if *any* enclosing scope was called `Account`, and a scope name
+was Prism's `name()` -- the last segment. Two faults from one shortcut:
+
+- `class Account; class Row` declares `Account::Row`, a different class that does not inherit
+  from `Account`. Its code was rewritten as though it were Account's. So was
+  `module Billing; class Account`, which shares nothing with the top-level `Account` but a word.
+- `class Account::Exporter` came back as `Exporter`, so nothing connected it to `Account` and a
+  rule naming either spelling missed it.
+
+A scope entry is now the constant *path*, and `inside:` compares against the innermost class's
+fully-qualified name. `inside: Billing::Account` reaches the class it names; `inside: Account`
+does not.
+
+**A singleton body stays transparent.** `class << self` opens a context, not a class, so the
+enclosing class is still the one that counts -- otherwise a class-method rename would lose every
+definition written that way.
+
+**Both directions were errors, which is what showed the question was never decided.** A rule that
+over-matched *and* under-matched from the same shortcut is not a tuning problem; it is a missing
+definition of what a class is.
+
+*Reverses if:* users writing `inside: Account` inside a namespaced app expect it to mean
+`Billing::Account`, the way Ruby's own constant lookup would. That is a real argument, and the
+answer would be lexical resolution rather than a suffix match -- guessing which `Account` was
+meant is exactly what this decision removes.
