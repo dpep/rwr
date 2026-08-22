@@ -1105,7 +1105,13 @@ fn cmd_apply(
     // Sub-patterns for `contains:`, prepared once per rule rather than per
     // candidate match -- preparing is a parse-and-retry loop.
     let contained: Vec<std::collections::HashMap<String, prepare::Prepared>> =
-        rules.iter().map(rule::Rule::contained).collect();
+        match rules.iter().map(rule::Rule::contained).collect() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("rwr: {e}");
+                return Exit::PatternError.into();
+            }
+        };
     let mut prepareds = Vec::with_capacity(rules.len());
     for r in &rules {
         match prepare::prepare_with(&r.pattern, &r.constant_captures()) {

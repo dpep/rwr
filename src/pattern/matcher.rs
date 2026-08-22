@@ -1032,7 +1032,7 @@ mod tests {
             source.as_bytes().to_vec(),
         )])
         .0;
-        let contained = rule.contained();
+        let contained = rule.contained().expect("sub-pattern prepares");
         let criteria = Criteria {
             constraints: &rule.constraints,
             contained: &contained,

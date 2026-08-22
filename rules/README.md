@@ -67,6 +67,31 @@ can rule it out where it can resolve the receiver. Add a `type:` constraint when
 running these over a Rails app, and read the residue report for the sites it
 could not resolve.
 
+## Writing a constraint: block or flow
+
+Both of these mean the same thing, and the inline one usually reads better:
+
+```yaml
+where:
+  $SEL: { name: [select, find_all] }        # flow — YAML's inline mapping
+  $R:
+    type: Array                              # block — indented lines
+```
+
+**The flow form has one trap.** Inside `{ ... }`, the characters `,` `{` `}` `[`
+and `]` belong to YAML, so a pattern containing any of them gets cut short:
+
+```yaml
+$A: { contains: log($X, $Y) }     # YAML sees `log($X` — broken
+$A: { contains: "log($X, $Y)" }   # quoted — fine
+$A:
+  contains: log($X, $Y)           # block — fine
+```
+
+rwr refuses loudly when a pattern arrives truncated, rather than running a rule
+that quietly matches nothing. `$` and `.` are ordinary characters to YAML, so
+`{ contains: $X.$ASSOC.$FIELD }` needs no quotes at all.
+
 ## Lints: rules that flag without rewriting
 
 A rule with no `rewrite:` is a **finding**. It reports its matches with its

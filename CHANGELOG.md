@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**A `contains:` pattern YAML truncated now refuses loudly.** Inside a flow mapping,
+`{ contains: log($A, $B) }` arrives as `log($A` — the comma belongs to YAML. That pattern
+failed to prepare and the failure was being swallowed, leaving a rule that ran clean and
+matched nothing. It exits 3 and names the cause. A constraint that cannot be built must not
+degrade into one that is never satisfied.
+
 **Stale comments are reported.** A rename left `# Returns the display_name` behind and rwr
 said nothing — comments are not in Prism's tree, so neither the matcher nor the residue pass
 saw them. They now have a pass of their own, scoped by position so an unrelated class's
@@ -33,8 +39,7 @@ required to refer to the same thing:
 ```yaml
 match: $R.each { |$X| $B }
 where:
-  $B:
-    contains: $X.$ASSOC.$FIELD
+  $B: { contains: $X.$ASSOC.$FIELD }
 ```
 
 It ships `performance/possible-n-plus-one`, a lint that narrows discourse's 637 `each`/`map`

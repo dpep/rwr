@@ -123,14 +123,15 @@ pub(crate) struct Constraint {
     /// ```yaml
     /// match: $R.each { |$X| $B }
     /// where:
-    ///   $B:
-    ///     contains: $X.$INNER
+    ///   $B: { contains: $X.$INNER }
     /// ```
     ///
-    /// No quotes needed: `$` is nothing special to YAML. A pattern wants
-    /// quoting only when it *starts* with a YAML metacharacter -- `{` opens a
-    /// flow mapping, which is why the hash-shorthand rule has them and this
-    /// does not.
+    /// The inline `{ ... }` is YAML's *flow mapping*, and it reads better than
+    /// three indented lines. It has one trap: inside it, `,` `{` `}` `[` and
+    /// `]` are structural, so a pattern containing any of them is silently
+    /// truncated. Quote such a pattern, or write the constraint in block
+    /// style. rwr refuses loudly when this happens rather than running a rule
+    /// that quietly matches nothing.
     #[serde(default)]
     pub contains: Option<String>,
 
@@ -369,13 +370,28 @@ impl Rule {
     /// Preparing is a parse-and-retry loop, so doing it per candidate match
     /// would put it in the hot path for the sake of a pattern that never
     /// changes.
-    pub(crate) fn contained(&self) -> HashMap<String, crate::pattern::prepare::Prepared> {
+    pub(crate) fn contained(
+        &self,
+    ) -> Result<HashMap<String, crate::pattern::prepare::Prepared>, RuleError> {
         self.constraints
             .iter()
-            .filter_map(|(key, c)| {
-                let text = c.contains.as_ref()?;
-                let prepared = crate::pattern::prepare::prepare(text).ok()?;
-                Some((key.trim_start_matches('$').to_string(), prepared))
+            .filter(|(_, c)| c.contains.is_some())
+            .map(|(key, c)| {
+                let text = c.contains.as_deref().unwrap_or_default();
+                // Loudly. Swallowing this left a rule that silently matched
+                // nothing, which is how an unquoted comma inside a YAML flow
+                // mapping -- `{ contains: log($A, $B) }`, truncated by YAML to
+                // `log($A` -- turned into a rule that ran clean and found zero.
+                let prepared =
+                    crate::pattern::prepare::prepare(text).map_err(|e| RuleError::Malformed {
+                        path: format!("{key} contains:"),
+                        message: format!(
+                            "{e}. If this pattern holds a comma, a brace or a \
+                                          bracket inside a `{{ ... }}` mapping, YAML has \
+                                          eaten part of it -- quote it."
+                        ),
+                    })?;
+                Ok((key.trim_start_matches('$').to_string(), prepared))
             })
             .collect()
     }

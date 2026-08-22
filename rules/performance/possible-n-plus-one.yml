@@ -17,5 +17,4 @@ match: $R.$ITER { |$X| $B }
 where:
   $ITER:
     name: [each, map, flat_map, select, filter_map, each_with_object, sum]
-  $B:
-    contains: $X.$ASSOC.$FIELD
+  $B: { contains: $X.$ASSOC.$FIELD }

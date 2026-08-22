@@ -792,6 +792,43 @@ fn delete_refuses_a_partial_match() {
     );
 }
 
+/// YAML's flow mapping reads better than three indented lines, but inside
+/// `{ ... }` a comma belongs to YAML -- so `{ contains: log($A, $B) }` arrives
+/// as `log($A`. That must be loud: it had been swallowed, leaving a rule that
+/// ran clean and matched nothing.
+#[test]
+fn a_pattern_yaml_truncated_refuses_loudly() {
+    let dir = fixture("log(a, b)\n");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(
+        &rule,
+        "match: $R\nwhere:\n  $R: { contains: log($A, $B) }\n",
+    )
+    .expect("write");
+
+    let out = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(stderr(&out).contains("quote it"), "{}", stderr(&out));
+
+    // Quoted, the same rule works -- and flow style needs no quotes at all
+    // when the pattern holds none of YAML's structural characters.
+    std::fs::write(
+        &rule,
+        "match: $R\nwhere:\n  $R: { contains: \"log($A, $B)\" }\n",
+    )
+    .expect("write");
+    let ok = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    assert_ne!(ok.status.code(), Some(3), "{}", stderr(&ok));
+}
+
 /// No arguments is a usage error, not a silent no-op.
 #[test]
 fn bare_invocation_explains_itself() {

@@ -1306,8 +1306,7 @@ this".
 ```yaml
 match: $R.each { |$X| $B }
 where:
-  $B:
-    contains: $X.$ASSOC.$FIELD
+  $B: { contains: $X.$ASSOC.$FIELD }
 ```
 
 **The agreement is the feature.** A containment that ignored the outer bindings would match
@@ -1337,6 +1336,17 @@ and only measuring said so.
 **What it still cannot do.** N+1 proper needs "and nothing upstream eager-loaded this", a
 negative condition over a scope rwr does not analyse — usually a different method entirely.
 So the rule ships as a lint that finds *candidates*, and says so in its own description.
+
+**A note on YAML, because it bit.** `{ contains: $X.$ASSOC.$FIELD }` reads better than three
+indented lines and needs no quotes -- `$` and `.` are ordinary characters. But inside a flow
+mapping, `,` `{` `}` `[` and `]` belong to YAML, so `{ contains: log($A, $B) }` arrives as
+`log($A`. That pattern then fails to prepare, and `contained()` was *swallowing* the failure
+with `.ok()?` -- leaving a rule that ran clean, matched nothing, and said nothing. It now
+refuses at exit 3 and names the cause.
+
+The general lesson is not about YAML. A constraint that cannot be built must not degrade into
+a constraint that is never satisfied, because the two are indistinguishable from the output
+and only one of them is a bug.
 
 *Reverses if:* nothing. It is opt-in per constraint and costs nothing where unused.
 
