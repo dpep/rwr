@@ -1851,3 +1851,61 @@ fn an_active_refinement_refuses_rather_than_routing_around_itself() {
     // And the refinement's own definition is still reported, not rewritten.
     assert!(after.contains("    def display_name\n"), "{after}");
 }
+
+/// A rewrite that would collide with an existing local refuses.
+///
+/// The only failure mode in this codebase that produces *working* code with
+/// changed behaviour. Renaming `display_name -> full_name` where `full_name` is
+/// already a local yields `full_name = full_name if profile?`: a self-assignment
+/// that quietly evaluates to the local's current value. It parses, it runs,
+/// `verify`'s reparse passes, and nothing reports it. Refuse instead.
+///
+/// Scoped per Ruby scope, not per file: locals belong to the method that
+/// declares them, so a `full_name` in one method must not block a rewrite in
+/// another. Refusing the file would be safe and far too blunt -- the anchor of a
+/// rename is usually a short, ordinary name.
+#[test]
+fn a_rewrite_that_would_shadow_a_local_refuses() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+    let run = |file: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["rewrite", "rename.yml", file])
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    let colliding = "class Account\n  def display_name\n    @n\n  end\n\n  \
+        def summary\n    full_name = \"unknown\"\n    full_name = display_name if profile?\n    \
+        full_name\n  end\nend\n";
+    std::fs::write(path.join("collide.rb"), colliding).expect("write");
+    let out = run("collide.rb");
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert!(stderr(&out).contains("already a local"), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(path.join("collide.rb")).expect("read"),
+        colliding,
+        "a refused file keeps its bytes"
+    );
+
+    // The same name, declared in a method the rename does not touch, blocks
+    // nothing.
+    std::fs::write(
+        path.join("elsewhere.rb"),
+        "class Account\n  def display_name\n    @n\n  end\n\n  \
+         def unrelated\n    full_name = \"x\"\n    full_name\n  end\n\n  \
+         def label\n    display_name.upcase\n  end\nend\n",
+    )
+    .expect("write");
+    let out = run("elsewhere.rb");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = std::fs::read_to_string(path.join("elsewhere.rb")).expect("read");
+    assert!(after.contains("def full_name"), "{after}");
+    assert!(after.contains("full_name.upcase"), "{after}");
+}

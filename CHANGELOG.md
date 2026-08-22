@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**A rewrite that would collide with an existing local refuses.** Renaming `display_name` to
+`full_name` where `full_name` was already a local produced `full_name = full_name if profile?`
+— a self-assignment that parses, runs, quietly evaluates to the local's old value, and passes
+`verify`'s reparse. It was the only defect here that produced *working* code with changed
+behaviour. Scoped per Ruby scope rather than per file: a local in one method does not block a
+rewrite in another.
+
 **A rename refuses a file where a refinement of the target is active.** Renaming
 `Account#display_name` in a file that says `using AccountRefinements` rewrote the call site;
 afterwards `Account#full_name` existed, the refinement still defined `display_name`, and the

@@ -94,6 +94,59 @@ pub(crate) struct Engine {
     unnarrowed: bool,
     /// The class the rule set is about, when it names one.
     anchor: Option<String>,
+    /// Per rule, the identifiers its template introduces.
+    introduced: Vec<Vec<String>>,
+}
+
+/// The local variables a scope declares, with the byte range it covers.
+///
+/// Prism keeps a local table on every node that opens a scope. It is derived
+/// rather than written, so it is deliberately not part of equality (D73) -- but
+/// it is exactly the right answer to "is this name already taken here".
+fn scopes(parsed: &ruby_prism::ParseResult<'_>) -> Vec<(usize, usize, Vec<String>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![crate::pattern::generated::dup(&parsed.node())];
+    while let Some(node) = stack.pop() {
+        let locals = match &node {
+            ruby_prism::Node::DefNode { .. } => node.as_def_node().map(|n| {
+                n.locals()
+                    .iter()
+                    .map(|l| String::from_utf8_lossy(l.as_slice()).into_owned())
+                    .collect::<Vec<_>>()
+            }),
+            ruby_prism::Node::BlockNode { .. } => node.as_block_node().map(|n| {
+                n.locals()
+                    .iter()
+                    .map(|l| String::from_utf8_lossy(l.as_slice()).into_owned())
+                    .collect::<Vec<_>>()
+            }),
+            ruby_prism::Node::ProgramNode { .. } => node.as_program_node().map(|n| {
+                n.locals()
+                    .iter()
+                    .map(|l| String::from_utf8_lossy(l.as_slice()).into_owned())
+                    .collect::<Vec<_>>()
+            }),
+            _ => None,
+        };
+        if let Some(locals) = locals
+            && !locals.is_empty()
+        {
+            let at = node.location();
+            out.push((at.start_offset(), at.end_offset(), locals));
+        }
+        stack.extend(crate::pattern::generated::children(&node));
+    }
+    // Innermost first, so the first range containing an offset is its scope.
+    out.sort_by_key(|(start, end, _)| (end - start, *start));
+    out
+}
+
+/// Whether `name` is already a local where `offset` sits.
+fn shadowed(scopes: &[(usize, usize, Vec<String>)], offset: usize, name: &str) -> bool {
+    scopes
+        .iter()
+        .filter(|(start, end, _)| offset >= *start && offset < *end)
+        .any(|(_, _, locals)| locals.iter().any(|l| l == name))
 }
 
 /// Whether a source activates any of `modules` with `using`.
@@ -212,6 +265,24 @@ impl Engine {
         let unnarrowed = !rules
             .iter()
             .any(|r| r.constraints.values().any(|c| c.receiver_type.is_some()));
+        // Identifiers a rewrite brings in that the pattern did not have. If one
+        // of them is already a local where the edit lands, the rewrite produces
+        // a name collision -- `full_name = full_name` -- which parses, runs, and
+        // means something else entirely.
+        let introduced: Vec<Vec<String>> = rules
+            .iter()
+            .map(|r| {
+                let Some(template) = r.rewrite.as_deref() else {
+                    return Vec::new();
+                };
+                let had = prefilter::required(&r.pattern);
+                prefilter::required(template)
+                    .into_iter()
+                    .filter(|name| !had.contains(name))
+                    .collect()
+            })
+            .collect();
+
         let filters: Vec<prefilter::Filter> = rules
             .iter()
             .map(|r| prefilter::Filter::new(&prefilter::required(&r.pattern), &[]))
@@ -220,6 +291,7 @@ impl Engine {
         let anchor = rules.iter().find_map(rule::Rule::class_anchor);
         Ok(Engine {
             anchor,
+            introduced,
             rules,
             prepareds,
             contained,
@@ -467,6 +539,28 @@ impl Engine {
                                             }
                                         }
                                     });
+                                }
+                                // A rewrite that brings in a name already
+                                // bound as a local here would produce
+                                // `full_name = full_name`: valid Ruby, quietly
+                                // meaning something else, and `verify` passes
+                                // it. Refuse rather than write it.
+                                if !self.introduced[index].is_empty() {
+                                    let here = scopes(&parsed);
+                                    for hit in &hits {
+                                        let (start, _) = rewrite::effective_range(&hit.node);
+                                        if let Some(name) = self.introduced[index]
+                                            .iter()
+                                            .find(|name| shadowed(&here, start, name))
+                                        {
+                                            let (line, _) = source::line_col(&current, start);
+                                            return ScanOutcome::Refused(format!(
+                                                "line {line}: `{name}` is already a local \
+                                                 variable here, so the rewrite would collide \
+                                                 with it"
+                                            ));
+                                        }
+                                    }
                                 }
                                 if let Some(only) = only {
                                     hits.retain(|m| {

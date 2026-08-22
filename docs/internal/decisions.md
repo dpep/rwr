@@ -1822,3 +1822,30 @@ the cost of getting the scope wrong in the other direction.
 *Reverses if:* per-file granularity proves too coarse. `using` inside a class or module body
 scopes to that body, so a file could in principle be part-refined; rwr refuses the whole file
 today. Narrowing that is a precision improvement, not a correctness one.
+
+## D79 - A rewrite that would shadow a local refuses
+**Decided.**
+
+Renaming `Account#display_name` to `full_name` in a scope that already had a `full_name` local
+produced `full_name = full_name if profile?`. Valid Ruby, quietly evaluating to the local's
+current value, passing the reparse check, reported by nothing. Every other defect this project
+has found was a miss, a refusal, or noise; this one shipped code that ran and was wrong.
+
+**The check is general, not rename-specific.** A rule's template may introduce identifiers its
+pattern did not have; if one of them is already a local where the edit lands, the rewrite
+collides. Comparing `prefilter::required` over pattern and template gives the introduced set for
+free, so any rule gets this, not just `method:`/`rename:`.
+
+**Prism's local table answers it exactly.** D73 removed `locals` from *equality*, because it is
+derived rather than written and comparing it made a pattern match only bodies whose locals
+matched its own. It is still the right answer to a different question -- "is this name already
+taken here" -- and using it for that is not in tension with D73.
+
+**Per scope, not per file.** Locals belong to the method that declares them. A file-level check
+would be safe and far too blunt: the target of a rename is usually a short ordinary name, and
+refusing every file that happens to contain it elsewhere would decline most of the work. Verified
+both directions, and measured across ~/code/lib/ruby: zero refusals, 532 files and 1,054 sites
+unchanged.
+
+*Reverses if:* nothing plausible. The alternative to refusing is writing code that runs and is
+wrong.
