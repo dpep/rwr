@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+**An ERB edit that cannot be made is refused, not dropped.** The template pass skipped past both
+a `plan` refusal and a cross-tag `splice` refusal — no count, no report, no exit code — while
+the identical refusal on a `.rb` file was reported and exited 5. "Never silently drop an edit"
+is the second first principle. A refused template now keeps its bytes, rather than getting part
+of a rule set that could not finish.
+
+**`templates_skipped` means the same thing in text and JSON.** The JSON counted *every* template
+as skipped, including ones rwr had parsed structurally — over-claiming a blind spot in the plane
+an agent acts on, while the human report had it right.
+
 **`# rwr:ignore <rule-id>` accepts a finding at the site.** Trailing on a line, or leading above
 one. It covers the **outermost statement starting on the attached line**, so a directive above a
 `def` covers the whole method rather than its signature — rwr has the parse tree, and a

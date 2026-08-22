@@ -1474,3 +1474,84 @@ fn suppressions_are_always_in_structured_output() {
     // Present and empty rather than absent: the run made the claim.
     assert!(doc["stale_suppressions"].is_array());
 }
+
+/// An ERB edit that cannot be made is refused, not dropped.
+///
+/// The template pass used to `continue` past both a `plan` refusal and a
+/// cross-tag `splice` refusal -- no count, no report, no exit code -- while the
+/// `.rb` path reported the same refusal and exited 5. "Never silently drop an
+/// edit" is the second first principle, and the failure DESIGN.md names ast-grep
+/// and Synvert for.
+#[test]
+fn a_template_edit_that_cannot_be_made_is_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("page.erb"),
+        "<% widgets.each do |w| %>\n  <p><%= w.name %></p>\n<% end %>\n",
+    )
+    .expect("write");
+    // A shape change, so the edit covers the whole span rather than one token --
+    // and the text between those tags is HTML, not Ruby.
+    std::fs::write(
+        path.join("rule.yml"),
+        "id: t/cross\nmatch: $R.each do |$X| $B end\nrewrite: $B\n",
+    )
+    .expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "rule.yml", "page.erb"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert!(stderr(&out).contains("refused"), "{}", stderr(&out));
+
+    // And `rewrite` leaves the file alone rather than applying part of a rule
+    // set that could not finish.
+    let before = std::fs::read_to_string(path.join("page.erb")).expect("read");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "rule.yml", "page.erb"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(path.join("page.erb")).expect("read"),
+        before,
+        "a refused template keeps its bytes"
+    );
+}
+
+/// The two output planes must agree about what was not read.
+///
+/// The JSON counted every template as skipped, including ones rwr had parsed
+/// structurally -- over-claiming a blind spot in the plane an agent acts on,
+/// while the text report had it right.
+#[test]
+fn templates_skipped_means_the_same_thing_in_both_planes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(path.join("page.erb"), "<%= account.display_name %>\n").expect("write");
+    std::fs::write(
+        path.join("account.rb"),
+        "class Account\n  def display_name\n    @n\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "rename.yml", ".", "-j"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(
+        doc["templates_skipped"], 0,
+        "the template parsed, so nothing was skipped: {doc}"
+    );
+}

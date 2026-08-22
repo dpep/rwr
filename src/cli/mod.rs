@@ -1137,6 +1137,11 @@ struct Report<'a> {
 struct TemplateOutcome {
     file: String,
     sites: usize,
+    /// Why an edit could not be made. The `.rb` path reports a refusal and
+    /// exits 5; this path used to `continue` past both a plan refusal and a
+    /// cross-tag splice refusal, which is the one thing rwr promises never to
+    /// do (principle 2, and the failure DESIGN.md names ast-grep for).
+    refusal: Option<String>,
     rewritten: Option<Vec<u8>>,
     residue: Vec<Residue>,
 }
@@ -1429,6 +1434,7 @@ fn cmd_apply(
             let mut sites = 0usize;
             let mut residue = Vec::new();
             let mut parsed_ok = false;
+            let mut refusal: Option<String> = None;
 
             // Naive by design: re-translate per rule. There are a few hundred
             // templates and they are small, so the simple version costs nothing
@@ -1485,22 +1491,35 @@ fn cmd_apply(
                 if hits.is_empty() {
                     continue;
                 }
-                let Ok(planned) = rewrite::plan(
+                let planned = match rewrite::plan(
                     &hits,
                     &p_root,
                     prepared,
                     template,
                     &translated.ruby,
                     &rule.constant_captures(),
-                ) else {
-                    continue;
+                ) {
+                    Ok(planned) => planned,
+                    Err(r) => {
+                        refusal = Some(format!("{r:?}"));
+                        break;
+                    }
                 };
                 // An edit spanning two tags covers template text that is not
                 // Ruby; `splice` refuses it rather than writing HTML into an
                 // expression.
-                if let Some(next) = crate::erb::splice(&translated, &current, &planned.edits) {
-                    sites += planned.sites;
-                    current = next;
+                match crate::erb::splice(&translated, &current, &planned.edits) {
+                    Some(next) => {
+                        sites += planned.sites;
+                        current = next;
+                    }
+                    None => {
+                        refusal = Some(
+                            "an edit spans two ERB tags, so the text between them is not Ruby"
+                                .to_string(),
+                        );
+                        break;
+                    }
                 }
             }
 
@@ -1512,10 +1531,14 @@ fn cmd_apply(
             // Produced whenever the template *parsed*, findings or not: this is
             // also the record of which templates need no text fallback, and a
             // clean template is exactly one with nothing to report.
+            let refusal_free = refusal.is_none();
             parsed_ok.then(|| TemplateOutcome {
                 file: path.display().to_string(),
                 sites,
-                rewritten: (sites > 0).then(|| current.clone()),
+                refusal,
+                // A refused template keeps its bytes: partial application of a
+                // rule set that could not finish is worse than none.
+                rewritten: (sites > 0 && refusal_free).then(|| current.clone()),
                 residue,
             })
         })
@@ -1574,51 +1597,14 @@ fn cmd_apply(
         left_over_text.dedup_by_key(|r| (r.file.clone(), r.line, r.col));
     }
 
-    if engine.claims_completeness() && !templates.is_empty() {
-        let anchors: Vec<(Option<String>, Vec<u8>)> = engine
-            .prepared()
-            .flat_map(|(rule, prepared)| {
-                let parsed = ruby_prism::parse(prepared.source.as_bytes());
-                let found = matcher::pattern_root(&parsed.node())
-                    .map(|root| residue::anchors(&root, prepared))
-                    .unwrap_or_default();
-                found
-                    .into_iter()
-                    .map(|a| (rule.id.clone(), a))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
-        left_over_text = templates
-            .par_iter()
-            .flat_map_iter(|path| {
-                let mut here = Vec::new();
-                if parsed_templates.contains(path.display().to_string().as_str()) {
-                    return here.into_iter();
-                }
-                let bytes = source::open(path);
-                let bytes = bytes.bytes().to_vec();
-                for (rule, anchor) in &anchors {
-                    for at in source::identifier_offsets(&bytes, anchor) {
-                        let (line, col) = source::line_col(&bytes, at);
-                        here.push(Residue {
-                            file: path.display().to_string(),
-                            line,
-                            col,
-                            context: residue::Context::Text,
-                            rule: rule.clone(),
-                            text: source::line_at(&bytes, at),
-                        });
-                    }
-                }
-                here.into_iter()
-            })
-            .collect();
-        left_over_text.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
-        left_over_text.dedup_by_key(|r| (r.file.clone(), r.line, r.col));
-    }
-
     for outcome in &template_outcomes {
+        // Same treatment as a `.rb` refusal: named on stderr, and it sets the
+        // exit code. A refusal nobody hears is a silently dropped edit.
+        if let Some(reason) = &outcome.refusal {
+            refused = true;
+            eprintln!("rwr: refused {}: {reason}", outcome.file);
+            continue;
+        }
         if write
             && let Some(text) = &outcome.rewritten
             && let Err(e) = std::fs::write(&outcome.file, text)
@@ -1705,8 +1691,12 @@ fn cmd_apply(
                 findings: &findings,
                 residue: &left_over,
                 template_residue: &left_over_text,
+                // The templates that got *no* structural read, matching what
+                // the text report says. Counting every template here claimed a
+                // blind spot over files rwr had in fact parsed -- and claimed it
+                // in the machine-readable plane, where an agent acts on it.
                 templates_skipped: if engine.claims_completeness() {
-                    templates.len()
+                    templates.len() - parsed_templates.len()
                 } else {
                     0
                 },

@@ -174,12 +174,25 @@ fn false_positives_stay_within_their_budget() {
 /// The account has to reach a machine consumer. It was text-only, so `-j` --
 /// the mode the skill tells agents to use -- returned edits with no account of
 /// what they missed at all.
+///
+/// This asserted `templates_skipped >= 1` until structural ERB shipped and made
+/// that false. It kept passing anyway, because the JSON was counting *parsed*
+/// templates as skipped -- a stale premise propped up by a bug, each hiding the
+/// other. The claim worth pinning is that the view's reach is reported at all.
 #[test]
 fn the_account_survives_json() {
     let (_, report) = run();
     assert!(report["residue"].is_array(), "{report}");
+    let from_the_view = report["residue"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(report["template_residue"].as_array().into_iter().flatten())
+        .any(|r| r["file"].as_str().is_some_and(|f| f.ends_with(".erb")));
     assert!(
-        report["templates_skipped"].as_u64().is_some_and(|n| n >= 1),
-        "the ERB view is not searched and the report must say so: {report}"
+        from_the_view,
+        "the ERB view reaches the renamed name and the report must say so: {report}"
     );
+    // And the view is parsed rather than skipped, so nothing is claimed unread.
+    assert_eq!(report["templates_skipped"], 0, "{report}");
 }
