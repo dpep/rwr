@@ -1673,3 +1673,36 @@ rather than dangerous, so the failure mode is clutter rather than silence.
 predicate nor a baseline serves -- the evidence would be users stacking many identical
 directives in one file -- or if stale directives accumulate in real repos, in which case failing
 on them is a one-line change and should be an amendment here rather than a flag.
+
+## D73 - Derived fields are not syntax
+**Decided.** Amends D36.
+
+D36 made equality "variant + atoms + children", and `generated::atoms` emitted every `constant`
+field Prism exposes. `locals` is one of those — the local-variable symbol table Prism attaches
+to each node that opens a scope — and it is *derived from* the body rather than written by
+anyone. Comparing it meant a pattern matched only bodies whose local set was identical to its
+own, so `def foo; $B; end` matched a method with no locals and declined every method that
+assigned one. The flagship one-line rename worked on one-liners and silently reported real
+methods as residue.
+
+**The failure was invisible in every direction that usually catches things.** The rename
+reported the definition it declined, so it was honest; the testbed scored 7 of 7 because its
+`Account#display_name` happened to be a single expression; and the pack's fixtures were all
+one-liners. A corpus written from the Ruby side still missed it, because "a method with a
+variable in it" is too ordinary to think of as an edge case.
+
+Derived fields are excluded at the generator (`script/gen-compare.py`, `DERIVED`), not filtered
+at the comparison site, so the exclusion is visible in the generated source rather than hidden
+behind a runtime check.
+
+**A lone metavariable in a body position binds the whole body.** Not an exception to D32's "one
+node": a Ruby body holds a statements sequence and that sequence *is* one node. Comparing the
+two sequences child by child was the second half of the same bug.
+
+Measured before shipping, across ~/code/lib/ruby: 1,051 sites to 1,054, with nothing lost. A
+correctness fix to a matcher should widen strictly and slightly; a large delta would have meant
+the fix was wrong.
+
+*Reverses if:* a field in `DERIVED` turns out to carry meaning a pattern should be able to
+match. The test to write first would be the one showing two programs that differ only in that
+field and should not be equal.

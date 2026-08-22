@@ -35,7 +35,8 @@ unsafe: >-
 Present means unsafe, and the value is the reason — there is no boolean to set
 without saying what for. Those rules are held back unless you pass `--unsafe`,
 the run says how many were held back and why, and when one does fire its reason
-is printed next to the diff. RuboCop carries the same information as
+is printed after the run, in an `unsafe rule(s) applied:` block. RuboCop
+carries the same information as
 `SafeAutoCorrect: false`, in a config file nobody reads at the moment of the
 edit.
 

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+**A rename now reaches methods that have a body.** Prism carries a scope's local-variable table
+on the node, and rwr compared it as though it were syntax — so `def foo; $B; end` matched only
+methods whose locals were identical to the pattern's, which in practice meant methods with no
+locals at all. The one-line `method:`/`rename:` form renamed one-liners and silently declined
+every method that assigned a variable, reporting its own definition as residue. Nobody writes a
+local table, so it is no longer part of equality (D36).
+
+The same fault reached block bodies, where it was quietly costing matches: `xs.reverse.each do
+|post| … end` was skipped by `performance/reverse-each` whenever the block assigned anything.
+Measured across ~/code/lib/ruby: **+3 sites of 1051, none lost** — strictly more matching, which
+is what a correctness fix should look like.
+
+Also: a lone metavariable in a body position now binds the whole body, since a Ruby body holds a
+statements sequence and that sequence is one node.
+
 **An ERB edit that cannot be made is refused, not dropped.** The template pass skipped past both
 a `plan` refusal and a cross-tag `splice` refusal — no count, no report, no exit code — while
 the identical refusal on a `.rb` file was reported and exited 5. "Never silently drop an edit"

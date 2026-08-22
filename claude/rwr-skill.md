@@ -67,7 +67,7 @@ rename: full_name
 ```
 
 ```sh
-rwr check rename.yml app/      # read the diff and the residue report
+rwr check rename.yml app/      # read the site counts and the residue report
 rwr rewrite rename.yml app/    # then apply
 ```
 
@@ -103,7 +103,7 @@ so your own rules directory is selected the same way — a pack *is* a directory
 
 **Rules that can change behaviour are held back** and the run says which and
 why. Pass `--unsafe` to include them; when one fires, its caveat prints next to
-the diff. Don't pass `--unsafe` blind — read the reasons first, and prefer
+the counts. Don't pass `--unsafe` blind — read the reasons first, and prefer
 narrowing the rule with a receiver type.
 
 ## Writing a rule

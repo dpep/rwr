@@ -3,7 +3,7 @@
 //! `rg`/`sed` for Ruby *programs* rather than Ruby *text*: find code by
 //! structure, rewrite only what matches, preserve everything else, and refuse
 //! when it can't be sure. See `DESIGN.md` for the design these modules
-//! implement and `docs/decisions.md` for why each piece is shaped as it is.
+//! implement and `docs/internal/decisions.md` for why each piece is shaped as it is.
 
 pub mod cli;
 #[allow(dead_code)]

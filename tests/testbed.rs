@@ -15,7 +15,7 @@
 //!
 //! Precision at scale is *not* measured here and cannot be -- a fixture the
 //! author wrote proves nothing about noise on a million lines. That half of Q1
-//! is measured against discourse and recorded in `docs/phase0-results.md`.
+//! is measured against discourse and recorded in `docs/internal/phase0-results.md`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

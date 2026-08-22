@@ -1555,3 +1555,55 @@ fn templates_skipped_means_the_same_thing_in_both_planes() {
         "the template parsed, so nothing was skipped: {doc}"
     );
 }
+
+/// The one-line rename reaches a method with a real body.
+///
+/// Prism carries a scope's local-variable table on the node, and
+/// `generated::atoms` treated it as syntax -- so `def foo; $B; end` matched only
+/// methods whose locals were identical to the pattern's, which meant methods
+/// with no locals at all. The flagship feature renamed one-liners and silently
+/// declined every method that assigned a variable, reporting its own definition
+/// as residue. Measured on a real corpus: +3 sites of 1051, none lost.
+#[test]
+fn a_rename_reaches_a_method_with_locals() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("account.rb"),
+        "class Account\n  def display_name\n    given = @first\n    family = @last\n    \
+         \"#{given} #{family}\"\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "rename.yml", "account.rb"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let after = std::fs::read_to_string(path.join("account.rb")).expect("read");
+    assert!(after.contains("def full_name"), "renamed: {after}");
+    // The body is untouched, including the locals that used to block the match.
+    assert!(after.contains("given = @first"), "body preserved: {after}");
+    assert!(after.contains("family = @last"), "body preserved: {after}");
+}
+
+/// The same fault reached block bodies, which is where it was costing real
+/// matches: a `reverse.each do |x| ... end` whose block declared a local was
+/// skipped by `performance/reverse-each`.
+#[test]
+fn a_block_body_with_locals_still_matches() {
+    let dir = fixture("xs.reverse.each do |post|\n  seen = post.id\n  puts seen\nend\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "performance/reverse-each", "fixture.rb"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+}

@@ -2,8 +2,8 @@
 
 `rwr` is a **Ruby structural search-and-rewrite engine** — `rg`/`sed` for Ruby
 *programs* rather than Ruby *text*. Read [DESIGN.md](DESIGN.md) for the design,
-[docs/decisions.md](docs/decisions.md) for why each piece is shaped as it is
-(and what would reverse it), and [docs/open-questions.md](docs/open-questions.md)
+[docs/internal/decisions.md](docs/internal/decisions.md) for why each piece is shaped as it is
+(and what would reverse it), and [docs/internal/open-questions.md](docs/internal/open-questions.md)
 for what is still unresolved.
 
 > **Pre-Phase-0.** The design docs are ahead of the code. They are the contract —
@@ -32,9 +32,9 @@ for what is still unresolved.
   type checker; the semantic layer enhances matching, never gates it.
 - **Every command is agent/script-friendly.** Anything that prints honors
   `-j/--json` and `-J/--ndjson`. Field names stay stable across commands. Exit
-  codes stay meaningful, and `Retryable` (2) stays distinct from `Refused` (3).
+  codes stay meaningful, and `Retryable` (4) stays distinct from `Refused` (5).
   When you add a command, add its structured output and an e2e assertion in the
-  same change. See [docs/cli-conventions.md](docs/cli-conventions.md).
+  same change. See [docs/internal/cli-conventions.md](docs/internal/cli-conventions.md).
 
 ## Language and toolchain
 
@@ -74,6 +74,19 @@ release <version>
 plugin's own version bump is manual until the skill moves. Bump it: `claude
 plugin update` compares versions rather than content, so a skill change that
 does not move the version reaches nobody.
+
+## Docs: public vs internal
+
+`docs/` is **public documentation** — getting started, writing rules,
+suppressing findings. `docs/internal/` is the design record: decisions, research,
+measurements, the architecture map. Both are in the repo; only the first is
+written for someone using rwr.
+
+Read [docs/internal/architecture.md](docs/internal/architecture.md) before adding
+a feature — it maps the pipeline, the seams, and the failure class this codebase
+actually produces (a run that completes clean while having done the wrong amount
+of work). When you add a user-visible capability, the public guide is part of the
+change, the same way the changelog entry is.
 
 ## Repo layout
 

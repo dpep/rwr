@@ -219,6 +219,25 @@ pub(crate) fn match_node<'pr>(
         return false;
     }
 
+    // A lone metavariable standing for a body binds the *whole* body.
+    //
+    // Not an exception to D32's "one node" -- a Ruby body position holds a
+    // statements sequence, and that sequence is one node. Comparing the two
+    // sequences child by child instead made `def foo; $B; end` match only
+    // single-statement methods, so the flagship one-line rename silently
+    // declined every real method and reported its own definition as residue.
+    if matches!(pattern, Node::StatementsNode { .. }) {
+        let statements = generated::children(pattern);
+        if let [only] = statements.as_slice()
+            && let Some(key) = placeholder(only, &prepared.bindings)
+        {
+            return match prepared.bindings.get(key).and_then(|b| b.name.clone()) {
+                None => true,
+                Some(name) => bind(env, &name, Bound::One(generated::dup(target)), forbidden),
+            };
+        }
+    }
+
     if !match_atoms(pattern, target, prepared, env, forbidden) {
         return false;
     }
@@ -868,7 +887,7 @@ pub(crate) fn resolve_type(node: &Node<'_>, at: &Where<'_>) -> Option<Receiver> 
         // and only 2-4% of method definitions say that syntactically -- 70% end
         // in another call, so resolution recurses into more unknowns. What is
         // free is the chain that carries its own answer, and `new` is the
-        // commonest such inner call in all three corpora (docs/scaling.md).
+        // commonest such inner call in all three corpora (docs/internal/scaling.md).
         // A local or instance variable whose assignment named a class.
         Node::LocalVariableReadNode { .. } | Node::InstanceVariableReadNode { .. } => {
             variable_name(node)

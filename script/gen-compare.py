@@ -20,6 +20,16 @@ cfg = json.load(open(sorted(paths)[-1]))
 NODE_NAMES = {n["name"] for n in cfg["nodes"]}
 CHILD = {"node", "node?", "node[]"}
 NAME = {"constant", "constant?", "constant[]"}
+
+# Fields Prism derives rather than fields the author wrote.
+#
+# `locals` is the scope's local-variable symbol table, carried on every node
+# that opens a scope. Treating it as an atom made a pattern match only bodies
+# whose local set was identical to the pattern's -- so `def foo; $B; end`
+# matched a method with no locals and silently declined every method that
+# assigned one, which is nearly all of them. Equality is meant to be over the
+# syntax someone wrote (D36), and nobody writes a local table.
+DERIVED = {"locals"}
 VALUE = {"string", "integer", "double", "uint8", "uint32"}
 
 out = []
@@ -118,7 +128,8 @@ w("    let mut out = Vec::new();")
 w("    match node {")
 for n in cfg["nodes"]:
     name = n["name"]
-    fields = [f for f in n.get("fields", []) if f["type"] in NAME | VALUE]
+    fields = [f for f in n.get("fields", []) if f["type"] in NAME | VALUE
+              and f["name"] not in DERIVED]
     if not fields:
         continue
     snake = ''.join('_'+c.lower() if c.isupper() else c for c in name).lstrip('_')

@@ -45,4 +45,4 @@ Written this way it scored **2 of 7** and found two real defects:
 **Precision at scale.** A fixture its own author wrote proves nothing about
 whether a report is screen-filling on a million lines. That half of Q1 is
 measured against discourse and mastodon, and recorded in
-`docs/phase0-results.md`.
+`docs/internal/phase0-results.md`.

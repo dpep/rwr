@@ -82,10 +82,10 @@ rwr check style/return-nil app/    # one rule
 covers `detect`, `filter_map`, `sum`, `gsub` → `tr`, and the ActiveRecord set —
 `where(...).count > 0` → `exists?`, `find_by`, `pluck`.
 
-Rules that can change behaviour are **held back**, and the run says which and
-why — `inject(:+)` returns nil for an empty collection where `sum` returns 0;
-`select` on an ActiveRecord relation names columns rather than filtering rows.
-`--unsafe` includes them and prints each caveat next to the diff.
+Rules that can change behaviour are **held back**, and the run says how many —
+`-e` says which and why. `inject(:+)` returns nil for an empty collection where
+`sum` returns 0; `select` on an ActiveRecord relation names columns rather than
+filtering rows. `--unsafe` includes them and prints each caveat after the run.
 
 Rules also declare the Ruby version their output needs, and are held back on an
 older codebase — `{foo:}` is a syntax error before 3.1, and no amount of
@@ -186,14 +186,14 @@ revision, and deciding by whether that path exists on disk would be a guess.
 
 Exit codes, which a caller can branch on before parsing any output:
 
-| | `find` / `rewrite` | `check` |
-|---|---|---|
-| 0 | matched | clean |
-| 1 | no match | work to do |
-| 2 | error | error |
-| 3 | the rule is wrong | the rule is wrong |
-| 4 | retryable — rerun makes progress | — |
-| 5 | refused — needs judgement | refused |
+| | `find` | `check` | `rewrite` |
+|---|---|---|---|
+| 0 | matched | clean | applied, or nothing to do |
+| 1 | no match | work to do | — |
+| 2 | error | error | error |
+| 3 | the rule is wrong | the rule is wrong | the rule is wrong |
+| 4 | — | — | retryable — rerun makes progress |
+| 5 | refused — needs judgement | refused | refused |
 
 `check` inverts polarity deliberately: a clean tree is success, so a pre-commit
 hook does not block a commit where a rule correctly matches nothing.
@@ -220,7 +220,7 @@ pack's safe rules **478 ms**, each discovering, reading, searching, parsing the
 survivors and matching structurally. `--unsafe`, which runs every rule in the
 pack rather than only those that need no caveat, takes about **1.4 s**.
 
-`--profile` reports where the time went. See [docs/scaling.md](docs/scaling.md).
+`--profile` reports where the time went. See [docs/internal/scaling.md](docs/internal/scaling.md).
 
 ## Shell completions
 
@@ -234,21 +234,29 @@ already running inside it is friction with no purpose.
 
 ## Documentation
 
+- [docs/](docs/) — the guides:
+  [getting started](docs/getting-started.md),
+  [writing rules](docs/writing-rules.md),
+  [suppressing findings](docs/suppressing.md)
+- [rules/README.md](rules/README.md) — the shipped pack and its safety notes
 - [claude/INSTALL.md](claude/INSTALL.md) — installing the Claude skill, which
   teaches an agent to drive rwr
-- [rules/README.md](rules/README.md) — the shipped pack, safety, writing rules
+
+Design notes and research, kept because the reasoning is worth having:
+
 - [DESIGN.md](DESIGN.md) — what it is and how it works
-- [docs/decisions.md](docs/decisions.md) — every decision, and what would reverse it
-- [docs/cli-conventions.md](docs/cli-conventions.md) — the output and exit-code contract
-- [docs/phase0-conclusion.md](docs/phase0-conclusion.md) — whether this should exist, and the evidence
-- [docs/scaling.md](docs/scaling.md) — the cost model, measured
-- [docs/prior-art.md](docs/prior-art.md) — ast-grep, Comby, Semgrep, RuboCop, Ruby LSP
+- [docs/internal/architecture.md](docs/internal/architecture.md) — how the pieces fit, for feature work
+- [docs/internal/decisions.md](docs/internal/decisions.md) — every decision, and what would reverse it
+- [docs/internal/cli-conventions.md](docs/internal/cli-conventions.md) — the output and exit-code contract
+- [docs/internal/phase0-conclusion.md](docs/internal/phase0-conclusion.md) — whether this should exist, and the evidence
+- [docs/internal/scaling.md](docs/internal/scaling.md) — the cost model, measured
+- [docs/internal/prior-art.md](docs/internal/prior-art.md) — ast-grep, Comby, Semgrep, RuboCop, Ruby LSP
 
 ## Gathering data from another machine
 
 `rwr-phase0` emits JSON aggregates — counts, timings, receiver distributions —
 with no source text or paths, so a codebase that cannot be shared can still be
-measured. See [docs/data-collection.md](docs/data-collection.md).
+measured. See [docs/internal/data-collection.md](docs/internal/data-collection.md).
 
 ## License
 

@@ -3435,12 +3435,6 @@ pub(crate) fn atoms<'pr>(node: &Node<'pr>) -> Vec<Atom> {
             };
             out.push(Atom::name(n.name().as_slice()));
         }
-        Node::BlockNode { .. } => {
-            let Some(n) = node.as_block_node() else {
-                return out;
-            };
-            out.extend(n.locals().iter().map(|c| Atom::name(c.as_slice())));
-        }
         Node::BlockParameterNode { .. } => {
             let Some(n) = node.as_block_parameter_node() else {
                 return out;
@@ -3487,7 +3481,6 @@ pub(crate) fn atoms<'pr>(node: &Node<'pr>) -> Vec<Atom> {
             let Some(n) = node.as_class_node() else {
                 return out;
             };
-            out.extend(n.locals().iter().map(|c| Atom::name(c.as_slice())));
             out.push(Atom::name(n.name().as_slice()));
         }
         Node::ClassVariableAndWriteNode { .. } => {
@@ -3591,7 +3584,6 @@ pub(crate) fn atoms<'pr>(node: &Node<'pr>) -> Vec<Atom> {
                 return out;
             };
             out.push(Atom::name(n.name().as_slice()));
-            out.extend(n.locals().iter().map(|c| Atom::name(c.as_slice())));
         }
         Node::FloatNode { .. } => {
             let Some(n) = node.as_float_node() else {
@@ -3693,12 +3685,6 @@ pub(crate) fn atoms<'pr>(node: &Node<'pr>) -> Vec<Atom> {
                 out.push(Atom::name(c.as_slice()));
             }
         }
-        Node::LambdaNode { .. } => {
-            let Some(n) = node.as_lambda_node() else {
-                return out;
-            };
-            out.extend(n.locals().iter().map(|c| Atom::name(c.as_slice())));
-        }
         Node::LocalVariableAndWriteNode { .. } => {
             let Some(n) = node.as_local_variable_and_write_node() else {
                 return out;
@@ -3752,7 +3738,6 @@ pub(crate) fn atoms<'pr>(node: &Node<'pr>) -> Vec<Atom> {
             let Some(n) = node.as_module_node() else {
                 return out;
             };
-            out.extend(n.locals().iter().map(|c| Atom::name(c.as_slice())));
             out.push(Atom::name(n.name().as_slice()));
         }
         Node::NumberedParametersNode { .. } => {
@@ -3778,12 +3763,6 @@ pub(crate) fn atoms<'pr>(node: &Node<'pr>) -> Vec<Atom> {
                 return out;
             };
             out.push(Atom::name(n.name().as_slice()));
-        }
-        Node::ProgramNode { .. } => {
-            let Some(n) = node.as_program_node() else {
-                return out;
-            };
-            out.extend(n.locals().iter().map(|c| Atom::name(c.as_slice())));
         }
         Node::RationalNode { .. } => {
             let Some(n) = node.as_rational_node() else {
@@ -3817,12 +3796,6 @@ pub(crate) fn atoms<'pr>(node: &Node<'pr>) -> Vec<Atom> {
             if let Some(c) = n.name() {
                 out.push(Atom::name(c.as_slice()));
             }
-        }
-        Node::SingletonClassNode { .. } => {
-            let Some(n) = node.as_singleton_class_node() else {
-                return out;
-            };
-            out.extend(n.locals().iter().map(|c| Atom::name(c.as_slice())));
         }
         Node::SourceFileNode { .. } => {
             let Some(n) = node.as_source_file_node() else {

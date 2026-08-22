@@ -2,9 +2,17 @@
 
 # The class the rename is about. Everything here either changes or breaks.
 class Account
-  # GT:rewrite -- the definition itself
+  # GT:rewrite -- the definition itself.
+  #
+  # Deliberately more than one statement, and it assigns a local. Prism carries
+  # a scope's local table on the node, and treating that as syntax meant a
+  # pattern matched only bodies whose locals were identical to its own -- so
+  # this definition was renamed while it was a one-liner and silently declined
+  # the moment anyone gave it a variable.
   def display_name
-    "#{first} #{last}"
+    given = first
+    family = last
+    "#{given} #{family}"
   end
 
   def greeting

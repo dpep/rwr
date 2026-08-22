@@ -1,12 +1,12 @@
 # rwr — Ruby structural rewriting
 
 **Status:** design draft, pre-Phase-0. Revision 3 — incorporates the staff-engineer review
-(`docs/review-staff-eng.md`) and the prior-art survey (`docs/prior-art.md`). Nothing here is
+(`docs/internal/review-staff-eng.md`) and the prior-art survey (`docs/internal/prior-art.md`). Nothing here is
 committed until Phase 0 reports numbers.
 
-Companion docs: `docs/decisions.md` (what was decided and what reverses it),
-`docs/open-questions.md` (unresolved risk), `docs/cli-conventions.md` (CLI/JSON contract),
-`docs/prior-art.md`, `docs/review-staff-eng.md`.
+Companion docs: `docs/internal/decisions.md` (what was decided and what reverses it),
+`docs/internal/open-questions.md` (unresolved risk), `docs/internal/cli-conventions.md` (CLI/JSON contract),
+`docs/internal/prior-art.md`, `docs/internal/review-staff-eng.md`.
 
 ## 1. What this is
 
@@ -151,7 +151,7 @@ vendored parse error teaches the agent to shrink invocations until atomicity is 
 - Ambiguous sites within a parseable file: **abort the transaction**.
 - Overlapping edits: **abort** (§5).
 - JSON says which, and the exit code distinguishes retryable from terminal
-  (`docs/cli-conventions.md`).
+  (`docs/internal/cli-conventions.md`).
 
 ## 5. Matching and rewriting
 
@@ -301,7 +301,7 @@ Two correctness demonstrations, both cheap and both reproducible by a skeptic:
 ### Phase 1 — engine
 
 Prism parse, metavariable matching, captures, `effective_range` splicing (§7), the
-TreeRewriter action tree, atomic apply, JSON + exit codes per `docs/cli-conventions.md`,
+TreeRewriter action tree, atomic apply, JSON + exit codes per `docs/internal/cli-conventions.md`,
 scoping flags, residue reporting for name-anchored rules.
 
 **No persistence.** Parse, answer, exit. D5's cache is unmeasured; §3's question about the
@@ -360,19 +360,6 @@ review is **the rule, not the edit list**: an edit that appears in code touched 
 preview is still a correct application of an approved rule. The residual effect is that an
 apply may differ from its preview; that is stated, not defended against.
 
-**Reparse-verify.** After computing edits, reparse and assert the resulting AST matches what
-the transformation intended. Mismatch discards the whole transformation.
-
-**Identity-rewrite property test.** Match with no template change → byte-identical output,
-over both corpora. Cheap, and catches the range-arithmetic bug class at dev time.
-
-**Clean-tree precondition (D28).** By default rwr refuses to write a file whose worktree
-content differs from the git **index**; `--allow-dirty` overrides. Index, not HEAD: staged
-files are the normal state inside a pre-commit hook (D22), and `git checkout -- <file>`
-restores from the index anyway - so index-clean is both the weaker precondition and the one
-that makes the undo exact. rwr prints that command. There is deliberately no undo journal - apply is atomic, so the only
-possible revert is "all of it," and git already does that perfectly on clean files.
-
 **Read-write race - content-addressed edit ids (D25).** The agent flow searches, inspects,
 then writes; files change in between. A *per-file* content hash over-rejects: any unrelated
 line moving anywhere in the file kills the whole transaction. Each edit instead carries
@@ -397,7 +384,7 @@ Recorded so the design doesn't foreclose it. Not a roadmap.
   while an LSP is a long-running stateful process. The cheap version avoids that entirely --
   a VS Code extension that shells out to `rwr check <rule> <file>:<line> -j` per invocation
   buys the spot-rewrite affordance at zero architectural cost, because a single file is
-  already fast enough that a warm index buys nothing (see docs/scaling.md). Reach for a real
+  already fast enough that a warm index buys nothing (see docs/internal/scaling.md). Reach for a real
   language server only when something needs to be *resident*, and say what that something is
   before building it.
 - **GitHub integration, and the cheap path to it.** A Marketplace app is the expensive

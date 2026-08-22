@@ -1,7 +1,7 @@
 //! CLI surface: argument parsing, structured output, exit codes.
 //!
 //! The contract here is public from v0.1 (decision D17) and is specified in
-//! `docs/cli-conventions.md`. Conventions are inherited from `rq` so that an
+//! `docs/internal/cli-conventions.md`. Conventions are inherited from `rq` so that an
 //! agent which has learned one of these tools has learned the others.
 
 use crate::engine::{Finding, Rejection, Residue};
@@ -27,10 +27,12 @@ use std::process::ExitCode;
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exit {
-    /// Verb-dependent success. `find`/`rewrite`: matched. `check`: clean.
+    /// Verb-dependent success. `find`: matched. `check`: clean. `rewrite`:
+    /// applied, *or* nothing to apply -- writing nothing is not a failure, so
+    /// `rewrite` never returns [`Exit::Negative`].
     Ok,
     /// Verb-dependent negative result — not an error in either polarity.
-    /// `find`/`rewrite`: nothing matched. `check`: violations found.
+    /// `find`: nothing matched. `check`: violations found.
     Negative,
     /// I/O, internal, or usage failure. `2` because grep, ripgrep, ruff,
     /// rubocop, biome, jq and semgrep all agree it means "something went
@@ -48,7 +50,7 @@ pub(crate) enum Exit {
 
 impl Exit {
     /// The numeric status. Public contract — see the table in
-    /// `docs/cli-conventions.md`; `exit_codes_are_stable` pins it.
+    /// `docs/internal/cli-conventions.md`; `exit_codes_are_stable` pins it.
     pub(crate) fn code(self) -> u8 {
         match self {
             Exit::Ok => 0,
@@ -81,7 +83,7 @@ pub(crate) enum Output {
 /// Flags shared by every subcommand.
 ///
 /// Every command that prints anything honors `--json`/`--ndjson`, not just the
-/// search path — see `docs/cli-conventions.md`.
+/// search path — see `docs/internal/cli-conventions.md`.
 #[derive(Debug, Args)]
 pub(crate) struct Common {
     /// Emit results as JSON (pretty array or object).
@@ -872,9 +874,6 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
         }
     }
 
-    // `find` takes a bare pattern, so it has no rule to draw a class from.
-    let class_anchor: Option<&str> = None;
-
     let (scoped, named) = match targets(paths, common) {
         Ok(t) => t,
         Err(e) => {
@@ -977,18 +976,10 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                         (l.start_offset(), l.end_offset())
                     })
                     .collect();
+                // Unscoped, and it stays that way: `find` takes a bare
+                // pattern, so there is never a class to scope by. Class
+                // anchoring is `check`/`rewrite`'s, where a rule names one.
                 let extra = residue::find(&parsed.node(), &anchors, &matched, &src);
-                // A class-anchored rule scopes its own report: the payoff of
-                // receiver narrowing, since an unscoped report's bulk is
-                // unrelated classes sharing an identifier.
-                let extra = match class_anchor {
-                    // `find` takes a bare pattern, so it never has a class to
-                    // scope by and never builds a hierarchy.
-                    Some(class) => {
-                        residue::scoped_to(extra, class, &crate::hierarchy::Hierarchy::default())
-                    }
-                    None => extra,
-                };
                 if let Ok(mut sink) = residues.lock() {
                     sink.extend(extra.into_iter().map(|o| {
                         let (line, col) = source::line_col(&src, o.byte_start);
