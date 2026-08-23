@@ -53,8 +53,18 @@ pub(crate) struct Rewrite {
     pub(crate) file: String,
     pub(crate) line: usize,
     pub(crate) col: usize,
+    /// The last line the site occupies. A suggestion replaces whole lines, and a
+    /// multi-line rewrite needs both ends.
+    pub(crate) end_line: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rule: Option<String>,
+    /// The rule's own one-liner. A reviewer reading an annotation wants to know
+    /// what the rule is *for*, which the rule already says and the report was
+    /// throwing away.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) note: Option<String>,
+    /// What lines `line..=end_line` become -- the body of a `suggestion` block.
+    pub(crate) replacement: String,
 }
 
 /// A site the pattern matched, then a constraint declined -- as reported.
@@ -493,7 +503,7 @@ impl Engine {
                     }
                     let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
                     let p_node = p_parsed.node();
-                    type Applied = (String, usize, usize, Vec<usize>);
+                    type Applied = (String, usize, usize, Vec<rewrite::Site>);
                     let found: Result<Option<Applied>, String> =
                         match matcher::pattern_root(&p_node) {
                             None => Ok(None),
@@ -654,13 +664,17 @@ impl Engine {
                         // source and the next rule can reuse it.
                         Ok(None) => {}
                         Ok(Some((text, sites, dropped, at))) => {
-                            for start in &at {
-                                let (line, col) = source::line_col(&current, *start);
+                            for site in &at {
+                                let (line, col) = source::line_col(&current, site.start);
+                                let (end_line, _) = source::line_col(&current, site.end);
                                 rewrites.push(Rewrite {
                                     file: label.to_string(),
                                     line,
                                     col,
+                                    end_line,
                                     rule: rule.id.clone(),
+                                    note: rule.description.clone(),
+                                    replacement: site.replacement.clone(),
                                 });
                             }
                             applied = Some((text, sites, dropped, index));

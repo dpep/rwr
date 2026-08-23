@@ -1,0 +1,88 @@
+# rwr on a pull request.
+#
+# The default is `suggest`: review comments carrying applicable suggestions,
+# posted by github-actions[bot] through the ordinary reviews API. No SARIF, no
+# Code Scanning, no security alerts — none of what rwr finds is a vulnerability
+# and filing it as one earns a reviewer's scepticism rather than their
+# attention.
+#
+# `annotate` remains for anyone who wants results in Code Scanning instead. It
+# is opt-in because every SARIF upload is attributed to Advanced Security, which
+# is not renameable and overstates what these findings are.
+#
+# The testbed is deliberately full of code the shipped rules flag — that is what
+# it is for — so this job is expected to find things. It is not a gate.
+name: rwr
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: suggest | annotate | fix
+        default: suggest
+        type: choice
+        options: [suggest, annotate, fix]
+
+permissions:
+  contents: write          # `fix` pushes to the PR branch
+  pull-requests: write     # `suggest` posts review comments
+  security-events: write   # `annotate` uploads SARIF
+
+jobs:
+  rwr:
+    name: rwr
+    runs-on: ubuntu-latest
+    env:
+      MODE: ${{ inputs.mode || 'suggest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `--since` diffs against the base branch, which a shallow clone does
+          # not have.
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+
+      # --- suggest: review comments with an Apply button --------------------
+      - name: Suggest simplifications
+        if: env.MODE == 'suggest'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RWR: ./target/release/rwr
+        run: script/pr-suggest.sh ${{ github.event.pull_request.number }} all testbed
+
+      # --- annotate: SARIF into Code Scanning -------------------------------
+      - name: Check the testbed
+        if: env.MODE == 'annotate'
+        # `check` exits 1 when there is work to do — the polarity that makes it
+        # usable as a gate — so without this the upload step never runs.
+        continue-on-error: true
+        run: ./target/release/rwr check all testbed --sarif > rwr.sarif
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: env.MODE == 'annotate'
+        with:
+          sarif_file: rwr.sarif
+          category: rwr
+
+      # --- fix: push the changes straight to the branch ---------------------
+      #
+      # Opt-in and never automatic. rwr refuses rather than guesses, so an
+      # applied rewrite is one it could prove — but the residue report is the
+      # part that says what it could *not* reach, and a push nobody reads is how
+      # that gets skipped.
+      - name: Apply simplifications
+        if: env.MODE == 'fix'
+        run: |
+          ./target/release/rwr rewrite all testbed --since "origin/${{ github.base_ref }}" || true
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name  'github-actions[bot]'
+            git config user.email 'github-actions[bot]@users.noreply.github.com'
+            git commit -am 'rwr: apply simplifications'
+            git push
+          else
+            echo "nothing to apply"
+          fi

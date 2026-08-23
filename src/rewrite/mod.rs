@@ -448,25 +448,69 @@ pub(crate) fn plan(
     let mut sites: Vec<usize> = kept.iter().map(|(i, _)| *i).collect();
     sites.sort_unstable();
     sites.dedup();
-    // Where each surviving site starts, so a caller can name a line. A
-    // shape-changing rewrite emits several edits for one site, so this is the
-    // earliest byte of each match's own edits rather than one per edit.
-    let mut at: Vec<usize> = sites
+    // Where each surviving site starts, and what its lines become.
+    //
+    // A count tells a reader how much there is; a location tells a CI annotation
+    // where to point; and the replacement text is what lets a review comment
+    // carry an *applicable* suggestion rather than a description of one. All
+    // three were being computed and discarded.
+    //
+    // Expanded to whole lines because that is the unit a suggestion replaces --
+    // GitHub's `suggestion` block substitutes the commented lines entire, so a
+    // byte-range replacement would need the rest of the line reconstructed
+    // anyway.
+    let mut at: Vec<Site> = sites
         .iter()
         .filter_map(|index| {
-            kept.iter()
+            let mine: Vec<&Edit> = kept
+                .iter()
                 .filter(|(i, _)| i == index)
-                .map(|(_, e)| e.start)
-                .min()
+                .map(|(_, e)| e)
+                .collect();
+            let start = mine.iter().map(|e| e.start).min()?;
+            let end = mine.iter().map(|e| e.end).max()?;
+            let from = source[..start]
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map_or(0, |n| n + 1);
+            let to = source[end..]
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(source.len(), |n| end + n);
+
+            // The site's own edits applied to its own lines, so the result is
+            // what those lines become and nothing else moves.
+            let mut text = source[from..to].to_vec();
+            let mut ordered: Vec<&&Edit> = mine.iter().collect();
+            ordered.sort_by_key(|e| std::cmp::Reverse(e.start));
+            for edit in ordered {
+                let (a, b) = (edit.start - from, edit.end - from);
+                text.splice(a..b, edit.text.bytes());
+            }
+            Some(Site {
+                start: from,
+                end: to,
+                replacement: String::from_utf8_lossy(&text).into_owned(),
+            })
         })
         .collect();
-    at.sort_unstable();
+    at.sort_by_key(|s| s.start);
     Ok(Planned {
         sites: sites.len(),
         at,
         edits: kept.into_iter().map(|(_, e)| e).collect(),
         dropped,
     })
+}
+
+/// One changed site, as whole lines and their replacement.
+#[derive(Debug, Clone)]
+pub(crate) struct Site {
+    pub start: usize,
+    pub end: usize,
+    /// What `source[start..end]` becomes -- directly usable as the body of a
+    /// GitHub `suggestion` block.
+    pub replacement: String,
 }
 
 /// Edits to apply, and how many matches were dropped as contained.
@@ -477,9 +521,8 @@ pub(crate) struct Planned {
     /// for one site, so reporting `edits.len()` overstates what a reader sees
     /// in the diff.
     pub sites: usize,
-    /// Where each of those sites starts, in bytes. A count tells a reader how
-    /// much there is; a location tells a CI annotation where to point.
-    pub at: Vec<usize>,
+    /// Each changed site: the lines it occupies and what they become.
+    pub at: Vec<Site>,
     /// Matches skipped because a wider edit covered them. Non-zero means a
     /// rerun will make further progress -- the retryable outcome (exit 4).
     pub dropped: usize,

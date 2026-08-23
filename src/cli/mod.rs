@@ -1749,7 +1749,19 @@ fn cmd_apply(
                     file: r.file.clone(),
                     line: r.line,
                     col: r.col,
-                    text: "a rule would rewrite this".to_string(),
+                    // The rule's own description, framed as what it is: a
+                    // simplification rwr can apply, not a defect it caught. A
+                    // flat "a rule would rewrite this" is what a reviewer reads
+                    // on the line and tells them nothing they could act on --
+                    // and "violation" would overstate it, since none of this is
+                    // broken.
+                    text: format!(
+                        "🎯 {}",
+                        r.note
+                            .clone()
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or_else(|| "this can be simplified".to_string())
+                    ),
                     level: "warning",
                 });
             }

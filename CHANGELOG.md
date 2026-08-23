@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+**Review suggestions with an Apply button, without Code Scanning.** `script/pr-suggest.sh` turns
+`rwr check -j` into pull-request review comments carrying ` ```suggestion ` blocks — posted
+through the ordinary reviews API, so no SARIF, no security alerts, and no `github-advanced-
+security` attribution (which is not renameable: every SARIF upload carries it). SARIF remains for
+anyone who wants Code Scanning, but it is no longer the default path.
+
+The report carries what a suggestion needs: `end_line`, the rule's own `description`, and the
+`replacement` text for the lines a site occupies.
+
+**Findings are framed as simplifications, not violations.** A rewritable site now reads
+"🎯 An explicit `return nil` says nothing `return` does not." rather than "a rule would rewrite
+this". Nothing rwr flags here is broken, and calling it a violation earns a reviewer's scepticism
+rather than their attention.
+
 **`--sarif` emits SARIF 2.1.0, which is the whole GitHub integration.**
 `github/codeql-action/upload-sarif` turns it into annotations on a pull request — a serializer
 rather than an app: no hosting, no OAuth, no webhook. See
