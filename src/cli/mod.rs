@@ -1095,6 +1095,11 @@ struct Changed {
     /// unchanged.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     rules: Vec<RuleHits>,
+    /// Where each of those sites is. A count answers "how much" and a location
+    /// answers "where" -- and everything downstream of this report, from a CI
+    /// annotation to a review suggestion, needs the second.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    at: Vec<crate::engine::Rewrite>,
 }
 
 /// The output contract's version, bumped when the shape changes.
@@ -1438,6 +1443,7 @@ fn cmd_apply(
         changed.push(Changed {
             file: outcome.file.clone(),
             sites: outcome.scanned.sites,
+            at: outcome.scanned.rewrites.clone(),
             rules: outcome
                 .scanned
                 .by_rule
@@ -1649,6 +1655,10 @@ fn cmd_apply(
                 file: outcome.file.clone(),
                 sites: outcome.sites,
                 rules: Vec::new(),
+                // The ERB pass drives its own scan and does not carry per-site
+                // offsets back through the fragment map yet, so a template's
+                // sites are counted and not located. Absent rather than wrong.
+                at: Vec::new(),
             });
         }
     }
