@@ -108,8 +108,12 @@ rwr check style/return-nil app/    # one rule
 rwr rewrite all app/               # apply
 ```
 
-Families are `style` and `performance`. A real path wins over a built-in name,
-so your own rules directory is selected the same way — a pack *is* a directory.
+Families are `style`, `performance` and `rspec`. A real path wins over a
+built-in name, so your own rules directory is selected the same way — a pack
+*is* a directory.
+
+`rspec` is the one family whose name is also a scope. A rule constrains the
+tree, never the path, so point it at the specs: `rwr check rspec spec/`.
 
 **Rules that can change behaviour are held back** and the run says which and
 why. Pass `--unsafe` to include them; when one fires, its caveat prints next to

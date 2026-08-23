@@ -1,0 +1,43 @@
+# Three literals, three rules: `eq([])`, `eq({})` and `eq('')` are different
+# nodes and there is no "empty literal" predicate to unify them. `eq('')` covers
+# `eq("")` for free -- a string literal compares by unescaped value (D36).
+#
+# Held back as unsafe for what the rewrite drops rather than what it breaks:
+# `eq([])` asserts the type as well as the emptiness, and `be_empty` asserts only
+# that `empty?` is true. Where the subject's type is already pinned elsewhere in
+# the example that is the point; where it is not, the assertion gets weaker.
+- description: '`eq([])` reads as an equality check; `be_empty` says what is meant.'
+  unsafe: >-
+    `eq([])` also asserts the subject is an Array; `be_empty` accepts any empty collection.
+  match: expect($X).to eq([])
+  rewrite: expect($X).to be_empty
+  tests:
+    - input: |
+        expect(result).to eq([])
+      output: |
+        expect(result).to be_empty
+    - input: |
+        expect(result).to eq([1])
+      unchanged: true
+
+- description: '`eq({})` reads as an equality check; `be_empty` says what is meant.'
+  unsafe: >-
+    `eq({})` also asserts the subject is a Hash; `be_empty` accepts any empty collection.
+  match: expect($X).to eq({})
+  rewrite: expect($X).to be_empty
+  tests:
+    - input: |
+        expect(result).to eq({})
+      output: |
+        expect(result).to be_empty
+
+- description: '`eq('''')` reads as an equality check; `be_empty` says what is meant.'
+  unsafe: >-
+    `eq('''')` also asserts the subject is a String; `be_empty` accepts any empty collection.
+  match: expect($X).to eq('')
+  rewrite: expect($X).to be_empty
+  tests:
+    - input: |
+        expect(result).to eq("")
+      output: |
+        expect(result).to be_empty

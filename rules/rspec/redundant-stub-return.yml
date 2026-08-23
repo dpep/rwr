@@ -1,0 +1,27 @@
+# `contains:` rather than a literal `receive($M).and_return(nil)` chain, so the
+# rule reaches `receive(:x).with(1).and_return(nil)` too, and still declines a
+# bare `thing.and_return(nil)` that has no stub in it.
+#
+# `and_return(nil, 1)` is a different node -- two arguments, a queue of return
+# values -- and does not match, which is the whole reason to match structurally.
+description: A stub returns nil already; `.and_return(nil)` says it twice.
+match: $C.and_return(nil)
+where:
+  $C:
+    contains: receive($M)
+rewrite: $C
+tests:
+  - input: |
+      allow(foo).to receive(:bar).and_return(nil)
+    output: |
+      allow(foo).to receive(:bar)
+  - input: |
+      expect(foo).to receive(:bar).with(1).and_return(nil)
+    output: |
+      expect(foo).to receive(:bar).with(1)
+  - input: |
+      allow(foo).to receive(:bar).and_return(nil, 1)
+    unchanged: true
+  - input: |
+      thing.and_return(nil)
+    unchanged: true

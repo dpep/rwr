@@ -1,0 +1,54 @@
+# `return if x.nil?` and `return unless x` differ on exactly one value: `false`
+# is not nil but is falsey, so the rewrite makes the guard newly fire on it.
+# That is fine for the overwhelming majority of guards and a bug for a nilable
+# boolean, and rwr cannot tell them apart -- `type:` narrows by resolving a
+# receiver, and there is no predicate for "resolves, and not to a boolean". So
+# this is `unsafe:` with the reason, not a rule that guesses.
+#
+# The block spelling is the same tree as the modifier one, so this reaches
+# `if x.nil?\n  return\nend` too and collapses it to the guard clause. Pinned
+# below, because that is a bigger change than the rule's name suggests. A body
+# with a second statement is a different tree and is left alone.
+description: '`return if x.nil?` is `return unless x`, without the double negative.'
+unsafe: >-
+  A nilable boolean breaks this: `false` is not nil, so the guard newly returns early on it.
+match: return if $X.nil?
+rewrite: return unless $X
+tests:
+  - input: |
+      def m(x)
+        return if x.nil?
+        x
+      end
+    output: |
+      def m(x)
+        return unless x
+        x
+      end
+  - input: |
+      def m(x)
+        if x.nil?
+          return
+        end
+        x
+      end
+    output: |
+      def m(x)
+        return unless x
+        x
+      end
+  - input: |
+      def m(x, y)
+        if x.nil?
+          log(y)
+          return
+        end
+        x
+      end
+    unchanged: true
+  - input: |
+      def m(x)
+        return 1 if x.nil?
+        x
+      end
+    unchanged: true

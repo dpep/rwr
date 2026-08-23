@@ -73,6 +73,44 @@ can rule it out where it can resolve the receiver. Add a `type:` constraint when
 running these over a Rails app, and read the residue report for the sites it
 could not resolve.
 
+## The rspec rules
+
+Spec idioms, and the one family whose name is also a *scope*: a rule constrains
+the tree, never the path, so point it at your specs.
+
+```sh
+rwr check rspec spec/
+```
+
+Both shapes it looks for are effectively spec-only — `and_return` reached from a
+`receive`, and `expect(...).to eq([])` — so a whole-tree run is unlikely to find
+anything in `app/`. Naming the directory is still the honest way to say what you
+meant, and it is faster.
+
+`redundant-stub-return` matches through the chain rather than at a fixed
+position, so `receive(:x).with(1).and_return(nil)` is covered and
+`and_return(nil, 1)` — a *queue* of return values, a different node — is not.
+
+## The `!` rules
+
+`style/inverse-any` is safe and `style/not-empty` is not, which is easier to see
+in Ruby than in prose:
+
+```ruby
+![nil, false].any? { |x| x }   # => true
+[nil, false].none? { |x| x }   # => true   -- a real inverse
+
+![nil, false].empty?           # => true
+[nil, false].any?              # => false  -- not one
+"abc".empty?                   # => false
+"abc".any?                     # => NoMethodError
+```
+
+With a block, `any?` and `none?` disagree about the *predicate*, so no element
+value can split them. Without one, `any?` asks about truthiness while `empty?`
+asks about presence, and `empty?` is common on strings, where `any?` does not
+exist. Hence one ships plain and the other ships held back.
+
 ## Writing a constraint: block or flow
 
 Both of these mean the same thing, and the inline one usually reads better:

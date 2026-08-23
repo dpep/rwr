@@ -9,6 +9,29 @@ so `!$X.empty?` → `$X.any?` wrote `any?` over the `!` and left the receiver's 
 round (`$X.foo` → `foo($X)`) silently produced no edit at all while the run reported a rewritten
 site. Names now correspond only slot for slot; anything else unwraps or re-renders the span.
 
+**Six new rules, and a third family.**
+
+`style/inverse-any` — `!x.any? { }` → `x.none? { }`, and the `&:sym` block-pass spelling. A true
+inverse: both ask about the predicate, so no element value splits them.
+
+`style/not-empty` — `!x.empty?` → `x.any?`, **held back as unsafe**. Without a block `any?` tests
+truthiness rather than presence (`![nil].empty?` is true, `[nil].any?` is false), and `empty?` is
+common on strings, where `any?` does not exist.
+
+`style/return-unless-nil` — `return if x.nil?` → `return unless x`, **held back as unsafe**: a
+nilable boolean breaks it, since `false` is not nil but is falsey. Reaches the block spelling too
+and collapses it to the guard clause.
+
+`rspec/redundant-stub-return` — drops `.and_return(nil)` from a stub, which returns nil already.
+Matches through the chain, so `receive(:x).with(1).and_return(nil)` is covered; `and_return(nil, 1)`
+is a different node and is not.
+
+`rspec/be-empty` — `expect(x).to eq([])` / `eq({})` / `eq('')` → `be_empty`, **held back as
+unsafe**: `eq([])` also asserts the type, and `be_empty` asserts only that `empty?` is true.
+
+`rspec` is the first family whose name is also a scope. A rule constrains the tree, never the
+path — point it at the specs: `rwr check rspec spec/`.
+
 **Inline review comments on a pull request, with an Apply button.**
 `script/pr-suggest.sh` turns `rwr check -j` into review comments — an applicable ` ```suggestion `
 block where a rule can fix what it found, a plain comment where it cannot (a finding, or an
