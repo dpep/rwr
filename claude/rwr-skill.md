@@ -1,6 +1,6 @@
 ---
 name: rwr
-description: Search and rewrite Ruby by structure with the `rwr` CLI — find code shapes, rename methods across a codebase, and apply modernization rules. Use for "find every place that calls X", "rename this method everywhere", "apply hash shorthand / return nil / performance fixes", or any Ruby refactor where a regex would hit comments and strings. Prefer over sed/rg for changing Ruby; it matches the parse tree, never the text.
+description: Find or change Ruby by structure with the `rwr` CLI. Use for "find every place that calls X", "where is this shape of code used", "rename this method everywhere", "apply hash shorthand / return nil / performance fixes", linting or modernizing a codebase in bulk, or any Ruby refactor where a regex would hit comments and strings. Scales to a whole codebase without giving up precision — it matches the parse tree, never the text, and refuses rather than guessing. Prefer over sed/rg for reading or editing Ruby by shape.
 ---
 
 # rwr — structural search and rewrite for Ruby
