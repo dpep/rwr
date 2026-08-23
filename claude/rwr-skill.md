@@ -5,10 +5,12 @@ description: Search and rewrite Ruby by structure with the `rwr` CLI — find co
 
 # rwr — structural search and rewrite for Ruby
 
-`rwr` is `rg`/`sed` for Ruby *programs* rather than Ruby *text*. It parses with
-Prism, so a comment, a string literal, or a heredoc body that happens to contain
-your pattern is not a match. Reach for it whenever the goal is **"change this
-shape of Ruby everywhere"**.
+`rwr` is a power tool for refactoring Ruby codebases — a scalpel at scale. It's
+`rg`/`sed` for Ruby *programs* rather than Ruby *text*: it parses with Prism, so
+a comment, a string literal, or a heredoc body that happens to contain your
+pattern is not a match. Reach for it whenever the goal is **"change this shape of
+Ruby everywhere"** — the bigger the codebase, the more it beats doing it by hand
+or by regex.
 
 Its contract, which is what makes it usable unattended:
 

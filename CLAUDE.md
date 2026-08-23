@@ -1,7 +1,9 @@
 # rwr development conventions
 
 `rwr` is a **Ruby structural search-and-rewrite engine** — `rg`/`sed` for Ruby
-*programs* rather than Ruby *text*. Read [DESIGN.md](DESIGN.md) for the design,
+*programs* rather than Ruby *text*. A power tool for refactoring Ruby
+codebases: a scalpel at scale, precise enough to run unattended and blunt enough
+to point at everything. Read [DESIGN.md](DESIGN.md) for the design,
 [docs/internal/decisions.md](docs/internal/decisions.md) for why each piece is shaped as it is
 (and what would reverse it), and [docs/internal/open-questions.md](docs/internal/open-questions.md)
 for what is still unresolved.

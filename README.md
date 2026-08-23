@@ -1,5 +1,10 @@
 # rwr
 
+**A power tool for refactoring Ruby codebases — a scalpel at scale.** Precision
+normally means one file at a time; scale normally means a regex you hope is
+right. rwr declines the trade: it matches the parse tree, so a rename across ten
+thousand files is as exact as one done by hand.
+
 Ruby structural search and rewrites — `rg`/`sed` for Ruby *programs* rather than
 Ruby *text*.
 
