@@ -1106,8 +1106,20 @@ struct Report<'a> {
     /// from `residue` because it is a weaker kind of evidence and saying so is
     /// the point.
     template_residue: &'a [Residue],
-    /// Occurrences the rule could not account for. Present and empty when the
-    /// rule is name-anchored and found none; absent means it made no claim.
+    /// Whether this rule set claims to have accounted for everything.
+    ///
+    /// Residue applies only where a rule moves a *definition* (D7): a rule about
+    /// a shape leaves nothing behind to be incomplete about. So an empty
+    /// `residue` means two opposite things, and a reader could not tell them
+    /// apart -- "I looked and found nothing left" versus "I never made that
+    /// claim". That is the principle about a count meaning *not run* reading
+    /// like a count meaning *clean*, in the plane an agent acts on.
+    ///
+    /// Stated rather than encoded in the absence of a key, because a missing
+    /// key reads as zero to every naive consumer.
+    claims_completeness: bool,
+    /// Occurrences the rule could not account for. Empty and meaningful only
+    /// when `claims_completeness` is true.
     residue: &'a [Residue],
     /// Template files not searched, since they embed Ruby rwr does not read.
     templates_skipped: usize,
@@ -1707,6 +1719,7 @@ fn cmd_apply(
                 rwr_version: env!("CARGO_PKG_VERSION"),
                 changed: &changed,
                 findings: &findings,
+                claims_completeness: engine.claims_completeness(),
                 residue: &left_over,
                 template_residue: &left_over_text,
                 // The templates that got *no* structural read, matching what

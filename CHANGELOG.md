@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**`-j` says whether the run claims completeness.** Residue applies only where a rule moves a
+definition, so an empty `residue` meant two opposite things — "I looked and found nothing left"
+and "this rule has nothing to be complete about" — and nothing distinguished them. That is a
+count meaning *not run* reading exactly like a count meaning *clean*, in the plane an agent acts
+on. `claims_completeness` is now stated outright rather than encoded in a missing key, since a
+missing key reads as zero to every naive consumer.
+
 **A rename rewrites `send` when the name is literal, and notices it when it is not.** Two halves
 of one shape. `account.send(:display_name)` is as provable as `account.display_name` once the
 receiver resolves — the same narrowing decides both — so reporting it was declining work rwr had

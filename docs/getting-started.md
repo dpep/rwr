@@ -88,6 +88,28 @@ finishing the rename.
 It prints unconditionally. The account of what rwr could not see is the product,
 not a diagnostic, so it is never behind a verbosity flag.
 
+Each entry carries a `context` saying what kind of occurrence it is, which is
+what to triage on:
+
+| context | what it is | does it break? |
+|---|---|---|
+| `call` | a call by that name whose receiver rwr could not resolve | maybe — it may be a different class's method |
+| `symbol` | a symbol handed to something that dispatches (`delegate`, `send`, a serializer) | usually |
+| `definition` | another definition of the name | depends — an override breaks, an unrelated class's method does not |
+| `string` | the name as a string literal | maybe — `send("x")` breaks, a SQL column or a message does not |
+| `comment` | the name in prose | no, but it is now stale |
+| `text` | found by text search in a template rwr cannot parse | weaker evidence than anything above |
+| `dynamic` | a dispatch on a *computed* name, in this class | unknowable — this is rwr saying it is blind here |
+
+rwr deliberately does not put a confidence number on these. Measured against the
+testbed's ground truth, `definition` splits evenly between breaking and not, and
+`string`, `text` and `dynamic` have too few samples to support a figure — a score
+derived from that would read like a measurement and be a guess.
+
+`-j` adds `claims_completeness`. An empty `residue` means two opposite things —
+"I looked and found nothing left" and "this rule has nothing to be complete
+about" — and that field is which.
+
 ## Apply the built-in rules
 
 ```sh

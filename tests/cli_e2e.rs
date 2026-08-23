@@ -841,7 +841,7 @@ fn structured_output_names_its_own_shape() {
         // One version across the CLI contract, not one per command: field
         // names are shared, so a consumer branches on a single number. 3 added
         // `rejections`; 4 added `unparsed`; 5 added the `dynamic` residue
-        // context.
+        // context and `claims_completeness`.
         assert_eq!(doc["schema"], 5, "{text}");
         assert_eq!(doc["rwr_version"], env!("CARGO_PKG_VERSION"), "{text}");
     }
@@ -2131,4 +2131,48 @@ fn send_is_rewritten_when_literal_and_noticed_when_not() {
         after.contains("unknown.send(:display_name)"),
         "an unresolved receiver keeps its bytes: {after}"
     );
+}
+
+/// An empty residue list means two opposite things, so the report says which.
+///
+/// Residue applies only where a rule moves a *definition* (D7) -- a rule about a
+/// shape has nothing to be incomplete about. Both cases emitted `residue: []`,
+/// so a consumer could not tell "I looked and found nothing left" from "I never
+/// made that claim": a count meaning *not run* reading exactly like a count
+/// meaning *clean*, in the plane an agent acts on.
+#[test]
+fn the_report_says_whether_it_claims_completeness() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(path.join("a.rb"), "def a\n  return nil\nend\n").expect("write");
+    std::fs::write(
+        path.join("b.rb"),
+        "class Account\n  def display_name\n    @n\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+
+    let report = |args: &[&str]| -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("binary runs");
+        serde_json::from_slice(&out.stdout).expect("json")
+    };
+
+    // A shape rule: nothing to be incomplete about, and it says so.
+    let shape = report(&["check", "style/return-nil", "a.rb", "-j"]);
+    assert_eq!(shape["claims_completeness"], false, "{shape}");
+    assert_eq!(shape["residue"].as_array().expect("residue").len(), 0);
+
+    // A rename that found nothing left over: the same empty list, opposite
+    // meaning.
+    let rename = report(&["check", "rename.yml", "b.rb", "-j"]);
+    assert_eq!(rename["claims_completeness"], true, "{rename}");
+    assert_eq!(rename["residue"].as_array().expect("residue").len(), 0);
 }
