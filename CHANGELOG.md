@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**A prefix operator is no longer treated as a method rename.** `!x` and `x.any?` both keep their
+name in Prism's `message_loc`, and the structural diff took any two differing names for a rename —
+so `!$X.empty?` → `$X.any?` wrote `any?` over the `!` and left the receiver's call standing:
+`any?xs`. Ruby parses that as `any?(xs)`, so `verify` passed it. The same mismatch the other way
+round (`$X.foo` → `foo($X)`) silently produced no edit at all while the run reported a rewritten
+site. Names now correspond only slot for slot; anything else unwraps or re-renders the span.
+
 **Inline review comments on a pull request, with an Apply button.**
 `script/pr-suggest.sh` turns `rwr check -j` into review comments — an applicable ` ```suggestion `
 block where a rule can fix what it found, a plain comment where it cannot (a finding, or an
