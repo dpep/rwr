@@ -95,6 +95,15 @@ pub(crate) struct Case {
     /// How many findings a rule proposing no edit should report.
     #[serde(default)]
     pub finds: Option<usize>,
+    /// How many occurrences the rule should be unable to account for.
+    ///
+    /// A rename's report is the product, not a diagnostic -- and a fixture could
+    /// pin what the rule *rewrote* while saying nothing about what it *reported*,
+    /// which is the half that decides whether the change is safe to ship. Only
+    /// meaningful for a rule set that moves a name; asserting it on one that
+    /// does not is refused, the same way `finds:` is on a rewriting set.
+    #[serde(default)]
+    pub residue: Option<usize>,
 }
 
 impl Case {
@@ -111,9 +120,15 @@ impl Case {
         if self.unchanged == Some(false) {
             return Err("`unchanged: false` asserts nothing -- say what the output is".into());
         }
-        if self.output.is_none() && self.unchanged.is_none() && self.finds.is_none() {
+        if self.output.is_none()
+            && self.unchanged.is_none()
+            && self.finds.is_none()
+            && self.residue.is_none()
+        {
             return Err(
-                "this case asserts nothing -- add `output:`, `unchanged: true` or `finds:`".into(),
+                "this case asserts nothing -- add `output:`, `unchanged: true`, `finds:` or \
+                 `residue:`"
+                    .into(),
             );
         }
         if self.finds.is_some() && !reports {

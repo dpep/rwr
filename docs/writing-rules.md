@@ -132,7 +132,30 @@ rwr test my-rules/        # exits 1 with a diff on a failure
 rwr test my-rules/ -j     # for CI
 ```
 
-A finding rule asserts `finds: N` instead of `output:`. A pack that declares no
+A finding rule asserts `finds: N` instead of `output:`.
+
+A rule that moves a *name* can assert `residue: N` — how many occurrences it
+should be unable to account for:
+
+```yaml
+tests:
+  - input: |
+      class Account
+        def display_name
+          @n
+        end
+
+        def go
+          other.send(:display_name)
+        end
+      end
+    residue: 1        # the symbol handed to `send` cannot be converted
+```
+
+That is the half of a rename that decides whether the change is safe to ship;
+without it a fixture pins only what the rule rewrote. `residue:` on a rule that
+moves no name is refused — it would pass at zero forever. A case may assert
+several things at once, and all of them are checked. A pack that declares no
 fixtures at all is an error, not a pass.
 
 Refused rather than run, because each would let a fixture pass without claiming

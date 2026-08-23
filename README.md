@@ -171,8 +171,7 @@ from the account is the dangerous direction.
 ## For agents, hooks and CI
 
 Everything that prints honors `-j`/`--json`, which emits one document —
-`{schema, rwr_version, changed, residue, findings, template_residue,
-templates_skipped}`. `-J`/`--ndjson` streams instead: `find` writes a row per
+`{schema, rwr_version, changed, findings, residue, template_residue, templates_skipped, unparsed, suppressed, stale_suppressions, malformed_directives}`. `-J`/`--ndjson` streams instead: `find` writes a row per
 match, and `check`/`rewrite` write the report on a single line.
 
 Scoping a run to the lines a change touched is what makes `check` adoptable on a

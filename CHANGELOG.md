@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**A fixture can assert what a rule *reports*, not only what it rewrites.** `residue: N` pins how
+many occurrences a rule should be unable to account for — the half of a rename that decides
+whether the change is safe to ship, and the half a fixture could previously say nothing about.
+Refused on a rule that moves no name, since it would pass at zero forever. A case may assert
+several things at once, and all of them are now checked: as an `else if` chain, a case carrying
+both `output:` and `residue:` checked only the first, so it looked like it asserted two things
+and asserted one.
+
 **`residue` is absent when the question does not apply.** Residue exists only where a rule moves
 a name (D7), so an empty list meant two opposite things — "I looked and found nothing left" and
 "this rule has no leftovers by construction" — and nothing distinguished them: a count meaning

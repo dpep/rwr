@@ -2180,3 +2180,59 @@ fn residue_is_absent_when_the_question_does_not_apply() {
         0
     );
 }
+
+/// A fixture can pin what a rule *reports*, not only what it rewrites.
+///
+/// A rename's residue report is the product; a fixture that pinned the rewrite
+/// and said nothing about the report covered the half that is easy to get right.
+///
+/// The evaluation checks every assertion a case makes rather than the first: as
+/// an `else if` chain, a case carrying `output:` and `residue:` checked only
+/// `output:`, so it looked like it asserted two things and asserted one.
+#[test]
+fn a_fixture_can_assert_what_was_left_unaccounted_for() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    let rule = "- id: t/def\n  \
+        match: |\n    def display_name(*$P)\n      $B\n    end\n  \
+        rewrite: |\n    def full_name(*$P)\n      $B\n    end\n  \
+        tests:\n\
+        \x20   - input: |\n        class Account\n          def display_name\n            @n\n          end\n\n          \
+        def go\n            other.send(:display_name)\n          end\n        end\n      residue: {}\n\
+        - id: t/calls\n  match: $R.display_name\n  rewrite: $R.full_name\n";
+
+    let run = |body: &str| {
+        std::fs::write(path.join("r.yml"), body).expect("write");
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["test", "r.yml"])
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    // One reach the rename cannot convert: the symbol handed to `send`.
+    assert_eq!(run(&rule.replace("{}", "1")).status.code(), Some(0));
+
+    // And the assertion actually bites.
+    let out = run(&rule.replace("{}", "3"));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("unaccounted"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // `residue:` on a rule set that moves no name would pass at zero forever.
+    std::fs::write(
+        path.join("shape.yml"),
+        "id: t/shape\nmatch: return nil\nrewrite: return\n\
+         tests:\n\x20 - input: \"def a\\n  return nil\\nend\\n\"\n\x20   residue: 0\n",
+    )
+    .expect("write");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["test", "shape.yml"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+}

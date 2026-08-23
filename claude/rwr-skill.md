@@ -35,9 +35,17 @@ Writing always requires typing `rewrite`, so the terse form can never surprise
 you. Trailing arguments are paths, rg-style.
 
 Always add `-j` (JSON) or `-J` (NDJSON) when you'll parse the output. `-j` is one
-document — `{schema, rwr_version, changed, residue, templates_skipped}` for
-`check`/`rewrite`, `{schema, rwr_version, matches}` for `find` — so the account
-of what a rule *missed* is machine-readable, not just printed. `-J` streams a
+document — `{schema, rwr_version, changed, findings, residue, template_residue,
+templates_skipped, unparsed, suppressed, stale_suppressions,
+malformed_directives}` for `check`/`rewrite`, `{schema, rwr_version, matches}`
+for `find` — so the account of what a rule *missed* is machine-readable, not just
+printed.
+
+**`residue` has three states.** Present with entries: these need a human. Present
+and empty: rwr moved a name and found nothing left over. **Absent**: the rule
+moves no name, so it has no leftovers by construction. Reading absent as empty
+gives "nothing to review", which is right; only ask the difference when you need
+to know whether a *rename* is complete. `-J` streams a
 row per line and carries no metadata.
 
 ## Finding
@@ -174,7 +182,11 @@ rwr test rule.yml       # exits 1 with a diff on a failure
 rwr test my-rules/ -j   # a directory, for CI
 ```
 
-A rule with no `rewrite:` asserts `finds: N` instead of `output:`. **Write a case
+A rule with no `rewrite:` asserts `finds: N` instead of `output:`. A rule that
+moves a *name* can also assert `residue: N` — how many occurrences it should be
+unable to account for. That is the half of a rename that decides whether the
+change is safe to ship, and without it a fixture pins only the easy half. A case
+may assert several of these at once; all of them are checked. **Write a case
 when you write a rule** — and write the expectation from what the rule is *for*,
 never by pasting what it currently produces, which records bugs as expectations.
 

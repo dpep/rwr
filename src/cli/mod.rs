@@ -1890,6 +1890,11 @@ fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
     }
 
     // The names before the set moves into the engine.
+    // `residue:` only means something for a rule set that moves a name (D7).
+    // Asserting it on one that does not would pass at zero forever, which is a
+    // fixture that looks like coverage and is not.
+    let wants_residue = cases.iter().any(|c| c.residue.is_some());
+
     let names: Vec<String> = rules
         .iter()
         .map(|r| r.id.clone().unwrap_or_else(|| "(unnamed)".to_string()))
@@ -1903,6 +1908,14 @@ fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
         }
     };
 
+    if wants_residue && !engine.claims_completeness() {
+        eprintln!(
+            "rwr: {rule_arg}: `residue:` needs a rule that moves a name; this set moves none, \
+             so it has no leftovers to count"
+        );
+        return Exit::PatternError.into();
+    }
+
     let mut results: Vec<CaseResult> = Vec::new();
     for (index, case) in cases.iter().enumerate() {
         let bytes = case.input.as_bytes();
@@ -1912,6 +1925,10 @@ fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
         let context = engine.context(&sources);
         let outcome = engine.scan("fixture.rb", bytes, &context, None, false);
 
+        let residue_count = match &outcome {
+            crate::engine::ScanOutcome::Scanned(s) => s.residue.len(),
+            _ => 0,
+        };
         let (kind, actual, findings) = match &outcome {
             crate::engine::ScanOutcome::Unparseable => ("invalid_ruby", None, 0),
             crate::engine::ScanOutcome::Refused(reason) => ("refused", Some(reason.clone()), 0),
@@ -1924,42 +1941,68 @@ fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
         };
         let text = actual.clone().unwrap_or_else(|| case.input.clone());
 
-        let (outcome_word, kind, expected, actual) = if kind == "invalid_ruby" {
-            ("fail", "invalid_ruby", None, None)
+        // Every assertion the case makes, not the first one it makes. As an
+        // `else if` chain, a case carrying both `output:` and `residue:` checked
+        // only `output:` -- a fixture that looks like it asserts two things and
+        // asserts one, which is the exact failure the load-time validation
+        // exists to prevent, reintroduced at evaluation time.
+        let mut failure: Option<(&'static str, Option<String>, Option<String>)> = None;
+        let mut passed_as = "no_match";
+
+        if kind == "invalid_ruby" {
+            failure = Some(("invalid_ruby", None, None));
         } else if kind == "refused" {
-            ("fail", "refused", None, actual)
-        } else if let Some(want) = &case.output {
-            if &text == want {
-                ("pass", "rewrote", None, None)
-            } else {
-                ("fail", "output_mismatch", Some(want.clone()), Some(text))
-            }
-        } else if case.unchanged == Some(true) {
-            if text == case.input {
-                ("pass", "unchanged", None, None)
-            } else {
-                (
-                    "fail",
-                    "unexpected_rewrite",
-                    Some(case.input.clone()),
-                    Some(text),
-                )
-            }
-        } else if let Some(want) = case.finds {
-            if findings == want {
-                ("pass", "reported", None, None)
-            } else {
-                (
-                    "fail",
-                    "wrong_finds",
-                    Some(want.to_string()),
-                    Some(findings.to_string()),
-                )
-            }
+            failure = Some(("refused", None, actual.clone()));
         } else {
-            // `rule::cases` refuses a case that asserts nothing, so this is
-            // unreachable rather than a silent pass.
-            ("fail", "asserts_nothing", None, None)
+            if let Some(want) = &case.output {
+                if &text == want {
+                    passed_as = "rewrote";
+                } else {
+                    failure = Some(("output_mismatch", Some(want.clone()), Some(text.clone())));
+                }
+            }
+            if failure.is_none() && case.unchanged == Some(true) {
+                if text == case.input {
+                    passed_as = "unchanged";
+                } else {
+                    failure = Some((
+                        "unexpected_rewrite",
+                        Some(case.input.clone()),
+                        Some(text.clone()),
+                    ));
+                }
+            }
+            if failure.is_none()
+                && let Some(want) = case.residue
+            {
+                if residue_count == want {
+                    passed_as = "accounted";
+                } else {
+                    failure = Some((
+                        "wrong_residue",
+                        Some(want.to_string()),
+                        Some(residue_count.to_string()),
+                    ));
+                }
+            }
+            if failure.is_none()
+                && let Some(want) = case.finds
+            {
+                if findings == want {
+                    passed_as = "reported";
+                } else {
+                    failure = Some((
+                        "wrong_finds",
+                        Some(want.to_string()),
+                        Some(findings.to_string()),
+                    ));
+                }
+            }
+        }
+
+        let (outcome_word, kind, expected, actual) = match failure {
+            Some((kind, expected, actual)) => ("fail", kind, expected, actual),
+            None => ("pass", passed_as, None, None),
         };
 
         results.push(CaseResult {
@@ -2030,6 +2073,7 @@ fn explain_kind(kind: &str) -> &'static str {
         "output_mismatch" => "the rewrite did not produce the expected source",
         "unexpected_rewrite" => "expected no change, but the rule rewrote it",
         "wrong_finds" => "wrong number of findings",
+        "wrong_residue" => "wrong number of occurrences left unaccounted for",
         _ => "asserts nothing",
     }
 }
