@@ -59,6 +59,28 @@ the terminal and in `-j`, which is where a refactor reads it.
 There is deliberately no summary comment. A preamble restating what is already
 visible inline is what makes a bot easy to mute.
 
+## Running it by hand
+
+The same script works against any pull request, from anywhere:
+
+```sh
+script/pr-suggest.sh 2                                   # this repo
+script/pr-suggest.sh https://github.com/dpep/rwr/pull/2  # any repo, by URL
+script/pr-suggest.sh dpep/rwr#2 performance app/         # rule and path, as `rwr check` takes them
+```
+
+Given a URL or `owner/repo#N` it fetches its own clone into a temp directory, so
+the repo need not be checked out. It does need the *source*: rwr matches
+structurally, so it wants a parse tree, and a diff hunk is not parseable Ruby.
+
+The clone is blobless rather than shallow — `--depth 1` has no merge base, so
+`--since` would have nothing to diff against.
+
+Run locally it posts as whoever `gh` is authenticated as; in Actions it is
+`github-actions[bot]`. And it posts one *review* containing every comment, so if
+a single comment falls outside the diff GitHub rejects the whole review — the
+script prints GitHub's error rather than failing silently.
+
 ## Applying instead of suggesting
 
 `rwr rewrite` writes to disk, so a job can push the fixes:

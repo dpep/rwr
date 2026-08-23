@@ -16,6 +16,11 @@ what is visible inline is what makes a bot easy to mute.
 The report carries what a suggestion needs: `end_line`, the rule's own `description`, and the
 `replacement` text for the lines a site occupies.
 
+**`script/pr-suggest.sh` runs against any pull request, from anywhere.** A URL or `owner/repo#N`
+makes it fetch its own blobless clone, so the repo need not be checked out. It still needs the
+source — rwr matches structurally, so it wants a parse tree and a diff hunk is not parseable
+Ruby — but it no longer needs *your* checkout.
+
 **`--sarif` is still there, for Code Scanning and other SARIF consumers**, but it is no longer the
 recommended path for pull-request review. See [docs/github-actions.md](docs/github-actions.md)
 for why.

@@ -12,19 +12,58 @@
 # where a refactor actually reads it. And a summary comment restating what is
 # already visible inline is what makes a bot easy to mute.
 #
-#   script/pr-suggest.sh <pr-number> [rule] [path]
+#   script/pr-suggest.sh <pr-number> [rule] [path]      # this repo
+#   script/pr-suggest.sh <pr-url>     [rule] [path]      # any repo
+#   script/pr-suggest.sh owner/repo#7 [rule] [path]      # any repo
 #
-# Needs `gh` authenticated, and to be run inside the repo.
+# Needs `gh` authenticated. Given a URL or `owner/repo#N` it fetches its own
+# blobless clone of that pull request, so you do not need the repo checked out
+# -- but it does need the *source*, because rwr parses whole files and cannot
+# work from a diff hunk.
 set -euo pipefail
 
-PR="${1:?usage: pr-suggest.sh <pr-number> [rule] [path]}"
+TARGET_PR="${1:?usage: pr-suggest.sh <pr-number|pr-url> [rule] [path]}"
 RULE="${2:-all}"
 TARGET="${3:-.}"
 RWR="${RWR:-rwr}"
 
-repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-head_sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
-base=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
+# A bare number means the repo you are standing in; a URL means any repo, and
+# this fetches its own copy.
+#
+# rwr parses whole files -- structural matching needs an AST, not a diff hunk --
+# so a checkout is not an implementation detail that could be avoided by asking
+# the API harder. What *is* avoidable is making you clone by hand.
+case "$TARGET_PR" in
+  *github.com*)
+    repo=$(printf '%s' "$TARGET_PR" | sed -E 's#.*github\.com/([^/]+/[^/]+)/pull/[0-9]+.*#\1#')
+    PR=$(printf '%s' "$TARGET_PR" | sed -E 's#.*/pull/([0-9]+).*#\1#')
+    ;;
+  */*\#*)
+    repo="${TARGET_PR%%\#*}"
+    PR="${TARGET_PR##*\#}"
+    ;;
+  *)
+    repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+    PR="$TARGET_PR"
+    ;;
+esac
+
+base=$(gh pr view "$PR" --repo "$repo" --json baseRefName --jq .baseRefName)
+head_sha=$(gh pr view "$PR" --repo "$repo" --json headRefOid --jq .headRefOid)
+
+work=""
+if [ "$repo" != "$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)" ]; then
+  # Blobless rather than shallow: `--since` needs the merge base, which a
+  # `--depth 1` clone does not have, and blobless still skips most of the
+  # download.
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT
+  echo "fetching $repo#$PR into $work" >&2
+  git clone --quiet --filter=blob:none "https://github.com/$repo.git" "$work"
+  git -C "$work" fetch --quiet origin "pull/$PR/head"
+  git -C "$work" checkout --quiet FETCH_HEAD
+  cd "$work"
+fi
 
 # `check` exits 1 when there is work to do, which is the whole point here.
 "$RWR" check "$RULE" "$TARGET" --since "origin/$base" -j > /tmp/rwr-report.json || true
