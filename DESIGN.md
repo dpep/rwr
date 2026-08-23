@@ -387,15 +387,17 @@ Recorded so the design doesn't foreclose it. Not a roadmap.
   already fast enough that a warm index buys nothing (see docs/internal/scaling.md). Reach for a real
   language server only when something needs to be *resident*, and say what that something is
   before building it.
-- **GitHub integration, and the cheap path to it.** A Marketplace app is the expensive
-  spelling: hosting, OAuth, permissions, a webhook endpoint, a release channel rwr does not
-  otherwise need. The same outcome -- findings as annotations on a pull request -- is reached
-  by emitting **SARIF** from `check` and letting `github/codeql-action/upload-sarif` ingest
-  it, which is a self-contained output mode in a tool that already has two (D17's `-j`/`-J`).
-  Requested by a user in the same breath as the app, and it is the half worth building first:
-  it is a day of work, it composes with every other SARIF consumer, and it makes the app
-  question empirical rather than speculative. Do not build the app until SARIF-in-Actions is
-  in real use and something concrete is still missing.
+- **GitHub integration.** Done, and not the way this section first predicted.
+  SARIF was recorded here as *the* cheap path to pull-request annotations; it
+  was cheap and it worked, and it is still the wrong channel for review. Every
+  upload is attributed to Advanced Security, which is not renameable and files a
+  `return nil` simplification as a security event; its annotations cannot carry
+  a suggestion; and the comments it leaves cannot be deleted. Inline review
+  comments through the ordinary reviews API do the job better --
+  `script/pr-suggest.sh`, with an applicable `suggestion` block where a rule
+  knows the fix. SARIF is kept for Code Scanning and other SARIF consumers,
+  which is a real audience and a different one. A Marketplace app remains
+  unjustified: nothing it would add has been asked for.
 - **`rwr import`** - convert an ast-grep rule to canonical rwr syntax. Compatibility as a
   one-time conversion rather than a permanent second spelling; see D32's rejected-alias note.
   Build only if Phase 0 shows real migration demand.

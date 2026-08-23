@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Turn `rwr check -j` into GitHub review comments carrying applicable suggestions.
+# Turn `rwr check -j` into inline pull-request review comments.
 #
 # Deliberately a script rather than a subcommand. Fetching a pull request and
-# posting review comments is network, auth, and GitHub-specific shapes; rwr is a
-# single static binary with no daemon and no state, and it should stay one. It
-# emits facts -- where a site is and what those lines become -- and this turns
-# them into something a reviewer can click.
+# posting comments is network, auth, and GitHub-specific shapes; rwr is a single
+# static binary with no daemon and no state, and it should stay one. It emits
+# facts -- where a site is and what those lines become -- and this turns them
+# into something a reviewer can act on.
+#
+# Inline only, and scoped to the diff. A review is about what *this* change
+# introduced; the full account of a rename lives in the terminal and in `-j`,
+# where a refactor actually reads it. And a summary comment restating what is
+# already visible inline is what makes a bot easy to mute.
 #
 #   script/pr-suggest.sh <pr-number> [rule] [path]
 #
@@ -19,66 +24,85 @@ RWR="${RWR:-rwr}"
 
 repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 head_sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
-
-# Only lines this pull request touched. A suggestion on a line the author did
-# not write is noise, and GitHub rejects a comment outside the diff anyway.
 base=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
 
-report=$("$RWR" check "$RULE" "$TARGET" --since "origin/$base" -j || true)
+# `check` exits 1 when there is work to do, which is the whole point here.
+"$RWR" check "$RULE" "$TARGET" --since "origin/$base" -j > /tmp/rwr-report.json || true
 
-echo "$report" | python3 -c '
-import json, os, subprocess, sys
+python3 - "$repo" "$PR" "$head_sha" <<'PY'
+import json, subprocess, sys
 
-report = json.load(sys.stdin)
 repo, pr, sha = sys.argv[1], sys.argv[2], sys.argv[3]
+report = json.load(open("/tmp/rwr-report.json"))
+DART = "\U0001f3af"
 
 comments = []
+
+
+def at(entry, body):
+    return {
+        "path": entry["file"].removeprefix("./"),
+        "line": entry["line"],
+        "side": "RIGHT",
+        "body": body,
+    }
+
+
+# A rule with a fix: an applicable suggestion, framed as what it is. None of
+# this is broken, and calling it a violation earns a reviewer's scepticism
+# rather than their attention.
 for changed in report.get("changed", []):
     for site in changed.get("at", []):
-        # Framed as a simplification, because that is what it is. None of this
-        # is broken, and calling it a violation earns the reviewer\'s
-        # scepticism rather than their attention.
-        body = "🎯 " + (site.get("note") or "This can be simplified.")
+        body = f"{DART} " + (site.get("note") or "This can be simplified.")
         rule = site.get("rule")
         if rule:
             body += f"\n\n<sub>`{rule}` · apply here, or run `rwr rewrite {rule}` locally</sub>"
         body += "\n\n```suggestion\n" + site["replacement"] + "\n```"
-        comment = {
-            "path": site["file"].removeprefix("./"),
-            "line": site["end_line"],
-            "side": "RIGHT",
-            "body": body,
-        }
+        comment = at(site, body)
         # A multi-line suggestion replaces a range, and GitHub wants both ends.
         if site["end_line"] > site["line"]:
             comment["start_line"] = site["line"]
             comment["start_side"] = "RIGHT"
         comments.append(comment)
 
+# A rule with no fix: a finding, or an occurrence a rename could not convert.
+# Nothing to suggest, so it is a plain comment saying what it is -- and these
+# are often the ones a reviewer most needs, which no suggestion block can carry.
+for f in report.get("findings", []):
+    body = f"{DART} " + (f.get("note") or "Worth a look.")
+    if f.get("rule"):
+        body += f"\n\n<sub>`{f['rule']}` · no automatic fix; this one needs a decision</sub>"
+    comments.append(at(f, body))
+
+for r in report.get("residue") or []:
+    body = (
+        f"{DART} A rename could not account for this "
+        f"(`{r.get('context', 'occurrence')}`), so it may still name the old method."
+    )
+    comments.append(at(r, body))
+
 if not comments:
     print("nothing to suggest")
-    sys.exit(0)
+    raise SystemExit(0)
 
 review = {
     "commit_id": sha,
     "event": "COMMENT",
-    "body": (
-        f"🎯 **rwr found {len(comments)} simplification(s).**\n\n"
-        "Each is applicable in place — nothing here is broken, so take them or "
-        "leave them. They are the kind of change that is easy to make now and "
-        "annoying to make later."
-    ),
+    # No summary body: the comments are the message.
+    "body": "",
     "comments": comments,
 }
 proc = subprocess.run(
     ["gh", "api", f"repos/{repo}/pulls/{pr}/reviews", "--method", "POST", "--input", "-"],
-    input=json.dumps(review), text=True, capture_output=True,
+    input=json.dumps(review),
+    text=True,
+    capture_output=True,
 )
 if proc.returncode != 0:
     # The commonest cause is a comment outside the diff, which GitHub rejects
     # for the whole review rather than per comment. Say so rather than failing
     # opaquely.
     sys.stderr.write(proc.stderr)
-    sys.exit(1)
-print(f"posted {len(comments)} suggestion(s)")
-' "$repo" "$PR" "$head_sha"
+    raise SystemExit(1)
+print(f"posted {len(comments)} comment(s)")
+PY

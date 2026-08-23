@@ -2,14 +2,23 @@
 
 ## Unreleased
 
-**Review suggestions with an Apply button, without Code Scanning.** `script/pr-suggest.sh` turns
-`rwr check -j` into pull-request review comments carrying ` ```suggestion ` blocks — posted
-through the ordinary reviews API, so no SARIF, no security alerts, and no `github-advanced-
-security` attribution (which is not renameable: every SARIF upload carries it). SARIF remains for
-anyone who wants Code Scanning, but it is no longer the default path.
+**Inline review comments on a pull request, with an Apply button.**
+`script/pr-suggest.sh` turns `rwr check -j` into review comments — an applicable ` ```suggestion `
+block where a rule can fix what it found, a plain comment where it cannot (a finding, or an
+occurrence a rename could not convert). Posted through the ordinary reviews API, so no Code
+Scanning, no security alerts, and no `github-advanced-security` attribution, which is not
+renameable and whose comments cannot be deleted.
+
+Inline only and scoped to the diff: a review is about what *this* change introduced, and the full
+account of a rename lives in the terminal and in `-j`. No summary comment — a preamble restating
+what is visible inline is what makes a bot easy to mute.
 
 The report carries what a suggestion needs: `end_line`, the rule's own `description`, and the
 `replacement` text for the lines a site occupies.
+
+**`--sarif` is still there, for Code Scanning and other SARIF consumers**, but it is no longer the
+recommended path for pull-request review. See [docs/github-actions.md](docs/github-actions.md)
+for why.
 
 **Findings are framed as simplifications, not violations.** A rewritable site now reads
 "🎯 An explicit `return nil` says nothing `return` does not." rather than "a rule would rewrite
