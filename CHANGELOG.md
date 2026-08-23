@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-08-22
 
 **A fixture can assert what a rule *reports*, not only what it rewrites.** `residue: N` pins how
 many occurrences a rule should be unable to account for — the half of a rename that decides
