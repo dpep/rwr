@@ -40,6 +40,17 @@ carries the same information as
 `SafeAutoCorrect: false`, in a config file nobody reads at the moment of the
 edit.
 
+**`unsafe:` names a runtime behaviour change, and nothing else.** Every reason
+in the pack finishes the sentence "your program will do this instead" — a nil
+where a zero was, a different method on a non-relation, `^` turning special. Not
+"the result is a little weaker", not "read it before you run it". The
+distinction matters because `--unsafe` is all-or-nothing: every rule marked for a
+softer reason taxes the person who wanted one specific rewrite, and a flag that
+holds back sixteen things for fifteen different reasons stops discriminating and
+becomes a reflex. `rspec/be-empty` was marked and then unmarked for exactly this
+— what it drops is assertion strength, which belongs in the rule's
+`description:`, where it rides along to `-j`, SARIF and the pull-request comment.
+
 Which rules are held back is not listed here, because that list changes every
 time one is added. The run says so itself, with a count and — under `-e` — the
 reason for each:

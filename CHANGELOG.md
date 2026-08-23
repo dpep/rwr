@@ -26,8 +26,11 @@ and collapses it to the guard clause.
 Matches through the chain, so `receive(:x).with(1).and_return(nil)` is covered; `and_return(nil, 1)`
 is a different node and is not.
 
-`rspec/be-empty` — `expect(x).to eq([])` / `eq({})` / `eq('')` → `be_empty`, **held back as
-unsafe**: `eq([])` also asserts the type, and `be_empty` asserts only that `empty?` is true.
+`rspec/be-empty` — `expect(x).to eq([])` / `eq({})` / `eq('')` → `be_empty`. What it drops is
+assertion strength, not runtime behaviour: `eq([])` pins the type as well as the emptiness, so a
+subject that regressed from `[]` to `{}` fails the original and passes the rewrite. That caveat
+lives in the rule's comment rather than in `unsafe:`, which is reserved for rewrites that change
+what the program *does*.
 
 `rspec` is the first family whose name is also a scope. A rule constrains the tree, never the
 path — point it at the specs: `rwr check rspec spec/`.
