@@ -313,6 +313,22 @@ Inside `{ ... }`, a comma, brace or bracket belongs to YAML — quote such a
 pattern or use indented keys. rwr refuses loudly rather than running a rule that
 silently matches nothing.
 
+## Reporting into a pull request
+
+```sh
+rwr check all --since "$GITHUB_BASE_REF" --sarif > rwr.sarif
+```
+
+SARIF 2.1.0, which `github/codeql-action/upload-sarif` turns into annotations.
+A rewritable site or a lint finding is `warning`; residue is `note`, because it
+is not a defect in the code but a thing rwr could not reach and a human must
+judge. Blind spots with no line — a file that would not parse — arrive as
+`toolExecutionNotifications` rather than results.
+
+The workflow needs `fetch-depth: 0` (a shallow clone has no base branch to diff
+against) and `continue-on-error: true` on the rwr step, since `check` exits 1
+when there is work to do and would otherwise kill the upload.
+
 ## Exit codes
 
 | Code | Means |

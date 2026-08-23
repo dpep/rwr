@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+**`--sarif` emits SARIF 2.1.0, which is the whole GitHub integration.**
+`github/codeql-action/upload-sarif` turns it into annotations on a pull request — a serializer
+rather than an app: no hosting, no OAuth, no webhook. See
+[docs/github-actions.md](docs/github-actions.md) for the workflow, including the three settings
+that decide whether it works (`fetch-depth: 0`, `--since "$GITHUB_BASE_REF"`, and
+`continue-on-error` so `check`'s exit 1 does not kill the upload step).
+
+Levels are a judgement, not a formality: a rewritable site or a lint finding is `warning`,
+residue is `note`. Residue is not a defect in your code — it is rwr saying what it could not
+reach — and grading it the same as "this can be auto-fixed" would train people to skim past
+both. Blind spots with no line to point at arrive as `toolExecutionNotifications` rather than
+results, since inventing a location would be inventing evidence.
+
+**`check -j` now says where each rewritable site is.** `changed` carried a per-file count and no
+line, which answers "how much" and not "where" — enough for a human reading a terminal, not
+enough for an annotation. Each entry now carries the line and column of every site.
+
 ## 0.6.0 — 2026-08-22
 
 **A fixture can assert what a rule *reports*, not only what it rewrites.** `residue: N` pins how

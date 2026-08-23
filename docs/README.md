@@ -8,6 +8,8 @@ your pattern is not a match.
   something.
 - **[Writing rules](writing-rules.md)** — the rule file, `where:` predicates,
   and the fixtures that pin what a rule does.
+- **[rwr in GitHub Actions](github-actions.md)** — SARIF, annotations on a pull
+  request, and the three settings that decide whether it works.
 - **[Suppressing findings](suppressing.md)** — the three ways to stop a finding
   failing a run, and which one you actually mean.
 - **[The shipped pack](../rules/README.md)** — what `check all` runs, and the

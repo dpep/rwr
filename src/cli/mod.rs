@@ -11,6 +11,8 @@ use crate::residue;
 use crate::rewrite;
 use crate::rule;
 use crate::source;
+mod sarif;
+
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -78,6 +80,8 @@ pub(crate) enum Output {
     Json,
     /// One compact object per line.
     Ndjson,
+    /// SARIF 2.1.0, for GitHub Code Scanning and other analysis consumers.
+    Sarif,
 }
 
 /// Flags shared by every subcommand.
@@ -93,6 +97,14 @@ pub(crate) struct Common {
     /// Emit results as newline-delimited JSON, one compact object per line.
     #[arg(short = 'J', long, global = true, conflicts_with = "json")]
     ndjson: bool,
+
+    /// Emit SARIF 2.1.0, which GitHub Code Scanning turns into pull-request
+    /// annotations.
+    ///
+    /// The whole GitHub integration, as a serializer rather than an app: pipe it
+    /// to a file and hand that to `github/codeql-action/upload-sarif`.
+    #[arg(long, global = true, conflicts_with_all = ["json", "ndjson"])]
+    sarif: bool,
 
     /// Restrict to files under this repo-relative directory (repeatable).
     #[arg(short = 'p', long, value_name = "DIR", global = true)]
@@ -276,9 +288,10 @@ impl Common {
     }
 
     pub(crate) fn output(&self) -> Output {
-        match (self.json, self.ndjson) {
-            (_, true) => Output::Ndjson,
-            (true, _) => Output::Json,
+        match (self.json, self.ndjson, self.sarif) {
+            (_, _, true) => Output::Sarif,
+            (_, true, _) => Output::Ndjson,
+            (true, _, _) => Output::Json,
             _ => Output::Text,
         }
     }
@@ -499,7 +512,9 @@ fn emit_document<T: Serialize>(out: Output, value: &T) -> Option<ExitCode> {
     let rendered = match out {
         Output::Json => serde_json::to_string_pretty(value),
         Output::Ndjson => serde_json::to_string(value),
-        Output::Text => return None,
+        // SARIF is built from the same data by its own writer, not by
+        // serialising rwr's report shape under a different name.
+        Output::Text | Output::Sarif => return None,
     };
     match rendered {
         Ok(text) => println!("{text}"),
@@ -520,6 +535,7 @@ fn emit_rows<T: Serialize>(out: Output, rows: &[T]) -> Option<ExitCode> {
                 return Some(Exit::Error.into());
             }
         },
+        Output::Sarif => return None,
         Output::Ndjson => {
             for row in rows {
                 match serde_json::to_string(row) {
@@ -1708,6 +1724,77 @@ fn cmd_apply(
             // evidence and does not belong in a paragraph about guesses.
             report_text_residue(&left_over_text, templates.len() - parsed_templates.len());
         }
+        Output::Sarif => {
+            // Levels are a judgement about what a reader should do, and getting
+            // them wrong is how a report trains people to ignore it. A rewritable
+            // site and a lint finding are actionable -- `warning`. Residue is
+            // *not a defect in the code*: it is rwr saying it could not account
+            // for something, which a human must judge, so `note`. Things with no
+            // line to point at are notifications rather than results, because
+            // inventing a location would be inventing evidence.
+            let mut entries: Vec<sarif::Entry> = Vec::new();
+            for r in outcomes.iter().flat_map(|o| &o.scanned.rewrites) {
+                entries.push(sarif::Entry {
+                    rule: r.rule.clone().unwrap_or_else(|| "rwr".into()),
+                    file: r.file.clone(),
+                    line: r.line,
+                    col: r.col,
+                    text: "a rule would rewrite this".to_string(),
+                    level: "warning",
+                });
+            }
+            for f in &findings {
+                entries.push(sarif::Entry {
+                    rule: if f.rule.is_empty() {
+                        "rwr".into()
+                    } else {
+                        f.rule.clone()
+                    },
+                    file: f.file.clone(),
+                    line: f.line,
+                    col: f.col,
+                    text: if f.note.is_empty() {
+                        "flagged".to_string()
+                    } else {
+                        f.note.clone()
+                    },
+                    level: "warning",
+                });
+            }
+            for r in left_over.iter().chain(left_over_text.iter()) {
+                entries.push(sarif::Entry {
+                    rule: r.rule.clone().unwrap_or_else(|| "rwr".into()),
+                    file: r.file.clone(),
+                    line: r.line,
+                    col: r.col,
+                    text: format!(
+                        "{:?}: this occurrence was not accounted for and needs review",
+                        r.context
+                    ),
+                    level: "note",
+                });
+            }
+
+            let mut notes = Vec::new();
+            for file in &unparsed {
+                notes.push(format!("{file} did not parse, so it was not read"));
+            }
+            let skipped = templates.len() - parsed_templates.len();
+            if skipped > 0 {
+                notes.push(format!(
+                    "{skipped} template(s) could not be parsed and were only text-searched"
+                ));
+            }
+
+            let doc = sarif::Sarif::new(entries, notes);
+            match serde_json::to_string_pretty(&doc) {
+                Ok(text) => println!("{text}"),
+                Err(e) => {
+                    eprintln!("rwr: {e}");
+                    return Exit::Error.into();
+                }
+            }
+        }
         _ => {
             // Residue is the product, not a diagnostic, so it cannot be text-only:
             // an agent runs `-j` and was getting the edits with no account of what
@@ -1802,6 +1889,7 @@ mod tests {
         let c = Common {
             json: true,
             ndjson: true,
+            sarif: false,
             path: vec![],
             include_vendored: false,
             diff: false,

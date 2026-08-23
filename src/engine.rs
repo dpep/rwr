@@ -44,6 +44,19 @@ pub(crate) struct Finding {
     pub(crate) text: String,
 }
 
+/// A site a rule would rewrite, with somewhere to point.
+///
+/// The per-file count answers "how much"; a CI annotation needs "where", and
+/// `changed` carried only the first.
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct Rewrite {
+    pub(crate) file: String,
+    pub(crate) line: usize,
+    pub(crate) col: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rule: Option<String>,
+}
+
 /// A site the pattern matched, then a constraint declined -- as reported.
 ///
 /// Field names follow the standing contract: `file`, `line`, `rule` mean what
@@ -223,6 +236,8 @@ pub(crate) struct Scanned {
     /// Edits per rule, positionally. Attribution is per source because that is
     /// where the work happened; totals aggregate from it.
     pub(crate) by_rule: Vec<usize>,
+    /// Where each rewritten site sits.
+    pub(crate) rewrites: Vec<Rewrite>,
     pub(crate) rewritten: Option<String>,
     pub(crate) residue: Vec<Residue>,
     /// Matches a wider edit covered. Non-zero means a rerun makes further
@@ -410,6 +425,7 @@ impl Engine {
         let mut by_rule = vec![0usize; self.rules.len()];
         let mut spread: Vec<String> = Vec::new();
         let mut flagged: Vec<Finding> = Vec::new();
+        let mut rewrites: Vec<Rewrite> = Vec::new();
         let mut rejections: Vec<Rejection> = Vec::new();
         let mut suppressed: Vec<crate::suppress::Suppressed> = Vec::new();
         // Keyed by document order, which survives the rewrites of a run where a
@@ -477,7 +493,8 @@ impl Engine {
                     }
                     let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
                     let p_node = p_parsed.node();
-                    let found: Result<Option<(String, usize, usize)>, String> =
+                    type Applied = (String, usize, usize, Vec<usize>);
+                    let found: Result<Option<Applied>, String> =
                         match matcher::pattern_root(&p_node) {
                             None => Ok(None),
                             Some(p_root) => {
@@ -615,9 +632,12 @@ impl Engine {
                                             let text = rewrite::apply(&current, &planned.edits);
                                             match rewrite::verify(&text) {
                                                 Err(r) => Err(format!("{r:?}")),
-                                                Ok(()) => {
-                                                    Ok(Some((text, planned.sites, planned.dropped)))
-                                                }
+                                                Ok(()) => Ok(Some((
+                                                    text,
+                                                    planned.sites,
+                                                    planned.dropped,
+                                                    planned.at.clone(),
+                                                ))),
                                             }
                                         }
                                     }
@@ -633,7 +653,16 @@ impl Engine {
                         // Nothing changed, so the parse still describes the
                         // source and the next rule can reuse it.
                         Ok(None) => {}
-                        Ok(Some((text, sites, dropped))) => {
+                        Ok(Some((text, sites, dropped, at))) => {
+                            for start in &at {
+                                let (line, col) = source::line_col(&current, *start);
+                                rewrites.push(Rewrite {
+                                    file: label.to_string(),
+                                    line,
+                                    col,
+                                    rule: rule.id.clone(),
+                                });
+                            }
                             applied = Some((text, sites, dropped, index));
                             break;
                         }
@@ -692,6 +721,7 @@ impl Engine {
         }
         ScanOutcome::Scanned(Box::new(Scanned {
             sites: total,
+            rewrites,
             rejections,
             suppressed,
             stale,

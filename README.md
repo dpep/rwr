@@ -239,6 +239,7 @@ already running inside it is friction with no purpose.
 ## Documentation
 
 - [docs/](docs/) — the guides:
+  [GitHub Actions](docs/github-actions.md),
   [getting started](docs/getting-started.md),
   [writing rules](docs/writing-rules.md),
   [suppressing findings](docs/suppressing.md)

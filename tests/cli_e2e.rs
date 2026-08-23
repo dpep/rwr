@@ -2236,3 +2236,79 @@ fn a_fixture_can_assert_what_was_left_unaccounted_for() {
         .expect("binary runs");
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
 }
+
+/// SARIF output, which is the whole GitHub integration.
+///
+/// `github/codeql-action/upload-sarif` turns this into pull-request
+/// annotations, so what matters is that every result points at a real line and
+/// that levels mean what a reader expects: a rewritable site is actionable
+/// (`warning`), residue is rwr saying it could not account for something and
+/// needs a human (`note`), and a blind spot with no line to point at is a
+/// notification rather than a result -- inventing a location would be inventing
+/// evidence.
+#[test]
+fn sarif_points_at_real_lines_and_grades_honestly() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("account.rb"),
+        "class Account\n  def display_name\n    @n\n  end\n\n  \
+         def greeting\n    \"Hello #{display_name}\"\n  end\nend\n\n\
+         other.send(:display_name)\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "rename.yml", ".", "--sarif"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("sarif is json");
+
+    assert_eq!(doc["version"], "2.1.0");
+    let run = &doc["runs"][0];
+    assert_eq!(run["tool"]["driver"]["name"], "rwr");
+
+    // Every rule a result names must be declared, or a consumer cannot resolve
+    // it.
+    let declared: Vec<&str> = run["tool"]["driver"]["rules"]
+        .as_array()
+        .expect("rules")
+        .iter()
+        .filter_map(|r| r["id"].as_str())
+        .collect();
+    let results = run["results"].as_array().expect("results");
+    assert!(!results.is_empty(), "{doc}");
+    for r in results {
+        let id = r["ruleId"].as_str().expect("ruleId");
+        assert!(declared.contains(&id), "{id} not declared: {doc}");
+
+        // The location must name a line that exists, with a path relative to the
+        // repository -- a leading `./` makes every annotation land nowhere.
+        let loc = &r["locations"][0]["physicalLocation"];
+        let uri = loc["artifactLocation"]["uri"].as_str().expect("uri");
+        assert!(
+            !uri.starts_with("./"),
+            "relative to the repo, not the cwd: {uri}"
+        );
+        let line = loc["region"]["startLine"].as_u64().expect("startLine") as usize;
+        let text = std::fs::read_to_string(path.join(uri)).expect("a real file");
+        assert!(line >= 1 && line <= text.lines().count(), "{uri}:{line}");
+    }
+
+    // Residue is not a defect in the code, and must not read as one.
+    let levels: Vec<&str> = results.iter().filter_map(|r| r["level"].as_str()).collect();
+    assert!(
+        levels.contains(&"warning"),
+        "a rewritable site is actionable"
+    );
+    assert!(
+        levels.contains(&"note"),
+        "the `send` reach is residue, which needs a human rather than a fix: {doc}"
+    );
+}

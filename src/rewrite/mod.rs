@@ -448,8 +448,22 @@ pub(crate) fn plan(
     let mut sites: Vec<usize> = kept.iter().map(|(i, _)| *i).collect();
     sites.sort_unstable();
     sites.dedup();
+    // Where each surviving site starts, so a caller can name a line. A
+    // shape-changing rewrite emits several edits for one site, so this is the
+    // earliest byte of each match's own edits rather than one per edit.
+    let mut at: Vec<usize> = sites
+        .iter()
+        .filter_map(|index| {
+            kept.iter()
+                .filter(|(i, _)| i == index)
+                .map(|(_, e)| e.start)
+                .min()
+        })
+        .collect();
+    at.sort_unstable();
     Ok(Planned {
         sites: sites.len(),
+        at,
         edits: kept.into_iter().map(|(_, e)| e).collect(),
         dropped,
     })
@@ -463,6 +477,9 @@ pub(crate) struct Planned {
     /// for one site, so reporting `edits.len()` overstates what a reader sees
     /// in the diff.
     pub sites: usize,
+    /// Where each of those sites starts, in bytes. A count tells a reader how
+    /// much there is; a location tells a CI annotation where to point.
+    pub at: Vec<usize>,
     /// Matches skipped because a wider edit covered them. Non-zero means a
     /// rerun will make further progress -- the retryable outcome (exit 4).
     pub dropped: usize,
