@@ -59,23 +59,17 @@ an install. The skill teaches an agent to drive rwr, so it must describe the
 binary that actually shipped — a skill a release forgets misinforms every agent
 that reads it, silently, for a whole cycle.
 
-**It ships through the private marketplace, which is not where `release` looks.**
-`rq` and `gqls` live in `code@dpep`; rwr sits in `rwr@myclaude` until it has real
-mileage. The release script defaults `PLUGINS_REPO` to `~/code/lib/claude` and
-derives the destination as `plugins/code/skills/<name>/SKILL.md`, so a release
-needs:
+**It ships through the private marketplace, which is not where `release` looks
+by default.** `rq` and `gqls` live in `code@dpep`; rwr sits in `rwr@myclaude`
+until it has real mileage. That is now handled by `.release.conf` at the repo
+root, which the script sources after computing its defaults — so `release
+<version>` needs no incantation.
 
-```sh
-PLUGINS_REPO=~/code/lib/myclaude \
-SKILL_DST=~/code/lib/myclaude/plugins/rwr/skills/rwr/SKILL.md \
-release <version>
-```
-
-`PLUGIN_MANIFEST` is *not* overridable — it is derived as
-`$PLUGINS_REPO/plugins/code/...`, which does not exist in myclaude — so the
-plugin's own version bump is manual until the skill moves. Bump it: `claude
-plugin update` compares versions rather than content, so a skill change that
-does not move the version reaches nobody.
+Earlier this said `PLUGIN_MANIFEST` was not overridable and the plugin bump had
+to be manual. It is overridable, and `.release.conf` is the documented place for
+exactly this. The version bump still matters for its own reason: `claude plugin
+update` compares versions rather than content, so a skill change that does not
+move the version reaches nobody.
 
 ## Docs: public vs internal
 
