@@ -106,9 +106,12 @@ testbed's ground truth, `definition` splits evenly between breaking and not, and
 `string`, `text` and `dynamic` have too few samples to support a figure — a score
 derived from that would read like a measurement and be a guess.
 
-`-j` adds `claims_completeness`. An empty `residue` means two opposite things —
-"I looked and found nothing left" and "this rule has nothing to be complete
-about" — and that field is which.
+In `-j`, `residue` has three states rather than two. Present with entries:
+these need a human. Present and empty: rwr moved a name and found nothing left
+over. **Absent**: this rule moves no name, so there is nothing it could be
+incomplete about — a `return nil` → `return` rule has no leftovers by
+construction. Reading absent as empty gives "nothing to review", which is right;
+only a consumer asking whether a *rename* is complete needs the difference.
 
 ## Apply the built-in rules
 

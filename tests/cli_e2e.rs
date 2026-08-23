@@ -841,7 +841,7 @@ fn structured_output_names_its_own_shape() {
         // One version across the CLI contract, not one per command: field
         // names are shared, so a consumer branches on a single number. 3 added
         // `rejections`; 4 added `unparsed`; 5 added the `dynamic` residue
-        // context and `claims_completeness`.
+        // context and made `residue` absent when no name moved.
         assert_eq!(doc["schema"], 5, "{text}");
         assert_eq!(doc["rwr_version"], env!("CARGO_PKG_VERSION"), "{text}");
     }
@@ -2133,7 +2133,7 @@ fn send_is_rewritten_when_literal_and_noticed_when_not() {
     );
 }
 
-/// An empty residue list means two opposite things, so the report says which.
+/// An empty residue list would mean two opposite things, so absence says which.
 ///
 /// Residue applies only where a rule moves a *definition* (D7) -- a rule about a
 /// shape has nothing to be incomplete about. Both cases emitted `residue: []`,
@@ -2141,7 +2141,7 @@ fn send_is_rewritten_when_literal_and_noticed_when_not() {
 /// made that claim": a count meaning *not run* reading exactly like a count
 /// meaning *clean*, in the plane an agent acts on.
 #[test]
-fn the_report_says_whether_it_claims_completeness() {
+fn residue_is_absent_when_the_question_does_not_apply() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path();
     std::fs::write(path.join("a.rb"), "def a\n  return nil\nend\n").expect("write");
@@ -2165,14 +2165,18 @@ fn the_report_says_whether_it_claims_completeness() {
         serde_json::from_slice(&out.stdout).expect("json")
     };
 
-    // A shape rule: nothing to be incomplete about, and it says so.
+    // A shape rule moves no name, so the question does not apply: absent.
     let shape = report(&["check", "style/return-nil", "a.rb", "-j"]);
-    assert_eq!(shape["claims_completeness"], false, "{shape}");
-    assert_eq!(shape["residue"].as_array().expect("residue").len(), 0);
+    assert!(shape.get("residue").is_none(), "{shape}");
 
-    // A rename that found nothing left over: the same empty list, opposite
-    // meaning.
+    // A rename that found nothing left over: present and empty, which is the
+    // opposite meaning and now looks different.
     let rename = report(&["check", "rename.yml", "b.rb", "-j"]);
-    assert_eq!(rename["claims_completeness"], true, "{rename}");
-    assert_eq!(rename["residue"].as_array().expect("residue").len(), 0);
+    assert_eq!(
+        rename["residue"]
+            .as_array()
+            .expect("present when a name moved")
+            .len(),
+        0
+    );
 }

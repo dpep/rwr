@@ -2,12 +2,12 @@
 
 ## Unreleased
 
-**`-j` says whether the run claims completeness.** Residue applies only where a rule moves a
-definition, so an empty `residue` meant two opposite things — "I looked and found nothing left"
-and "this rule has nothing to be complete about" — and nothing distinguished them. That is a
-count meaning *not run* reading exactly like a count meaning *clean*, in the plane an agent acts
-on. `claims_completeness` is now stated outright rather than encoded in a missing key, since a
-missing key reads as zero to every naive consumer.
+**`residue` is absent when the question does not apply.** Residue exists only where a rule moves
+a name (D7), so an empty list meant two opposite things — "I looked and found nothing left" and
+"this rule has no leftovers by construction" — and nothing distinguished them: a count meaning
+*not run* reading exactly like a count meaning *clean*. It now has three states, present-with-
+entries, present-and-empty, and absent. Reading absent as empty gives "nothing to review", which
+is correct; only a consumer asking whether a *rename* is complete needs the difference.
 
 **A rename rewrites `send` when the name is literal, and notices it when it is not.** Two halves
 of one shape. `account.send(:display_name)` is as provable as `account.display_name` once the

@@ -1106,21 +1106,19 @@ struct Report<'a> {
     /// from `residue` because it is a weaker kind of evidence and saying so is
     /// the point.
     template_residue: &'a [Residue],
-    /// Whether this rule set claims to have accounted for everything.
+    /// Occurrences the rule could not account for.
     ///
-    /// Residue applies only where a rule moves a *definition* (D7): a rule about
-    /// a shape leaves nothing behind to be incomplete about. So an empty
-    /// `residue` means two opposite things, and a reader could not tell them
-    /// apart -- "I looked and found nothing left" versus "I never made that
-    /// claim". That is the principle about a count meaning *not run* reading
-    /// like a count meaning *clean*, in the plane an agent acts on.
+    /// Three states, because an empty list would otherwise mean two opposite
+    /// things. Present with entries: these need a human. Present and empty:
+    /// rwr moved a name and found nothing left over. **Absent**: this rule set
+    /// moves no name (D7), so there is nothing it could be incomplete about --
+    /// the question does not apply rather than being answered.
     ///
-    /// Stated rather than encoded in the absence of a key, because a missing
-    /// key reads as zero to every naive consumer.
-    claims_completeness: bool,
-    /// Occurrences the rule could not account for. Empty and meaningful only
-    /// when `claims_completeness` is true.
-    residue: &'a [Residue],
+    /// A consumer that reads absent as empty concludes "nothing to review",
+    /// which is right; only one asking whether a *rename* is complete needs the
+    /// difference, and that one checks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    residue: Option<&'a [Residue]>,
     /// Template files not searched, since they embed Ruby rwr does not read.
     templates_skipped: usize,
     /// Why candidates were declined. Present only under `-e` -- absent means
@@ -1719,8 +1717,7 @@ fn cmd_apply(
                 rwr_version: env!("CARGO_PKG_VERSION"),
                 changed: &changed,
                 findings: &findings,
-                claims_completeness: engine.claims_completeness(),
-                residue: &left_over,
+                residue: engine.claims_completeness().then_some(left_over.as_slice()),
                 template_residue: &left_over_text,
                 // The templates that got *no* structural read, matching what
                 // the text report says. Counting every template here claimed a
