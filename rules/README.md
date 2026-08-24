@@ -40,24 +40,55 @@ carries the same information as
 `SafeAutoCorrect: false`, in a config file nobody reads at the moment of the
 edit.
 
-**`unsafe:` names a runtime behaviour change, and nothing else.** Every reason
-in the pack finishes the sentence "your program will do this instead" — a nil
-where a zero was, a different method on a non-relation, `^` turning special. Not
-"the result is a little weaker", not "read it before you run it". The
-distinction matters because `--unsafe` is all-or-nothing: every rule marked for a
-softer reason taxes the person who wanted one specific rewrite, and a flag that
-holds back sixteen things for fifteen different reasons stops discriminating and
-becomes a reflex. `rspec/be-empty` was marked and then unmarked for exactly this
-— what it drops is assertion strength, which belongs in the rule's
-`description:`, where it rides along to `-j`, SARIF and the pull-request comment.
+**`unsafe:` names a runtime behaviour change, and nothing else.** Every reason in
+the pack finishes the sentence "your program will do this instead" — a nil where
+a zero was, a different method on a non-relation, `^` turning special. Not "the
+result is a little weaker", not "read it before you run it". `rspec/be-empty`
+ships plain for this reason: `eq([])` pins the type where `be_empty` does not, so
+the assertion gets weaker, but no input makes Ruby behave differently. That
+caveat lives in the rule's `description:`, which rides along to `-j`, SARIF and
+the pull-request comment.
 
-Which rules are held back is not listed here, because that list changes every
-time one is added. The run says so itself, with a count and — under `-e` — the
-reason for each:
+The distinction is load-bearing because `--unsafe` is all-or-nothing. Every rule
+marked for a softer reason taxes the person who wanted one specific rewrite, and
+a flag holding back a dozen rules for two different kinds of reason stops
+discriminating and becomes a reflex.
 
-```
-rwr: N rule(s) held back as unsafe; --unsafe to include them, -e for why
-```
+## Safe by design
+
+`rwr rewrite all app/` should be something you can run unattended. Not "run it
+and review carefully" — *unattended*, on a codebase you have not read, the way
+you would run a formatter. That is the design constraint the pack is built to,
+and it decides what goes in it.
+
+Safety comes from a rule not being in the default set, never from a warning
+attached to one. A warning is a request for vigilance, and vigilance does not
+scale to ten thousand call sites; that is the house principle "make unsafe
+operations unrepresentable", applied to the pack rather than to the API. So the
+question for a candidate is not "is this usually right" — most rewrites are
+usually right — but:
+
+**Is there an input for which the rewrite makes Ruby do something else?** Write
+it down and run it. If there is none, the rule ships plain, and running it needs
+no judgement from anyone. `style/return-nil`, `style/inverse-any`,
+`rspec/redundant-stub-return`.
+
+**If there is, does the rewrite buy something measured?** A performance win can
+carry a caveat, because the caveat is checkable and the gain is real: `sum` has a
+fast path for numerics, `exists?` stops a query returning rows nobody counts.
+That is what `unsafe:` is for, and `--unsafe` is a seam rather than a setting —
+the intended exit is to narrow the rule with a `type:` receiver until it is safe,
+not to keep passing the flag.
+
+**A preference about how code reads buys nothing measured**, so it cannot carry a
+caveat. There is no amount of tidier that pays for a `NoMethodError`, and a style
+rewrite that can change behaviour has no version of itself that belongs in a pack
+other people run over code they have not read.
+
+The pack is therefore smaller than the set of rewrites that are usually right,
+deliberately. Usually-right is what your own rules directory is for, where you
+know the receivers and you are choosing to run it — a directory *is* a pack, so
+a hand-rolled rule is a first-class one.
 
 ## The ActiveRecord rules
 
@@ -101,26 +132,6 @@ meant, and it is faster.
 `redundant-stub-return` matches through the chain rather than at a fixed
 position, so `receive(:x).with(1).and_return(nil)` is covered and
 `and_return(nil, 1)` — a *queue* of return values, a different node — is not.
-
-## The `!` rules
-
-`style/inverse-any` is safe and `style/not-empty` is not, which is easier to see
-in Ruby than in prose:
-
-```ruby
-![nil, false].any? { |x| x }   # => true
-[nil, false].none? { |x| x }   # => true   -- a real inverse
-
-![nil, false].empty?           # => true
-[nil, false].any?              # => false  -- not one
-"abc".empty?                   # => false
-"abc".any?                     # => NoMethodError
-```
-
-With a block, `any?` and `none?` disagree about the *predicate*, so no element
-value can split them. Without one, `any?` asks about truthiness while `empty?`
-asks about presence, and `empty?` is common on strings, where `any?` does not
-exist. Hence one ships plain and the other ships held back.
 
 ## Writing a constraint: block or flow
 

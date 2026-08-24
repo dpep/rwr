@@ -9,18 +9,11 @@ so `!$X.empty?` → `$X.any?` wrote `any?` over the `!` and left the receiver's 
 round (`$X.foo` → `foo($X)`) silently produced no edit at all while the run reported a rewritten
 site. Names now correspond only slot for slot; anything else unwraps or re-renders the span.
 
-**Six new rules, and a third family.**
+**Four new rules, and a third family.** All four ship plain — none is held back, because a rule
+that needs a flag before it is safe to run unattended is one the pack should not carry.
 
 `style/inverse-any` — `!x.any? { }` → `x.none? { }`, and the `&:sym` block-pass spelling. A true
 inverse: both ask about the predicate, so no element value splits them.
-
-`style/not-empty` — `!x.empty?` → `x.any?`, **held back as unsafe**. Without a block `any?` tests
-truthiness rather than presence (`![nil].empty?` is true, `[nil].any?` is false), and `empty?` is
-common on strings, where `any?` does not exist.
-
-`style/return-unless-nil` — `return if x.nil?` → `return unless x`, **held back as unsafe**: a
-nilable boolean breaks it, since `false` is not nil but is falsey. Reaches the block spelling too
-and collapses it to the guard clause.
 
 `rspec/redundant-stub-return` — drops `.and_return(nil)` from a stub, which returns nil already.
 Matches through the chain, so `receive(:x).with(1).and_return(nil)` is covered; `and_return(nil, 1)`
@@ -29,11 +22,18 @@ is a different node and is not.
 `rspec/be-empty` — `expect(x).to eq([])` / `eq({})` / `eq('')` → `be_empty`. What it drops is
 assertion strength, not runtime behaviour: `eq([])` pins the type as well as the emptiness, so a
 subject that regressed from `[]` to `{}` fails the original and passes the rewrite. That caveat
-lives in the rule's comment rather than in `unsafe:`, which is reserved for rewrites that change
-what the program *does*.
+lives in each rule's `description:` — which reaches `-j`, SARIF and the pull-request comment —
+rather than in `unsafe:`, which is reserved for rewrites that change what the program *does*.
 
 `rspec` is the first family whose name is also a scope. A rule constrains the tree, never the
 path — point it at the specs: `rwr check rspec spec/`.
+
+**`rules/README.md` now states what the pack is designed to guarantee**: `rwr rewrite all app/`
+is meant to be run unattended, on code you have not read. Safety comes from a rule not being in
+the default set, never from a warning attached to one — a warning asks for vigilance, and
+vigilance does not scale to ten thousand call sites. A rewrite that buys a measured win can carry
+a caveat; a rewrite that buys only a reading preference cannot, because there is no amount of
+tidier that pays for a `NoMethodError`.
 
 **Inline review comments on a pull request, with an Apply button.**
 `script/pr-suggest.sh` turns `rwr check -j` into review comments — an applicable ` ```suggestion `
