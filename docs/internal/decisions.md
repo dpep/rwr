@@ -2127,9 +2127,14 @@ the rewrite through. Skipped: an empty template (a deletion has no shape), a tem
 sequence transform (`*$ITEMS.sort` is an instruction, not output), a template that is not a single
 expression, and any site whose node cannot be located again in the rewritten tree.
 
-**Shape, not bindings.** Metavariables match freely, so this catches a mangled shape and not a
-correct shape wrapped around the wrong capture. The second is a narrower bug and needs the match
-environment threaded through; this is the cheap half and it is the half that failed in practice.
+**Shape first, then bindings.** The shape check alone catches a mangled result and misses a correct
+shape wrapped around the wrong code: `foo($A, $B)` emitted with its arguments swapped matches its
+own template perfectly. Since a capture is spliced verbatim, a metavariable the template carries
+over from the pattern must hold byte-identical text afterwards, and `plan` already holds each
+match's environment -- so the second half cost recording what the captures were, not new machinery.
+
+A capture the template drops is not compared, because there is nothing to compare it against, and
+one that cannot be rendered contiguously -- a heredoc -- is absent rather than compared wrongly.
 
 **Both checks are in memory, before the write.** `apply` -> `verify` -> `verify_template` all run
 on a `String`, and `cli` writes only once the outcome comes back clean. There has never been a

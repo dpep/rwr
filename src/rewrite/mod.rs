@@ -54,6 +54,13 @@ pub(crate) enum Refusal {
     /// The splice produced valid Ruby that means something other than the rule
     /// asked for, which [`verify`] cannot see.
     TemplateMismatch { text: String, template: String },
+    /// A metavariable holds different source text after the rewrite than it did
+    /// before. The shape is right and the wrong bytes are inside it.
+    CaptureMoved {
+        capture: String,
+        was: String,
+        now: String,
+    },
     /// A capture being spliced contains a heredoc, whose content is
     /// *discontiguous*: the `<<~FOO` token sits inline while the body lives
     /// after the enclosing line. Splicing it by range would drag along text
@@ -101,6 +108,11 @@ impl std::fmt::Display for Refusal {
                 f,
                 "the rewrite produced `{text}`, which is not what `{template}` describes -- valid \
                  Ruby, and not the transformation the rule asked for"
+            ),
+            Refusal::CaptureMoved { capture, was, now } => write!(
+                f,
+                "the rewrite moved ${capture}: it captured `{was}` before and `{now}` after, so \
+                 the result has the right shape around the wrong code"
             ),
             Refusal::DiscontiguousCapture { at } => write!(
                 f,
@@ -545,17 +557,22 @@ pub(crate) fn plan(
         })
         .collect();
     at.sort_by_key(|s| s.start);
-    let mut matched: Vec<(usize, usize)> = sites
+    let mut paired: Vec<SiteCaptures> = sites
         .iter()
-        .filter_map(|index| matches.get(*index).map(|m| effective_range(&m.node)))
+        .filter_map(|index| {
+            let m = matches.get(*index)?;
+            Some((effective_range(&m.node), captured_texts(&m.env, source)))
+        })
         .collect();
-    matched.sort_unstable();
+    paired.sort_by_key(|(span, _)| *span);
+    let (matched, captures): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
     Ok(Planned {
         sites: sites.len(),
         at,
         edits: kept.into_iter().map(|(_, e)| e).collect(),
         dropped,
         matched,
+        captures,
     })
 }
 
@@ -587,6 +604,10 @@ pub(crate) struct Planned {
     /// Kept so the result can be checked against the template it came from:
     /// shifted by the edits, this is where the rewritten node lands.
     pub matched: Vec<(usize, usize)>,
+    /// What each site's metavariables captured, as source text, aligned with
+    /// `matched`. Compared against what they capture in the *result*, which is
+    /// how a correct shape wrapped around the wrong capture is caught.
+    pub captures: Vec<Vec<(String, String)>>,
 }
 
 /// Apply edits to source. Edits must be disjoint and sorted, as [`plan`] leaves
@@ -620,6 +641,25 @@ pub(crate) fn verify(rewritten: &str) -> Result<(), Refusal> {
     }
 }
 
+/// One site's matched span paired with what its metavariables captured.
+type SiteCaptures = ((usize, usize), Vec<(String, String)>);
+
+/// What each metavariable captured, as source text.
+///
+/// A capture rwr cannot render contiguously -- a heredoc -- yields nothing and
+/// is simply absent, so it is never compared rather than compared wrongly.
+fn captured_texts(env: &Env<'_>, source: &[u8]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = env
+        .iter()
+        .filter_map(|(name, bound)| {
+            let text = captured_text(bound, source).ok()??;
+            Some((name.clone(), String::from_utf8_lossy(text).into_owned()))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// Check that each rewritten site is now what the template said it would be.
 ///
 /// [`verify`] reparses and catches a splice that produces invalid Ruby. It
@@ -643,6 +683,7 @@ pub(crate) fn verify(rewritten: &str) -> Result<(), Refusal> {
 pub(crate) fn verify_template(
     rewritten: &str,
     matched: &[(usize, usize)],
+    captures: &[Vec<(String, String)>],
     edits: &[Edit],
     template: &str,
     constants: &[String],
@@ -665,20 +706,55 @@ pub(crate) fn verify_template(
 
     let parsed = ruby_prism::parse(rewritten.as_bytes());
     let tree = parsed.node();
-    for (start, end) in matched {
+    for (index, (start, end)) in matched.iter().enumerate() {
         let (from, to) = (shifted(edits, *start), shifted(edits, *end));
         let Some(node) = node_at(&tree, from, to) else {
             continue;
         };
-        if matcher::search(&root, &node, &prepared, &matcher::Criteria::none()).is_empty() {
+        let found = matcher::search(&root, &node, &prepared, &matcher::Criteria::none());
+        let text = || {
+            rewritten
+                .get(from..to)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        // The match rooted at the node itself, not one nested inside it: a
+        // template that also matches a sub-expression would otherwise be checked
+        // against the wrong thing.
+        let Some(whole) = found
+            .iter()
+            .find(|m| effective_range(&m.node) == (from, to))
+        else {
             return Err(Refusal::TemplateMismatch {
-                text: rewritten
-                    .get(from..to)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string(),
+                text: text(),
                 template: template.trim().to_string(),
             });
+        };
+
+        // Shape agrees. Now the captures: a metavariable the template carries
+        // over from the pattern must hold the same source text afterwards,
+        // because a capture is spliced verbatim. This is what catches the right
+        // shape wrapped around the wrong bytes -- `foo($A, $B)` emitted with the
+        // arguments swapped matches its own template perfectly.
+        let after = captured_texts(&whole.env, rewritten.as_bytes());
+        let Some(before) = captures.get(index) else {
+            continue;
+        };
+        for (name, was) in before {
+            let Some((_, now)) = after.iter().find(|(n, _)| n == name) else {
+                // Dropped by the template, or not renderable on one side. Either
+                // way there is nothing to compare, and inventing a comparison is
+                // how a checker starts refusing correct work.
+                continue;
+            };
+            if now != was {
+                return Err(Refusal::CaptureMoved {
+                    capture: name.clone(),
+                    was: was.clone(),
+                    now: now.clone(),
+                });
+            }
         }
     }
     Ok(())
@@ -1103,7 +1179,7 @@ mod tests {
         assert!(verify(&rewritten).is_ok());
 
         let matched = [(4usize, 14usize)];
-        let out = verify_template(&rewritten, &matched, &edits, "$X.any?", &[]);
+        let out = verify_template(&rewritten, &matched, &[], &edits, "$X.any?", &[]);
         assert!(
             matches!(out, Err(Refusal::TemplateMismatch { .. })),
             "{out:?}"
@@ -1117,7 +1193,63 @@ mod tests {
         }];
         let fixed = apply(b"a = !xs.empty?\n", &good);
         assert_eq!(fixed, "a = xs.any?\n");
-        assert!(verify_template(&fixed, &matched, &good, "$X.any?", &[]).is_ok());
+        assert!(verify_template(&fixed, &matched, &[], &good, "$X.any?", &[]).is_ok());
+    }
+
+    /// The half shape-checking cannot see: the right shape around the wrong
+    /// bytes. A splice that swaps two captures produces something that matches
+    /// its own template perfectly, so only the captures themselves say so.
+    #[test]
+    fn a_capture_holding_different_code_is_caught() {
+        let source = b"foo(a, b)\n";
+        // `a` and `b` exchanged -- same shape, same length, different program.
+        let swapped = [
+            Edit {
+                start: 4,
+                end: 5,
+                text: "b".into(),
+            },
+            Edit {
+                start: 7,
+                end: 8,
+                text: "a".into(),
+            },
+        ];
+        let rewritten = apply(source, &swapped);
+        assert_eq!(rewritten, "foo(b, a)\n");
+        // Parses, and matches its own template: both earlier checks pass.
+        assert!(verify(&rewritten).is_ok());
+
+        let matched = [(0usize, 9usize)];
+        let before = vec![vec![
+            ("A".to_string(), "a".to_string()),
+            ("B".to_string(), "b".to_string()),
+        ]];
+        let out = verify_template(&rewritten, &matched, &before, &swapped, "foo($A, $B)", &[]);
+        match out {
+            Err(Refusal::CaptureMoved {
+                ref capture,
+                ref was,
+                ref now,
+            }) => {
+                assert_eq!(
+                    (capture.as_str(), was.as_str(), now.as_str()),
+                    ("A", "a", "b")
+                );
+            }
+            other => panic!("expected CaptureMoved, got {other:?}"),
+        }
+
+        // The same captures left where they were pass, so this is not simply
+        // refusing anything that moved bytes.
+        let renamed = [Edit {
+            start: 0,
+            end: 3,
+            text: "bar".into(),
+        }];
+        let ok = apply(source, &renamed);
+        assert_eq!(ok, "bar(a, b)\n");
+        assert!(verify_template(&ok, &matched, &before, &renamed, "bar($A, $B)", &[]).is_ok());
     }
 
     /// Skipping is never failing. A template it cannot reason about must let the
@@ -1132,11 +1264,11 @@ mod tests {
         }];
         let text = "x = [1]\n";
         // A deletion has no shape to check.
-        assert!(verify_template(text, &[(0, 7)], &edits, "", &[]).is_ok());
+        assert!(verify_template(text, &[(0, 7)], &[], &edits, "", &[]).is_ok());
         // A sequence transform is an instruction, not output.
-        assert!(verify_template(text, &[(0, 7)], &edits, "$C = [*$I.sort]", &[]).is_ok());
+        assert!(verify_template(text, &[(0, 7)], &[], &edits, "$C = [*$I.sort]", &[]).is_ok());
         // A span that no longer names a node is not evidence of anything.
-        assert!(verify_template(text, &[(3, 4)], &edits, "$X.any?", &[]).is_ok());
+        assert!(verify_template(text, &[(3, 4)], &[], &edits, "$X.any?", &[]).is_ok());
     }
 
     #[test]

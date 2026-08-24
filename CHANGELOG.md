@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+**Bindings are verified too, not just shape.** A splice can produce the right shape around the
+wrong code — `foo($A, $B)` emitted with its arguments swapped matches its own template perfectly —
+and shape-checking alone cannot see it. A capture is spliced verbatim, so a metavariable the
+template carries over from the pattern must hold byte-identical text afterwards. It doesn't, the
+run refuses:
+
+```
+rwr: refused app.rb: the rewrite moved $A: it captured `a` before and `b` after,
+so the result has the right shape around the wrong code
+```
+
+Same conservatism as the shape check: a capture the template drops, or one that cannot be rendered
+contiguously (a heredoc), is not compared rather than compared wrongly.
+
 **A rewrite is checked against the template it came from, not just reparsed.** `verify` catches a
 splice that produces invalid Ruby and cannot catch one that produces *valid* Ruby meaning something
 else — its own comment said so, and `!$X.empty?` → `$X.any?` writing `any?xs` proved it. Every site

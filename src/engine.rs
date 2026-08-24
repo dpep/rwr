@@ -653,6 +653,7 @@ impl Engine {
                                                 rewrite::verify_template(
                                                     &text,
                                                     &planned.matched,
+                                                    &planned.captures,
                                                     &planned.edits,
                                                     template,
                                                     &rule.constant_captures(),
