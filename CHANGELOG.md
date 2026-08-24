@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.5 — 2026-08-24
 
 **If a rewrite that used to work now refuses**, that is these two new checks, and it is worth
 reporting rather than working around — they are built to skip whatever they cannot judge, so a
