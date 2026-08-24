@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "rwr"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "clap",
  "clap_complete",

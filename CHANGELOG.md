@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.2 — 2026-08-23
 
 **A `type:` that cannot be a Ruby constant is refused at load.** `is:` has a closed set and rejects
 an unknown value outright; `type:` takes a class name and would accept any string, so `type: string`
