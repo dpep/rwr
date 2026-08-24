@@ -1462,7 +1462,32 @@ fn walk<'pr>(
             .filter(|(k, _)| k.starts_with('@'))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        std::mem::replace(&mut state.locals, carried)
+        let outer = std::mem::replace(&mut state.locals, carried);
+        // A signature's parameter types, entering the body they describe. This
+        // is the only thing that makes a bare *parameter* resolve: an assignment
+        // can name a class and a chain can be followed, but `def m(x)` says
+        // nothing about `x` on its own, and a parameter is what a guard usually
+        // guards.
+        if let Some(def) = target.as_def_node()
+            && let Some(class) = state.scope.last()
+        {
+            let singleton = def.receiver().is_some() || state.singleton;
+            let method = String::from_utf8_lossy(def.name().as_slice()).into_owned();
+            if let Some(params) = criteria.sigs.params(class, &method, singleton) {
+                for (name, receiver) in params {
+                    // Only instances. `locals` is read back as an instance
+                    // receiver, so recording `T.class_of(X)` here would claim an
+                    // instance of X for the class object -- a guess, where
+                    // leaving it out merely declines.
+                    if receiver.is_instance() {
+                        state
+                            .locals
+                            .insert(name.clone(), receiver.class_name().to_string());
+                    }
+                }
+            }
+        }
+        outer
     });
 
     // `def self.x` and `class << self` both put their bodies in singleton

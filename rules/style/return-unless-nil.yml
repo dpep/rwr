@@ -9,9 +9,10 @@
 # signature describes, so it does not resolve and the rule declines it.
 #
 # **This fires only where the value's type resolves**, which in practice means a
-# Sorbet signature. With none in scope it rewrites nothing at all -- correct, and
-# worth knowing before you conclude the rule is broken. `-e` says so per site.
-# Sites it cannot resolve are declined, never guessed: narrowing only narrows.
+# Sorbet signature -- on the method whose result is guarded, or on the parameter
+# itself, which is the commoner shape. With none in scope it rewrites nothing at
+# all: correct, and worth knowing before concluding the rule is broken. `-e` says
+# so per site. Sites it cannot resolve are declined, never guessed.
 #
 # `Boolean` is listed beside the two real classes because `T::Boolean` is a
 # constant path and resolves by its last segment, so a signature returning one
@@ -53,6 +54,35 @@ tests:
         def b
           return if verified.nil?
           2
+        end
+      end
+    unchanged: true
+  # A guard on a plain parameter, which is what most guards are. Resolvable only
+  # because the signature names the parameter's type -- and note the signature is
+  # `.void`, so it says nothing about the return at all.
+  - input: |
+      class Account
+        sig { params(name: T.nilable(String)).void }
+        def a(name)
+          return if name.nil?
+          puts name
+        end
+      end
+    output: |
+      class Account
+        sig { params(name: T.nilable(String)).void }
+        def a(name)
+          return unless name
+          puts name
+        end
+      end
+  # The same shape with a nilable boolean parameter: declined by name.
+  - input: |
+      class Account
+        sig { params(flag: T.nilable(T::Boolean)).void }
+        def b(flag)
+          return if flag.nil?
+          puts flag
         end
       end
     unchanged: true

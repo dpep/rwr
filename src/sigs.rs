@@ -20,14 +20,25 @@ use rayon::prelude::*;
 use ruby_prism::Node;
 use std::collections::HashMap;
 
-/// One signature: which method of which class, and what it returns.
-type Signed = ((String, String, bool), Receiver);
+/// Which method of which class, what it returns, and what it takes.
+type Signed = (
+    (String, String, bool),
+    Option<Receiver>,
+    Vec<(String, Receiver)>,
+);
 
-/// What each signed method returns, keyed by the class that defines it.
+/// What each signed method returns and accepts, keyed by the class defining it.
 #[derive(Debug, Default)]
 pub(crate) struct Signatures {
     /// `(class, method, singleton) -> return type`.
     returns: HashMap<(String, String, bool), Receiver>,
+    /// `(class, method, singleton) -> parameter name -> its type`.
+    ///
+    /// Parameters are the half that makes an ordinary guard resolvable. A return
+    /// type answers "what does this chain evaluate to"; a parameter type answers
+    /// "what is this bare local", which is what most code actually asks about --
+    /// `return if x.nil?` guards an argument far more often than a chain.
+    params: HashMap<(String, String, bool), HashMap<String, Receiver>>,
 }
 
 impl Signatures {
@@ -38,6 +49,17 @@ impl Signatures {
 
     pub(crate) fn len(&self) -> usize {
         self.returns.len()
+    }
+
+    /// The types a signature gave `class#method`'s parameters, if it gave any.
+    pub(crate) fn params(
+        &self,
+        class: &str,
+        method: &str,
+        singleton: bool,
+    ) -> Option<&HashMap<String, Receiver>> {
+        self.params
+            .get(&(class.to_string(), method.to_string(), singleton))
     }
 
     /// What `class#method` (or `class.method`) returns, if a signature said.
@@ -80,12 +102,17 @@ impl Signatures {
             .collect();
 
         let parsed = found.len();
-        (
-            Signatures {
-                returns: found.into_iter().flatten().collect(),
-            },
-            parsed,
-        )
+        let mut returns = HashMap::new();
+        let mut params: HashMap<(String, String, bool), HashMap<String, Receiver>> = HashMap::new();
+        for (key, ret, args) in found.into_iter().flatten() {
+            if let Some(ret) = ret {
+                returns.insert(key.clone(), ret);
+            }
+            if !args.is_empty() {
+                params.entry(key).or_default().extend(args);
+            }
+        }
+        (Signatures { returns, params }, parsed)
     }
 }
 
@@ -102,12 +129,23 @@ fn collect(
     if let Some(statements) = node.as_statements_node() {
         let body: Vec<Node<'_>> = statements.body().iter().collect();
         for pair in body.windows(2) {
-            let Some(returns) = signature_return(&pair[0]) else {
+            // Not gated on a usable return type: `sig { params(x: String).void }`
+            // states nothing this index can use about the *result* and everything
+            // about the argument, and gating on `returns` dropped every one of
+            // them -- which is most signatures on a command or a setter.
+            let Some((returns, params)) = signature_types(&pair[0]) else {
                 continue;
             };
+            if returns.is_none() && params.is_empty() {
+                continue;
+            }
             let Some(class) = scope.last() else { continue };
             for (name, on_class) in described_methods(&pair[1], singleton) {
-                out.push(((class.clone(), name, on_class), returns.clone()));
+                out.push((
+                    (class.clone(), name, on_class),
+                    returns.clone(),
+                    params.clone(),
+                ));
             }
         }
         // `T::Struct` declares typed readers without a `sig`, in a single call:
@@ -116,7 +154,7 @@ fn collect(
         if struct_body && let Some(class) = scope.last() {
             for statement in &body {
                 if let Some((name, returns)) = struct_field(statement) {
-                    out.push(((class.clone(), name, false), returns));
+                    out.push(((class.clone(), name, false), Some(returns), Vec::new()));
                 }
             }
         }
@@ -216,8 +254,17 @@ fn struct_field(node: &Node<'_>) -> Option<(String, Receiver)> {
     Some((name, receiver_type(&arguments.next()?)?))
 }
 
-/// The return type a `sig { ... }` states, if it states one rwr can use.
-fn signature_return(node: &Node<'_>) -> Option<Receiver> {
+/// What one signature states: its return type, and its parameter types. Either
+/// half may be absent -- they fail independently.
+type Stated = (Option<Receiver>, Vec<(String, Receiver)>);
+
+/// What a `sig { ... }` states: its return type, and its parameter types.
+///
+/// `None` only when the node is not a signature at all. A signature that states
+/// nothing usable yields empty halves rather than nothing, because the two
+/// halves fail independently -- `params(x: String).void` has no return type this
+/// index can use and a perfectly good argument type.
+fn signature_types(node: &Node<'_>) -> Option<Stated> {
     let call = node.as_call_node()?;
     if call.name().as_slice() != b"sig" {
         return None;
@@ -226,18 +273,66 @@ fn signature_return(node: &Node<'_>) -> Option<Receiver> {
     let statements = body.as_statements_node()?;
     let expression = statements.body().iter().next()?;
 
-    // `returns` sits somewhere in a chain: `returns(X)`,
-    // `params(..).returns(X)`, `overridable.returns(X)`. Walk down the
-    // receivers until it turns up.
+    // Both sit somewhere in one chain: `returns(X)`, `params(..).returns(X)`,
+    // `overridable.params(..).void`. Walk the receivers once, taking whichever
+    // turns up, rather than walking it again per half.
+    let (mut returns, mut params) = (None, Vec::new());
     let mut current = expression;
-    loop {
-        let call = current.as_call_node()?;
-        if call.name().as_slice() == b"returns" {
-            let argument = call.arguments()?.arguments().iter().next()?;
-            return receiver_type(&argument);
+    while let Some(call) = current.as_call_node() {
+        match call.name().as_slice() {
+            b"returns" if returns.is_none() => {
+                returns = call
+                    .arguments()
+                    .and_then(|a| a.arguments().iter().next())
+                    .and_then(|a| receiver_type(&a));
+            }
+            b"params" if params.is_empty() => {
+                params = signature_params(&call);
+            }
+            _ => {}
         }
-        current = call.receiver()?;
+        match call.receiver() {
+            Some(receiver) => current = receiver,
+            None => break,
+        }
     }
+    Some((returns, params))
+}
+
+/// The named parameter types in `params(x: String, y: T.nilable(Integer))`.
+///
+/// A type rwr cannot turn into a class name is dropped rather than guessed at,
+/// so a `T.untyped` parameter simply does not appear and the local stays
+/// unresolved -- which declines a constraint rather than passing one.
+fn signature_params(call: &ruby_prism::CallNode<'_>) -> Vec<(String, Receiver)> {
+    let mut out = Vec::new();
+    let Some(arguments) = call.arguments() else {
+        return out;
+    };
+    for argument in arguments.arguments().iter() {
+        // `params(x: String)` puts every pair in one keyword hash.
+        let elements = match &argument {
+            Node::KeywordHashNode { .. } => argument.as_keyword_hash_node().map(|h| h.elements()),
+            Node::HashNode { .. } => argument.as_hash_node().map(|h| h.elements()),
+            _ => None,
+        };
+        let Some(elements) = elements else { continue };
+        for element in elements.iter() {
+            let Some(assoc) = element.as_assoc_node() else {
+                continue;
+            };
+            let Some(key) = assoc.key().as_symbol_node() else {
+                continue;
+            };
+            let Ok(name) = String::from_utf8(key.unescaped().to_vec()) else {
+                continue;
+            };
+            if let Some(receiver) = receiver_type(&assoc.value()) {
+                out.push((name, receiver));
+            }
+        }
+    }
+    out
 }
 
 /// Turn a Sorbet type expression into a receiver, when it names a class.
@@ -289,6 +384,64 @@ mod tests {
     fn returns_of(sig: &str) -> Option<Receiver> {
         let source = format!("class C\n  {sig}\n  def m; end\nend\n");
         index(&source).returns("C", "m", false).cloned()
+    }
+
+    fn params_of(sig: &str) -> Vec<(String, String)> {
+        let source = format!("class C\n  {sig}\n  def m(a, b); end\nend\n");
+        let index = index(&source);
+        let mut found: Vec<(String, String)> = index
+            .params("C", "m", false)
+            .map(|p| {
+                p.iter()
+                    .map(|(k, v)| (k.clone(), v.class_name().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        found.sort();
+        found
+    }
+
+    /// Parameter types come from the same chain as the return type, and must not
+    /// be gated on it. `params(..).void` states nothing usable about the result
+    /// and everything about the argument, and it is the commonest shape on a
+    /// command or a setter -- gating dropped every one of them.
+    #[test]
+    fn parameter_types_survive_a_signature_with_no_usable_return() {
+        assert_eq!(
+            params_of("sig { params(a: String, b: Integer).void }"),
+            vec![
+                ("a".to_string(), "String".to_string()),
+                ("b".to_string(), "Integer".to_string())
+            ]
+        );
+        // And the same signature yields no return type, which is the half that
+        // used to decide whether any of it was recorded.
+        let source = "class C\n  sig { params(a: String).void }\n  def m(a); end\nend\n";
+        assert!(index(source).returns("C", "m", false).is_none());
+    }
+
+    /// The nilable unwrapping that makes a guard resolvable: what reaches the
+    /// call site is the inner type, and `T::Boolean` arrives under the name its
+    /// constant path ends in.
+    #[test]
+    fn nilable_parameters_resolve_to_what_they_wrap() {
+        assert_eq!(
+            params_of("sig { params(a: T.nilable(String), b: T.nilable(T::Boolean)).void }"),
+            vec![
+                ("a".to_string(), "String".to_string()),
+                ("b".to_string(), "Boolean".to_string())
+            ]
+        );
+    }
+
+    /// A type that names no single class yields nothing rather than a guess, so
+    /// the local stays unresolved and a constraint declines rather than passes.
+    #[test]
+    fn an_untyped_parameter_is_absent_rather_than_guessed() {
+        assert_eq!(
+            params_of("sig { params(a: T.untyped, b: String).void }"),
+            vec![("b".to_string(), "String".to_string())]
+        );
     }
 
     /// Every spelling of a signature a real codebase uses, and what each one

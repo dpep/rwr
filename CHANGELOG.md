@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**Sorbet signatures now yield parameter types, not just return types.** A return type answers
+"what does this chain evaluate to"; a parameter type answers "what is this bare local", which is
+what most code actually asks — `return if x.nil?` guards an argument far more often than a chain.
+Reading them also meant not gating on the return: `sig { params(x: String).void }` states nothing
+usable about the result and everything about the argument, and it is the commonest shape on a
+command or a setter, so gating dropped every one. A type that names no single class is still
+absent rather than guessed, so the local stays unresolved and a constraint declines.
+
 **`type_not:` — exclude a receiver by class, safely.** Takes a list and means *resolves, and to
 none of these*. Not the mirror of `name_not:`, deliberately: `name_not:` passes when there is no
 identifier, but a type exclusion that passed on an unresolved receiver would turn a narrowing
