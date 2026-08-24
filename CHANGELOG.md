@@ -16,6 +16,12 @@ so the result has the right shape around the wrong code
 Same conservatism as the shape check: a capture the template drops, or one that cannot be rendered
 contiguously (a heredoc), is not compared rather than compared wrongly.
 
+And a capture another site rewrote is not compared either, because that rule is working rather than
+failing. `$R.freeze` over `x.freeze.freeze` matches twice — the outer match captures `x.freeze` and
+the inner one rewrites exactly that — so the text legitimately differs afterwards. A nested site
+inside the capture's span is what tells the two cases apart; a site's own edits never land inside
+its own captures, since a capture is carried over verbatim, so a corrupted splice is still caught.
+
 **A rewrite is checked against the template it came from, not just reparsed.** `verify` catches a
 splice that produces invalid Ruby and cannot catch one that produces *valid* Ruby meaning something
 else — its own comment said so, and `!$X.empty?` → `$X.any?` writing `any?xs` proved it. Every site

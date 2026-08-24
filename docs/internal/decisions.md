@@ -2136,6 +2136,16 @@ match's environment -- so the second half cost recording what the captures were,
 A capture the template drops is not compared, because there is nothing to compare it against, and
 one that cannot be rendered contiguously -- a heredoc -- is absent rather than compared wrongly.
 
+**Nested rewrites are the case that made this dangerous.** A rule can match inside its own capture:
+`$R.freeze` over `x.freeze.freeze` matches twice, the outer capturing `x.freeze` and the inner
+rewriting exactly that text. Comparing across it refused a correct rewrite at exit 5 -- the worst
+failure a checker has, because it breaks work that was fine. Captures now carry their span, and a
+comparison is skipped when *another site* sits inside it. A site's own edits never land inside its
+own captures, since a capture is spliced verbatim, so a corrupted splice is still caught.
+
+Recorded as much for the shape of the reasoning as the fix: a verification layer's own failure mode
+is refusing correct work, and it needs the same evidence standard as the thing it checks.
+
 **Both checks are in memory, before the write.** `apply` -> `verify` -> `verify_template` all run
 on a `String`, and `cli` writes only once the outcome comes back clean. There has never been a
 partially-written file to undo, and there should not be one.

@@ -607,7 +607,7 @@ pub(crate) struct Planned {
     /// What each site's metavariables captured, as source text, aligned with
     /// `matched`. Compared against what they capture in the *result*, which is
     /// how a correct shape wrapped around the wrong capture is caught.
-    pub captures: Vec<Vec<(String, String)>>,
+    pub captures: Vec<Vec<Capture>>,
 }
 
 /// Apply edits to source. Edits must be disjoint and sorted, as [`plan`] leaves
@@ -642,21 +642,49 @@ pub(crate) fn verify(rewritten: &str) -> Result<(), Refusal> {
 }
 
 /// One site's matched span paired with what its metavariables captured.
-type SiteCaptures = ((usize, usize), Vec<(String, String)>);
+type SiteCaptures = ((usize, usize), Vec<Capture>);
 
-/// What each metavariable captured, as source text.
+/// What one metavariable held, and where it held it.
+///
+/// The span is in pre-edit coordinates and is what makes a *nested* rewrite
+/// distinguishable from a corrupted splice: another site sitting inside this
+/// span rewrote the capture legitimately, and comparing text across that is
+/// comparing two different questions.
+#[derive(Debug, Clone)]
+pub(crate) struct Capture {
+    pub name: String,
+    pub text: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// What each metavariable captured, as source text and span.
 ///
 /// A capture rwr cannot render contiguously -- a heredoc -- yields nothing and
-/// is simply absent, so it is never compared rather than compared wrongly.
-fn captured_texts(env: &Env<'_>, source: &[u8]) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = env
+/// is simply absent, so it is never compared rather than compared wrongly. A
+/// bare name binding has no span and is likewise absent.
+fn captured_texts(env: &Env<'_>, source: &[u8]) -> Vec<Capture> {
+    let mut out: Vec<Capture> = env
         .iter()
         .filter_map(|(name, bound)| {
             let text = captured_text(bound, source).ok()??;
-            Some((name.clone(), String::from_utf8_lossy(text).into_owned()))
+            let (start, end) = match bound {
+                Bound::One(node) => effective_range(node),
+                Bound::Many(nodes) => (
+                    effective_range(nodes.first()?).0,
+                    effective_range(nodes.last()?).1,
+                ),
+                Bound::Name(_) => return None,
+            };
+            Some(Capture {
+                name: name.clone(),
+                text: String::from_utf8_lossy(text).into_owned(),
+                start,
+                end,
+            })
         })
         .collect();
-    out.sort();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
@@ -683,7 +711,7 @@ fn captured_texts(env: &Env<'_>, source: &[u8]) -> Vec<(String, String)> {
 pub(crate) fn verify_template(
     rewritten: &str,
     matched: &[(usize, usize)],
-    captures: &[Vec<(String, String)>],
+    captures: &[Vec<Capture>],
     edits: &[Edit],
     template: &str,
     constants: &[String],
@@ -741,18 +769,34 @@ pub(crate) fn verify_template(
         let Some(before) = captures.get(index) else {
             continue;
         };
-        for (name, was) in before {
-            let Some((_, now)) = after.iter().find(|(n, _)| n == name) else {
+        for capture in before {
+            // A *different* site sitting inside this capture rewrote it, and
+            // legitimately: `$R.freeze` over `x.freeze.freeze` captures
+            // `x.freeze` on the outer match and rewrites it on the inner one, so
+            // the text differs for a reason that is the rule working. Comparing
+            // across that refused a correct rewrite outright.
+            //
+            // The site's own edits never land inside its own captures -- a
+            // capture is carried over verbatim -- so an edit there is still a
+            // corrupted splice and is still caught.
+            if matched
+                .iter()
+                .enumerate()
+                .any(|(other, (s, e))| other != index && *s >= capture.start && *e <= capture.end)
+            {
+                continue;
+            }
+            let Some(now) = after.iter().find(|c| c.name == capture.name) else {
                 // Dropped by the template, or not renderable on one side. Either
                 // way there is nothing to compare, and inventing a comparison is
                 // how a checker starts refusing correct work.
                 continue;
             };
-            if now != was {
+            if now.text != capture.text {
                 return Err(Refusal::CaptureMoved {
-                    capture: name.clone(),
-                    was: was.clone(),
-                    now: now.clone(),
+                    capture: capture.name.clone(),
+                    was: capture.text.clone(),
+                    now: now.text.clone(),
                 });
             }
         }
@@ -1221,10 +1265,15 @@ mod tests {
         assert!(verify(&rewritten).is_ok());
 
         let matched = [(0usize, 9usize)];
-        let before = vec![vec![
-            ("A".to_string(), "a".to_string()),
-            ("B".to_string(), "b".to_string()),
-        ]];
+        let cap = |name: &str, text: &str, start, end| Capture {
+            name: name.into(),
+            text: text.into(),
+            start,
+            end,
+        };
+        // Spans of `a` and `b` in the original, which is how a nested rewrite is
+        // told apart from a corrupted one.
+        let before = vec![vec![cap("A", "a", 4, 5), cap("B", "b", 7, 8)]];
         let out = verify_template(&rewritten, &matched, &before, &swapped, "foo($A, $B)", &[]);
         match out {
             Err(Refusal::CaptureMoved {

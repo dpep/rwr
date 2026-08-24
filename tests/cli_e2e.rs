@@ -117,6 +117,32 @@ fn the_rewrite_verb_writes() {
     assert_eq!(after, "def a\n  return\nend\n");
 }
 
+/// A rule that matches inside its own capture must not be refused.
+///
+/// `$R.freeze` matches `x.freeze.freeze` twice: the outer match captures
+/// `x.freeze`, and the inner one rewrites exactly that text. The binding check
+/// saw a capture holding different code afterwards and refused a correct
+/// rewrite outright -- the failure mode that matters most for a checker, since
+/// it breaks work that was fine. A nested site inside the capture's span is now
+/// what tells the two cases apart.
+#[test]
+fn a_rewrite_nested_inside_its_own_capture_is_not_refused() {
+    let dir = fixture("a = x.freeze.freeze\n");
+    let out = rwr(&[
+        "rewrite",
+        "$R.freeze",
+        "-r",
+        "$R.frozen_copy",
+        dir.path().to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    assert_eq!(
+        after, "a = x.frozen_copy.frozen_copy\n",
+        "both sites rewrite"
+    );
+}
+
 /// Sequence transforms, end to end through a rule file.
 ///
 /// The pack shipped exactly one rule using `*$ITEMS.sort` and it was removed --
