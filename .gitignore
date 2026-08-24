@@ -1,3 +1,7 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Scratch space. `tmp/rules-unshipped` holds rules the pack deliberately does
+# not carry -- safe where you know the receivers, not safe to ship.
+/tmp
