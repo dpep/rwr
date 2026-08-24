@@ -1,0 +1,35 @@
+# Two spellings need two rules: a literal block and a block-pass are different
+# nodes. `{ |$P| $B }` covers `do ... end` as well, and the rewrite splices only
+# the `!` and the method name, so the block's own layout survives.
+#
+# With a block these really are inverses, which is what `!x.empty?` -> `x.any?`
+# is not: both ask about the *predicate's* truth over the elements, so a
+# collection holding `nil` or `false` cannot split them.
+- description: '`!x.any? { }` is `x.none? { }` said forwards.'
+  match: '!$X.any? { |$P| $B }'
+  rewrite: '$X.none? { |$P| $B }'
+  tests:
+    - input: |
+        a = xs.reject { |x| !x.any? { |i| i.ok? } }
+      output: |
+        a = xs.reject { |x| x.none? { |i| i.ok? } }
+    - input: |
+        a = !xs.any? do |i|
+          i.ok?
+        end
+      output: |
+        a = xs.none? do |i|
+          i.ok?
+        end
+    - input: |
+        a = !xs.any?
+      unchanged: true
+
+- description: '`!x.any?(&:ok?)` is `x.none?(&:ok?)` said forwards.'
+  match: '!$X.any?(&$S)'
+  rewrite: '$X.none?(&$S)'
+  tests:
+    - input: |
+        a = !xs.any?(&:ok?)
+      output: |
+        a = xs.none?(&:ok?)

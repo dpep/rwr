@@ -2,6 +2,72 @@
 
 ## Unreleased
 
+**`-e` now says when nothing could have resolved.** "Receiver did not resolve" meant two different
+things — this receiver is hard, or there was nothing in scope to resolve it against — and they
+have opposite fixes: write a signature, or stop editing the rule. The second now says so. The
+check is whether the index read *anything*, not whether it read a return type; a repository whose
+signatures are all `params(..).void` has no return types and is emphatically not empty.
+
+**Computed dispatch that provably cannot reach the name is no longer reported.** `send("get_#{x}")`
+produces names beginning `get_`, so no value of `x` yields `display_name` — that is a proof, and
+the entry goes. The opposite inference, that `send("display_#{x}")` *does* reach it, stays a guess
+and is never made: everything that cannot be disproved is kept, including a bare `send(x)` with no
+static text at all. Only the outer literal run each side is used, since matching the middle is a
+longer argument for a smaller gain.
+
+**Sorbet signatures now yield parameter types, not just return types.** A return type answers
+"what does this chain evaluate to"; a parameter type answers "what is this bare local", which is
+what most code actually asks — `return if x.nil?` guards an argument far more often than a chain.
+Reading them also meant not gating on the return: `sig { params(x: String).void }` states nothing
+usable about the result and everything about the argument, and it is the commonest shape on a
+command or a setter, so gating dropped every one. A type that names no single class is still
+absent rather than guessed, so the local stays unresolved and a constraint declines.
+
+**`type_not:` — exclude a receiver by class, safely.** Takes a list and means *resolves, and to
+none of these*. Not the mirror of `name_not:`, deliberately: `name_not:` passes when there is no
+identifier, but a type exclusion that passed on an unresolved receiver would turn a narrowing
+predicate into a widening one, so an unresolved receiver **fails** it. Descent is always honoured
+— "not an `ActiveRecord::Base`" means not an `Account` either — with no flag to set.
+
+**`style/return-unless-nil` ships, narrowed by it.** `return if x.nil?` → `return unless x` is
+wrong for a nilable boolean, and that is now expressible: `type_not: [TrueClass, FalseClass,
+Boolean]`. `Boolean` is listed because `T::Boolean` is a constant path and resolves by its last
+segment. The rule fires only where the type resolves, so a codebase with no signatures gets no
+rewrites — pinned as a fixture, and `-e` says so per site rather than leaving you to wonder.
+
+**A prefix operator is no longer treated as a method rename.** `!x` and `x.any?` both keep their
+name in Prism's `message_loc`, and the structural diff took any two differing names for a rename —
+so `!$X.empty?` → `$X.any?` wrote `any?` over the `!` and left the receiver's call standing:
+`any?xs`. Ruby parses that as `any?(xs)`, so `verify` passed it. The same mismatch the other way
+round (`$X.foo` → `foo($X)`) silently produced no edit at all while the run reported a rewritten
+site. Names now correspond only slot for slot; anything else unwraps or re-renders the span.
+
+**Four new rules, and a third family.** All four ship plain — none is held back, because a rule
+that needs a flag before it is safe to run unattended is one the pack should not carry.
+
+`style/inverse-any` — `!x.any? { }` → `x.none? { }`, and the `&:sym` block-pass spelling. A true
+inverse: both ask about the predicate, so no element value splits them.
+
+`rspec/redundant-stub-return` — drops `.and_return(nil)` from a stub, which returns nil already.
+Matches through the chain, so `receive(:x).with(1).and_return(nil)` is covered; `and_return(nil, 1)`
+is a different node and is not.
+
+`rspec/be-empty` — `expect(x).to eq([])` / `eq({})` / `eq('')` → `be_empty`. What it drops is
+assertion strength, not runtime behaviour: `eq([])` pins the type as well as the emptiness, so a
+subject that regressed from `[]` to `{}` fails the original and passes the rewrite. That caveat
+lives in each rule's `description:` — which reaches `-j`, SARIF and the pull-request comment —
+rather than in `unsafe:`, which is reserved for rewrites that change what the program *does*.
+
+`rspec` is the first family whose name is also a scope. A rule constrains the tree, never the
+path — point it at the specs: `rwr check rspec spec/`.
+
+**`rules/README.md` now states what the pack is designed to guarantee**: `rwr rewrite all app/`
+is meant to be run unattended, on code you have not read. Safety comes from a rule not being in
+the default set, never from a warning attached to one — a warning asks for vigilance, and
+vigilance does not scale to ten thousand call sites. A rewrite that buys a measured win can carry
+a caveat; a rewrite that buys only a reading preference cannot, because there is no amount of
+tidier that pays for a `NoMethodError`.
+
 **Inline review comments on a pull request, with an Apply button.**
 `script/pr-suggest.sh` turns `rwr check -j` into review comments — an applicable ` ```suggestion `
 block where a rule can fix what it found, a plain comment where it cannot (a finding, or an

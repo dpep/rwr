@@ -108,8 +108,12 @@ rwr check style/return-nil app/    # one rule
 rwr rewrite all app/               # apply
 ```
 
-Families are `style` and `performance`. A real path wins over a built-in name,
-so your own rules directory is selected the same way — a pack *is* a directory.
+Families are `style`, `performance` and `rspec`. A real path wins over a
+built-in name, so your own rules directory is selected the same way — a pack
+*is* a directory.
+
+`rspec` is the one family whose name is also a scope. A rule constrains the
+tree, never the path, so point it at the specs: `rwr check rspec spec/`.
 
 **Rules that can change behaviour are held back** and the run says which and
 why. Pass `--unsafe` to include them; when one fires, its caveat prints next to
@@ -139,6 +143,7 @@ rewrite: $R.detect { |$P| $B }
 | `name: [a, b]` | the capture is one of these identifiers |
 | `name_not: [a, b]` | the capture is none of these — narrow a rule that over-matches |
 | `type: Klass` | the receiver resolves to that class (conservative — unresolved never matches) |
+| `type_not: [A, B]` | the receiver **resolves, and to none of these** — unresolved fails it |
 | `kind: instance\|class` | which method table `type:` means |
 | `subclasses: true` | admit descendants of `type:` |
 | `same_name_as: $V` | two captures name the same identifier, across node kinds |
@@ -147,8 +152,30 @@ rewrite: $R.detect { |$P| $B }
 
 `type:` resolves a receiver from a constructor (`Widget.new.foo`), a local or
 ivar assigned from one, a constant, `self`, and — where the repo has Sorbet
-signatures — whatever `sig { returns(X) }` says. A receiver it cannot resolve
+signatures — whatever `sig { returns(X) }` says, plus the parameter types a
+`sig { params(x: X) }` gives the body it describes. A receiver it cannot resolve
 does **not** match, so `type:` only ever narrows; the misses show up as residue.
+
+`type_not:` is **not** the mirror of `name_not:`. `name_not:` passes when the
+capture has no identifier at all; a type exclusion that passed on an unresolved
+receiver would widen instead of narrow, letting every receiver rwr cannot see
+past a guard written to stop it. So unresolved *fails* an exclusion. Descent is
+always honoured with no flag — "not an `ActiveRecord::Base`" means not an
+`Account` either. Note `T::Boolean` resolves by its constant path's last segment,
+so excluding a boolean means `[TrueClass, FalseClass, Boolean]`.
+
+**When a `type:`/`type_not:` rule matches nothing, run `-e` before editing the
+rule.** It separates the two failures, and they have opposite fixes:
+
+```
+$X bound `flag`    -- resolved to Boolean, excluded by `type_not: [...]`
+$X bound `account` -- receiver did not resolve; `type_not: [...]` needs a receiver rwr can resolve
+```
+
+The first is the constraint working. The second is a gap in what rwr can see —
+closed by writing a signature, not by loosening the rule. A repo with no
+signatures at all resolves almost nothing, and such a rule correctly rewrites
+nothing.
 
 And `scope:` constrains the match as a whole — `inside: Account`,
 `singleton: true`, `subclasses: true`.

@@ -40,13 +40,55 @@ carries the same information as
 `SafeAutoCorrect: false`, in a config file nobody reads at the moment of the
 edit.
 
-Which rules are held back is not listed here, because that list changes every
-time one is added. The run says so itself, with a count and — under `-e` — the
-reason for each:
+**`unsafe:` names a runtime behaviour change, and nothing else.** Every reason in
+the pack finishes the sentence "your program will do this instead" — a nil where
+a zero was, a different method on a non-relation, `^` turning special. Not "the
+result is a little weaker", not "read it before you run it". `rspec/be-empty`
+ships plain for this reason: `eq([])` pins the type where `be_empty` does not, so
+the assertion gets weaker, but no input makes Ruby behave differently. That
+caveat lives in the rule's `description:`, which rides along to `-j`, SARIF and
+the pull-request comment.
 
-```
-rwr: N rule(s) held back as unsafe; --unsafe to include them, -e for why
-```
+The distinction is load-bearing because `--unsafe` is all-or-nothing. Every rule
+marked for a softer reason taxes the person who wanted one specific rewrite, and
+a flag holding back a dozen rules for two different kinds of reason stops
+discriminating and becomes a reflex.
+
+## Safe by design
+
+`rwr rewrite all app/` should be something you can run unattended. Not "run it
+and review carefully" — *unattended*, on a codebase you have not read, the way
+you would run a formatter. That is the design constraint the pack is built to,
+and it decides what goes in it.
+
+Safety comes from a rule not being in the default set, never from a warning
+attached to one. A warning is a request for vigilance, and vigilance does not
+scale to ten thousand call sites; that is the house principle "make unsafe
+operations unrepresentable", applied to the pack rather than to the API. So the
+question for a candidate is not "is this usually right" — most rewrites are
+usually right — but:
+
+**Is there an input for which the rewrite makes Ruby do something else?** Write
+it down and run it. If there is none, the rule ships plain, and running it needs
+no judgement from anyone. `style/return-nil`, `style/inverse-any`,
+`rspec/redundant-stub-return`.
+
+**If there is, does the rewrite buy something measured?** A performance win can
+carry a caveat, because the caveat is checkable and the gain is real: `sum` has a
+fast path for numerics, `exists?` stops a query returning rows nobody counts.
+That is what `unsafe:` is for, and `--unsafe` is a seam rather than a setting —
+the intended exit is to narrow the rule with a `type:` receiver until it is safe,
+not to keep passing the flag.
+
+**A preference about how code reads buys nothing measured**, so it cannot carry a
+caveat. There is no amount of tidier that pays for a `NoMethodError`, and a style
+rewrite that can change behaviour has no version of itself that belongs in a pack
+other people run over code they have not read.
+
+The pack is therefore smaller than the set of rewrites that are usually right,
+deliberately. Usually-right is what your own rules directory is for, where you
+know the receivers and you are choosing to run it — a directory *is* a pack, so
+a hand-rolled rule is a first-class one.
 
 ## The ActiveRecord rules
 
@@ -72,6 +114,60 @@ The narrowing that makes several of these safe is a `where:` receiver type — a
 can rule it out where it can resolve the receiver. Add a `type:` constraint when
 running these over a Rails app, and read the residue report for the sites it
 could not resolve.
+
+## The rspec rules
+
+Spec idioms, and the one family whose name is also a *scope*: a rule constrains
+the tree, never the path, so point it at your specs.
+
+```sh
+rwr check rspec spec/
+```
+
+Both shapes it looks for are effectively spec-only — `and_return` reached from a
+`receive`, and `expect(...).to eq([])` — so a whole-tree run is unlikely to find
+anything in `app/`. Naming the directory is still the honest way to say what you
+meant, and it is faster.
+
+`redundant-stub-return` matches through the chain rather than at a fixed
+position, so `receive(:x).with(1).and_return(nil)` is covered and
+`and_return(nil, 1)` — a *queue* of return values, a different node — is not.
+
+## Excluding a type, and why it is not the mirror of `name_not:`
+
+`type_not:` takes a list of classes and means *resolves, and to none of these*.
+
+```yaml
+where:
+  $X: { type_not: [TrueClass, FalseClass, Boolean] }
+```
+
+The second half of that sentence is the whole design. `name_not:` **passes** when
+the capture has no identifier at all, because nothing that is not an identifier
+can be one of the excluded ones. A type exclusion cannot inherit that: `type:`
+under-matches when it cannot resolve a receiver, which is the safe direction, and
+a negation that passed on missing data would *widen* — every receiver rwr cannot
+see would sail straight through a guard written to stop it. So an unresolved
+receiver **fails** an exclusion, and narrowing still only ever narrows.
+
+Descent is always honoured and there is no flag for it. "Not an
+`ActiveRecord::Base`" plainly means not an `Account` either, and there is no
+reading of an exclusion where admitting the subclass is what the author wanted.
+
+`Boolean` sits beside the two real classes because `T::Boolean` is a constant
+path and resolves by its last segment, so a Sorbet signature returning one
+arrives under that name rather than as the pair it aliases.
+
+**It fires only where the type resolves**, which today means a signature. `-e`
+distinguishes the two failures, and the difference decides what you do next:
+
+```
+$X bound `label`    -- resolved to Boolean, excluded by `type_not: [...]`
+$X bound `account`  -- receiver did not resolve; `type_not: [...]` needs a receiver rwr can resolve
+```
+
+The first is the constraint working. The second is a gap in what rwr can see,
+and is closed by writing a signature — not by loosening the rule.
 
 ## Writing a constraint: block or flow
 

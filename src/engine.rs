@@ -16,6 +16,7 @@ use crate::profile;
 use crate::residue;
 use crate::rewrite;
 use crate::rule;
+use crate::rule::Constraint;
 use crate::source;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -289,7 +290,7 @@ impl Engine {
         });
         let unnarrowed = !rules
             .iter()
-            .any(|r| r.constraints.values().any(|c| c.receiver_type.is_some()));
+            .any(|r| r.constraints.values().any(Constraint::narrows_by_receiver));
         // Identifiers a rewrite brings in that the pattern did not have. If one
         // of them is already a local where the edit lands, the rewrite produces
         // a name collision -- `full_name = full_name` -- which parses, runs, and
@@ -377,15 +378,20 @@ impl Engine {
             let started = profile::now();
             // Only the part of the hierarchy reachable from the classes the
             // rules name is needed, which is a handful rather than all of them.
-            let roots: Vec<String> =
-                self.rules
-                    .iter()
-                    .filter_map(|r| {
-                        r.scope.inside.clone().or_else(|| {
-                            r.constraints.values().find_map(|c| c.receiver_type.clone())
-                        })
-                    })
-                    .collect();
+            // Every named class, not the first one found: a constraint can name
+            // several (`type_not: [TrueClass, FalseClass]`), and descent is
+            // consulted for each.
+            let roots: Vec<String> = self
+                .rules
+                .iter()
+                .flat_map(|r| {
+                    r.scope
+                        .inside
+                        .clone()
+                        .into_iter()
+                        .chain(r.constraints.values().flat_map(Constraint::hierarchy_roots))
+                })
+                .collect();
             let (h, parsed) = crate::hierarchy::Hierarchy::reachable_from(sources, &roots);
             let total = sources.len();
             profile::mark("hierarchy", started, || {
@@ -402,7 +408,7 @@ impl Engine {
         let sigs = if self
             .rules
             .iter()
-            .any(|r| r.constraints.values().any(|c| c.receiver_type.is_some()))
+            .any(|r| r.constraints.values().any(Constraint::narrows_by_receiver))
         {
             let started = profile::now();
             let (found, parsed) = crate::sigs::Signatures::from_sources(sources);
@@ -535,7 +541,7 @@ impl Engine {
                                         rule: rule.id.clone(),
                                         capture: r.verdict.capture(),
                                         constraint: r.verdict.constraint(),
-                                        detail: r.verdict.detail(),
+                                        detail: r.verdict.detail(!ctx.sigs.is_empty()),
                                         bound: r.bound.map(|(a, b)| {
                                             String::from_utf8_lossy(&current[a..b]).into_owned()
                                         }),

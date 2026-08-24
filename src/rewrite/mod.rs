@@ -633,6 +633,7 @@ fn structural_diff(
     // that subtree's own differences plus deleting what surrounded it.
     if std::mem::discriminant(pattern) != std::mem::discriminant(template)
         || p_kids.len() != t_kids.len()
+        || name_slot(pattern) != name_slot(template)
     {
         return unwrap_to_subtree(
             &p_kids,
@@ -848,6 +849,38 @@ fn name_span(node: &Node<'_>) -> Option<(usize, usize)> {
     Some((loc.start_offset(), loc.end_offset()))
 }
 
+/// Where a call writes its name, relative to its receiver.
+///
+/// `!x` and `x.any?` both hold their name in `message_loc`, so the rename
+/// branch of [`structural_diff`] would write `any?` over the `!` of
+/// `!xs.empty?` and leave `xs.empty?` standing -- `any?xs`, which Ruby parses
+/// as `any?(xs)`. Valid, silent, and the opposite of what the rule asked for.
+/// The two names are not the same slot, and only a slot-for-slot pair is a
+/// rename; anything else has to unwrap or re-render.
+///
+/// `None` is "no receiver-relative slot at all" -- a bare `foo($X)`, or a node
+/// that is not a call -- which likewise does not correspond to one that has one.
+fn name_slot(node: &Node<'_>) -> Option<Slot> {
+    let call = node.as_call_node()?;
+    let message = call.message_loc()?;
+    let receiver = call.receiver()?;
+    Some(
+        if message.start_offset() < receiver.location().start_offset() {
+            Slot::BeforeReceiver
+        } else {
+            Slot::AfterReceiver
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// `!x`, `-x`, `not x`
+    BeforeReceiver,
+    /// `x.any?`, `a + b`, `xs[0]`
+    AfterReceiver,
+}
+
 /// The identifier the template calls for.
 fn name_text(node: &Node<'_>, src: &[u8]) -> Option<String> {
     let (start, end) = name_span(node)?;
@@ -879,6 +912,41 @@ mod tests {
         let out = apply(source.as_bytes(), &planned.edits);
         verify(&out)?;
         Ok(out)
+    }
+
+    /// A prefix operator's name and a `.method` name are both `message_loc`,
+    /// and treating them as one slot wrote `any?` over the `!` and left the
+    /// receiver's own call standing: `!xs.empty?` became `any?xs`, which parses
+    /// as `any?(xs)`. Valid Ruby, so `verify` passed it; the wrong program, so
+    /// nothing else would have.
+    #[test]
+    fn a_prefix_operator_is_not_a_rename_of_a_method_name() {
+        let out = rewrite("!$X.empty?", "$X.any?", "a = !xs.empty?\n").unwrap();
+        assert_eq!(out, "a = xs.any?\n");
+    }
+
+    /// `not` and `!` are the same node, so the same rule reaches both.
+    #[test]
+    fn the_word_not_rewrites_like_the_bang() {
+        let out = rewrite("!$X.empty?", "$X.any?", "a = not xs.empty?\n").unwrap();
+        assert_eq!(out, "a = xs.any?\n");
+    }
+
+    /// The same slot mismatch the other way round: a receiver becoming an
+    /// argument. This one failed silently -- the name matched, the alignment
+    /// paired the receiver against the argument list, and the file came back
+    /// unchanged while the run reported a rewritten site.
+    #[test]
+    fn a_receiver_moving_into_an_argument_is_re_rendered() {
+        let out = rewrite("$X.foo", "foo($X)", "d = xs.foo\n").unwrap();
+        assert_eq!(out, "d = foo(xs)\n");
+    }
+
+    /// Prefix on both sides still corresponds, and still edits only the name.
+    #[test]
+    fn a_prefix_operator_kept_on_both_sides_stays_minimal() {
+        let out = rewrite("!$X.empty?", "!$X.any?", "a = !xs.empty?\n").unwrap();
+        assert_eq!(out, "a = !xs.any?\n");
     }
 
     #[test]

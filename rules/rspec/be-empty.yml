@@ -1,0 +1,48 @@
+# Three literals, three rules: `eq([])`, `eq({})` and `eq('')` are different
+# nodes and there is no "empty literal" predicate to unify them. `eq('')` covers
+# `eq("")` for free -- a string literal compares by unescaped value (D36).
+#
+# Ships plain, with the caveat carried in each `description:` so it reaches
+# `-j`, SARIF and the pull-request comment rather than only a reader of this
+# file. What the rewrite drops is *assertion strength*: `eq([])` pins the type
+# as well as the emptiness, so a subject that regressed from `[]` to `{}` fails
+# the original and passes the rewrite.
+#
+# That is not what `unsafe:` is for. Every `unsafe:` in this pack names a way the
+# program behaves differently -- `inject(:+)` returning nil, `where` on a
+# non-relation, `"abc".any?` raising -- and there is no input for which this
+# rewrite makes Ruby do something else. Marking it would put it behind the same
+# flag as a rewrite that raises in production, which is how `--unsafe` stops
+# discriminating and becomes a reflex.
+#
+# The type was almost never the point: you already know the method returns an
+# array. Where it *was* the point, keep the `eq`.
+- description: '`be_empty` says what is meant; it accepts any empty collection, where `eq([])` also pins an Array.'
+  match: expect($X).to eq([])
+  rewrite: expect($X).to be_empty
+  tests:
+    - input: |
+        expect(result).to eq([])
+      output: |
+        expect(result).to be_empty
+    - input: |
+        expect(result).to eq([1])
+      unchanged: true
+
+- description: '`be_empty` says what is meant; it accepts any empty collection, where `eq({})` also pins a Hash.'
+  match: expect($X).to eq({})
+  rewrite: expect($X).to be_empty
+  tests:
+    - input: |
+        expect(result).to eq({})
+      output: |
+        expect(result).to be_empty
+
+- description: '`be_empty` says what is meant; it accepts any empty collection, where `eq('''')` also pins a String.'
+  match: expect($X).to eq('')
+  rewrite: expect($X).to be_empty
+  tests:
+    - input: |
+        expect(result).to eq("")
+      output: |
+        expect(result).to be_empty

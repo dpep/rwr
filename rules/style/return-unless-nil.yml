@@ -1,0 +1,96 @@
+# `return if x.nil?` and `return unless x` diverge on two inputs, in opposite
+# directions. `false` is not nil but is falsey, so the rewrite guards where the
+# original ran. And an object overriding `nil?` -- the null-object pattern -- is
+# truthy while answering true to `nil?`, so the rewrite runs where the original
+# guarded, dropping a guard on purpose.
+#
+# `type_not:` closes the first. The second needs no clause: an object whose
+# `nil?` lies is not any of the classes below, but it is also not something a
+# signature describes, so it does not resolve and the rule declines it.
+#
+# **This fires only where the value's type resolves**, which in practice means a
+# Sorbet signature -- on the method whose result is guarded, or on the parameter
+# itself, which is the commoner shape. With none in scope it rewrites nothing at
+# all: correct, and worth knowing before concluding the rule is broken. `-e` says
+# so per site. Sites it cannot resolve are declined, never guessed.
+#
+# `Boolean` is listed beside the two real classes because `T::Boolean` is a
+# constant path and resolves by its last segment, so a signature returning one
+# arrives under that name rather than as the classes it aliases.
+description: '`return if x.nil?` is `return unless x`, without the double negative.'
+match: return if $X.nil?
+where:
+  $X:
+    type_not: [TrueClass, FalseClass, Boolean]
+rewrite: return unless $X
+tests:
+  # Resolves to String, so `false` is not among its values.
+  - input: |
+      class Account
+        sig { returns(T.nilable(String)) }
+        def label; end
+
+        def a
+          return if label.nil?
+          1
+        end
+      end
+    output: |
+      class Account
+        sig { returns(T.nilable(String)) }
+        def label; end
+
+        def a
+          return unless label
+          1
+        end
+      end
+  # A nilable boolean is exactly the case that breaks, and is declined by name.
+  - input: |
+      class Account
+        sig { returns(T.nilable(T::Boolean)) }
+        def verified; end
+
+        def b
+          return if verified.nil?
+          2
+        end
+      end
+    unchanged: true
+  # A guard on a plain parameter, which is what most guards are. Resolvable only
+  # because the signature names the parameter's type -- and note the signature is
+  # `.void`, so it says nothing about the return at all.
+  - input: |
+      class Account
+        sig { params(name: T.nilable(String)).void }
+        def a(name)
+          return if name.nil?
+          puts name
+        end
+      end
+    output: |
+      class Account
+        sig { params(name: T.nilable(String)).void }
+        def a(name)
+          return unless name
+          puts name
+        end
+      end
+  # The same shape with a nilable boolean parameter: declined by name.
+  - input: |
+      class Account
+        sig { params(flag: T.nilable(T::Boolean)).void }
+        def b(flag)
+          return if flag.nil?
+          puts flag
+        end
+      end
+    unchanged: true
+  # No signature, so nothing resolves and nothing is rewritten. Pinned because a
+  # rule that silently does nothing is worse than one that says why.
+  - input: |
+      def m(x)
+        return if x.nil?
+        x
+      end
+    unchanged: true

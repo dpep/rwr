@@ -251,6 +251,48 @@ const DISPATCHERS: &[&[u8]] = &[
     b"respond_to?",
 ];
 
+/// Whether a computed name could be one of `anchors`, at all.
+///
+/// The direction matters and only one of the two is sound. Concluding that
+/// `send("display_#{x}")` *does* reach `display_name` would be a guess -- `x`
+/// may only ever be `title`. Concluding that `send("get_#{x}")` *cannot* reach
+/// it is a proof: every name that expression produces begins `get_`, and
+/// `display_name` does not, so no value of `x` yields it.
+///
+/// So this rules entries out and never in. Anything with no static text to
+/// reason from -- a bare `send(x)`, a computed prefix -- is kept, because
+/// unknown is not the same as impossible and a blind spot dropped in silence is
+/// the failure this whole report exists to prevent.
+fn may_produce(node: &Node<'_>, anchors: &[Vec<u8>]) -> bool {
+    let Some(interpolated) = node.as_interpolated_string_node() else {
+        return true;
+    };
+    let parts: Vec<Node<'_>> = interpolated.parts().iter().collect();
+    // Only the outermost literal run each side is load-bearing: what sits
+    // between interpolations constrains the middle of the name, and matching
+    // that is a longer argument for a smaller gain.
+    let literal = |part: &Node<'_>| {
+        part.as_string_node()
+            .map(|s| s.unescaped().to_vec())
+            .filter(|bytes| !bytes.is_empty())
+    };
+    let prefix = parts.first().and_then(literal).unwrap_or_default();
+    let suffix = match parts.len() {
+        0 | 1 => Vec::new(),
+        _ => parts.last().and_then(literal).unwrap_or_default(),
+    };
+    if prefix.is_empty() && suffix.is_empty() {
+        return true;
+    }
+    anchors.iter().any(|name| {
+        // An interpolation can be the empty string, so the two ends may meet but
+        // never overlap -- which is what the length check enforces.
+        name.len() >= prefix.len() + suffix.len()
+            && name.starts_with(&prefix)
+            && name.ends_with(&suffix)
+    })
+}
+
 /// Whether a node is a literal the anchor scan can already see.
 fn is_literal_name(node: &Node<'_>) -> bool {
     match node {
@@ -406,6 +448,7 @@ pub(crate) fn find(
             && let Some(arguments) = call.arguments()
             && let Some(first) = arguments.arguments().iter().next()
             && !is_literal_name(&first)
+            && may_produce(&first, anchors)
         {
             let at = first.location();
             out.push(Occurrence {
@@ -522,6 +565,52 @@ pub(crate) fn find(
 
 #[cfg(test)]
 mod tests {
+
+    /// The narrowing is sound in one direction only, and this pins which.
+    ///
+    /// Ruling an entry *out* is a proof: every name `send("get_#{x}")` produces
+    /// begins `get_`, so no value of `x` yields `display_name`. Ruling one *in*
+    /// would be a guess, and this never does that -- everything it cannot
+    /// disprove is kept, because a blind spot dropped in silence is the failure
+    /// the report exists to prevent.
+    #[test]
+    fn a_computed_name_is_ruled_out_only_when_it_provably_cannot_match() {
+        let anchors = vec![b"display_name".to_vec()];
+        let reaches = |src: &str| {
+            let owned = format!("send({src})\n");
+            let parsed = ruby_prism::parse(owned.as_bytes());
+            let node = parsed.node();
+            let program = node.as_program_node().unwrap();
+            let statements = program.statements();
+            let call = statements.body().iter().next().unwrap();
+            let argument = call
+                .as_call_node()
+                .unwrap()
+                .arguments()
+                .unwrap()
+                .arguments()
+                .iter()
+                .next()
+                .unwrap();
+            may_produce(&argument, &anchors)
+        };
+
+        // Provably unreachable: the static text contradicts the name.
+        assert!(!reaches("\"get_#{x}\""), "prefix rules it out");
+        assert!(!reaches("\"#{x}_at\""), "suffix rules it out");
+        assert!(!reaches("\"display_#{x}_at\""), "both ends together");
+        // Too long to be produced however the ends meet.
+        assert!(!reaches("\"display_name_#{x}_suffix\""));
+
+        // Consistent, so kept -- `x` could be `name`.
+        assert!(reaches("\"display_#{x}\""));
+        assert!(reaches("\"#{x}_name\""));
+        // An interpolation can be the empty string, so the ends may meet.
+        assert!(reaches("\"display_#{x}name\""));
+        // Nothing static to reason from: unknown is not impossible.
+        assert!(reaches("x"));
+        assert!(reaches("\"#{x}\""));
+    }
 
     /// Residue survives the prefilter even though the engine wires in no
     /// anchors.
