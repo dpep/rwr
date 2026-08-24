@@ -486,6 +486,12 @@ pub(crate) enum ConstraintMiss {
         /// `account.foo` or the reverse.
         wrong_kind: bool,
     },
+    /// `resolved: None` means the receiver did not resolve at all, which fails
+    /// an exclusion rather than passing it -- see `Constraint::type_not`.
+    TypeNot {
+        resolved: Option<String>,
+        excluded: Vec<String>,
+    },
     Is {
         wanted: NodeKind,
     },
@@ -689,6 +695,39 @@ pub(crate) fn verdict(
             // constraint must say which it means.
             if resolved.is_instance() != constraint.wants_instance() {
                 return unresolved(true, Some(resolved.class_name().to_string()));
+            }
+        }
+
+        if let Some(excluded) = &constraint.type_not {
+            let refused = |resolved: Option<String>| Verdict::BadBinding {
+                capture: short.clone(),
+                miss: ConstraintMiss::TypeNot {
+                    resolved,
+                    excluded: excluded.clone(),
+                },
+            };
+            // An unresolved receiver fails, where `name_not:` would pass. The
+            // asymmetry is the point: this must not widen on missing data.
+            let Bound::One(node) = bound else {
+                return refused(None);
+            };
+            let at = Where {
+                scope: &found.scope,
+                singleton: found.singleton,
+                locals: &found.locals,
+                sigs,
+            };
+            let Some(resolved) = resolve_type(node, &at) else {
+                return refused(None);
+            };
+            // Kind is not consulted: "not a boolean" means neither a boolean nor
+            // the class object for one.
+            let name = resolved.class_name();
+            if excluded
+                .iter()
+                .any(|e| name == e.as_str() || hierarchy.descends_from(name, e))
+            {
+                return refused(Some(name.to_string()));
             }
         }
     }
@@ -1183,6 +1222,7 @@ impl Verdict {
                 ConstraintMiss::Name { .. } => "name",
                 ConstraintMiss::NameNot { .. } => "name_not",
                 ConstraintMiss::Type { .. } => "type",
+                ConstraintMiss::TypeNot { .. } => "type_not",
                 ConstraintMiss::Is { .. } => "is",
                 ConstraintMiss::Contains { .. } => "contains",
                 ConstraintMiss::Length { .. } => "length",
@@ -1249,6 +1289,25 @@ impl Verdict {
                 ConstraintMiss::NameNot { actual } => {
                     format!("`{actual}` is excluded by `name_not:`")
                 }
+                // Says which of the two happened, for the same reason `type:`
+                // does. "Did not resolve" is a gap in what rwr can see and is
+                // fixed with a signature; "resolved to a class you excluded" is
+                // the constraint working.
+                ConstraintMiss::TypeNot {
+                    resolved: None,
+                    excluded,
+                } => format!(
+                    "receiver did not resolve; `type_not: [{}]` needs a receiver rwr can resolve, \
+                     so that an unknown type is never mistaken for an allowed one",
+                    excluded.join(", ")
+                ),
+                ConstraintMiss::TypeNot {
+                    resolved: Some(got),
+                    excluded,
+                } => format!(
+                    "resolved to {got}, excluded by `type_not: [{}]`",
+                    excluded.join(", ")
+                ),
                 ConstraintMiss::Is { wanted } => format!("not {wanted:?}"),
                 ConstraintMiss::Contains { pattern } => {
                     format!("does not contain `{pattern}`")
@@ -1695,6 +1754,46 @@ end
     /// match. Binding `$K` to an already-shortened `name:` fails
     /// `same_name_as` -- an implicit value has no identifier -- and the `size`
     /// pair, which would satisfy it, must still be found.
+    /// The asymmetry that makes `type_not:` safe. `name_not:` passes when the
+    /// capture has no identifier, because nothing that is not an identifier can
+    /// be one of the excluded ones. A type exclusion must do the opposite: an
+    /// unresolved receiver is "unknown", and letting unknown through an
+    /// exclusion turns a narrowing predicate into a widening one -- every
+    /// receiver rwr cannot see would sail past a guard written to stop it.
+    #[test]
+    fn an_unresolved_receiver_fails_a_type_exclusion() {
+        let refused = Verdict::BadBinding {
+            capture: "X".to_string(),
+            miss: ConstraintMiss::TypeNot {
+                resolved: None,
+                excluded: vec!["TrueClass".to_string()],
+            },
+        };
+        assert_ne!(refused, Verdict::Ok);
+        assert_eq!(refused.constraint(), "type_not");
+        // The report must say *which* happened, as `type:` does: "did not
+        // resolve" is fixed by writing a signature, "resolved to an excluded
+        // class" is the constraint doing its job.
+        assert!(
+            refused.detail().contains("did not resolve"),
+            "{}",
+            refused.detail()
+        );
+
+        let excluded = Verdict::BadBinding {
+            capture: "X".to_string(),
+            miss: ConstraintMiss::TypeNot {
+                resolved: Some("Boolean".to_string()),
+                excluded: vec!["Boolean".to_string()],
+            },
+        };
+        assert!(
+            excluded.detail().contains("resolved to Boolean"),
+            "{}",
+            excluded.detail()
+        );
+    }
+
     /// An unresolved receiver and a wrongly-resolved one are different problems
     /// with different fixes, and they read identically until the report says
     /// which happened. Receiver narrowing is conservative, so this is the most

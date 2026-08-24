@@ -196,6 +196,36 @@ pub(crate) struct Constraint {
     #[serde(default, rename = "type")]
     pub receiver_type: Option<String>,
 
+    /// The capture's receiver must resolve, and to none of these classes.
+    ///
+    /// **Not the mirror of `name_not:`, on purpose.** `name_not:` passes when
+    /// the capture has no identifier, because nothing that is not an identifier
+    /// can be one of the excluded ones. A type exclusion cannot pass on missing
+    /// data the same way: `type:` under-matches when it cannot resolve, which is
+    /// the safe direction, and a negation that inherited that would *widen* --
+    /// every unresolved receiver would sail through an exclusion meant to hold
+    /// it back. So this requires resolution and then excludes, and narrowing
+    /// still only ever narrows.
+    ///
+    /// Descent is always honoured, with no flag to set: "not an
+    /// `ActiveRecord::Base`" plainly means not an `Account` either, and there is
+    /// no reading of an exclusion where admitting the subclass is what the
+    /// author wanted.
+    ///
+    /// The case that motivated it is a nilable boolean, where a rewrite has to
+    /// know what it is *not* looking at:
+    ///
+    /// ```yaml
+    /// where:
+    ///   $X: { type_not: [TrueClass, FalseClass, Boolean] }
+    /// ```
+    ///
+    /// `Boolean` is in that list because `T::Boolean` is a constant path and
+    /// resolves by its last segment, so a Sorbet signature returning one arrives
+    /// under that name rather than as the two classes it aliases.
+    #[serde(default)]
+    pub type_not: Option<Vec<String>>,
+
     /// Whether `type:` means an instance or the class object.
     ///
     /// `Account.display_name` and `account.display_name` are different methods,
@@ -294,6 +324,29 @@ impl Constraint {
     /// Whether this constraint wants an instance receiver.
     pub(crate) fn wants_instance(&self) -> bool {
         !matches!(self.kind, Some(Kind::Class))
+    }
+
+    /// Whether this constraint resolves a receiver, and so needs the signature
+    /// index and the hierarchy to have been built.
+    ///
+    /// Both are built lazily, and a predicate left out of this answer does not
+    /// fail loudly -- it resolves nothing, declines every candidate, and reports
+    /// "receiver did not resolve" about a receiver that would have resolved
+    /// perfectly well had the index been built. `type_not:` shipped that way for
+    /// the length of one test run.
+    pub(crate) fn narrows_by_receiver(&self) -> bool {
+        self.receiver_type.is_some() || self.type_not.is_some()
+    }
+
+    /// Class names whose descendants this constraint needs to know about.
+    ///
+    /// `type_not:` consults descent too -- "not an `ActiveRecord::Base`" has to
+    /// rule out `Account` -- so its classes are hierarchy roots exactly as
+    /// `type:`'s one is.
+    pub(crate) fn hierarchy_roots(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.receiver_type.iter().cloned().collect();
+        out.extend(self.type_not.iter().flatten().cloned());
+        out
     }
 }
 
@@ -883,6 +936,33 @@ pub(crate) fn load(rule: &str, replace: Option<&str>) -> Result<Rule, RuleError>
 
 #[cfg(test)]
 mod tests {
+
+    /// Both the signature index and the hierarchy are built lazily, gated on
+    /// whether any rule narrows by receiver. A predicate missing from that gate
+    /// does not fail loudly -- it resolves nothing and then reports "receiver
+    /// did not resolve" about receivers that would have resolved. `type_not:`
+    /// shipped that way until a test run caught it.
+    #[test]
+    fn every_receiver_predicate_is_in_the_lazy_gate() {
+        let by_type = Constraint {
+            receiver_type: Some("Account".into()),
+            ..Default::default()
+        };
+        let by_exclusion = Constraint {
+            type_not: Some(vec!["TrueClass".into(), "FalseClass".into()]),
+            ..Default::default()
+        };
+        assert!(by_type.narrows_by_receiver());
+        assert!(by_exclusion.narrows_by_receiver());
+        assert!(!Constraint::default().narrows_by_receiver());
+
+        // Descent is consulted for every excluded class, so each is a root.
+        assert_eq!(by_type.hierarchy_roots(), vec!["Account".to_string()]);
+        assert_eq!(
+            by_exclusion.hierarchy_roots(),
+            vec!["TrueClass".to_string(), "FalseClass".to_string()]
+        );
+    }
     use super::*;
 
     #[test]

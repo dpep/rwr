@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+**`type_not:` — exclude a receiver by class, safely.** Takes a list and means *resolves, and to
+none of these*. Not the mirror of `name_not:`, deliberately: `name_not:` passes when there is no
+identifier, but a type exclusion that passed on an unresolved receiver would turn a narrowing
+predicate into a widening one, so an unresolved receiver **fails** it. Descent is always honoured
+— "not an `ActiveRecord::Base`" means not an `Account` either — with no flag to set.
+
+**`style/return-unless-nil` ships, narrowed by it.** `return if x.nil?` → `return unless x` is
+wrong for a nilable boolean, and that is now expressible: `type_not: [TrueClass, FalseClass,
+Boolean]`. `Boolean` is listed because `T::Boolean` is a constant path and resolves by its last
+segment. The rule fires only where the type resolves, so a codebase with no signatures gets no
+rewrites — pinned as a fixture, and `-e` says so per site rather than leaving you to wonder.
+
 **A prefix operator is no longer treated as a method rename.** `!x` and `x.any?` both keep their
 name in Prism's `message_loc`, and the structural diff took any two differing names for a rename —
 so `!$X.empty?` → `$X.any?` wrote `any?` over the `!` and left the receiver's call standing:

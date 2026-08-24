@@ -133,6 +133,42 @@ meant, and it is faster.
 position, so `receive(:x).with(1).and_return(nil)` is covered and
 `and_return(nil, 1)` — a *queue* of return values, a different node — is not.
 
+## Excluding a type, and why it is not the mirror of `name_not:`
+
+`type_not:` takes a list of classes and means *resolves, and to none of these*.
+
+```yaml
+where:
+  $X: { type_not: [TrueClass, FalseClass, Boolean] }
+```
+
+The second half of that sentence is the whole design. `name_not:` **passes** when
+the capture has no identifier at all, because nothing that is not an identifier
+can be one of the excluded ones. A type exclusion cannot inherit that: `type:`
+under-matches when it cannot resolve a receiver, which is the safe direction, and
+a negation that passed on missing data would *widen* — every receiver rwr cannot
+see would sail straight through a guard written to stop it. So an unresolved
+receiver **fails** an exclusion, and narrowing still only ever narrows.
+
+Descent is always honoured and there is no flag for it. "Not an
+`ActiveRecord::Base`" plainly means not an `Account` either, and there is no
+reading of an exclusion where admitting the subclass is what the author wanted.
+
+`Boolean` sits beside the two real classes because `T::Boolean` is a constant
+path and resolves by its last segment, so a Sorbet signature returning one
+arrives under that name rather than as the pair it aliases.
+
+**It fires only where the type resolves**, which today means a signature. `-e`
+distinguishes the two failures, and the difference decides what you do next:
+
+```
+$X bound `label`    -- resolved to Boolean, excluded by `type_not: [...]`
+$X bound `account`  -- receiver did not resolve; `type_not: [...]` needs a receiver rwr can resolve
+```
+
+The first is the constraint working. The second is a gap in what rwr can see,
+and is closed by writing a signature — not by loosening the rule.
+
 ## Writing a constraint: block or flow
 
 Both of these mean the same thing, and the inline one usually reads better:
