@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**If a rewrite that used to work now refuses**, that is these two new checks, and it is worth
+reporting rather than working around — they are built to skip whatever they cannot judge, so a
+refusal means one of them is wrong. Both name what they saw and what they expected, so the message
+is the bug report. There is no flag to disable them: a check you can turn off stops being a
+guarantee, and the honest fix for a false refusal is to narrow the check.
+
 **Bindings are verified too, not just shape.** A splice can produce the right shape around the
 wrong code — `foo($A, $B)` emitted with its arguments swapped matches its own template perfectly —
 and shape-checking alone cannot see it. A capture is spliced verbatim, so a metavariable the
