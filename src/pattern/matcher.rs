@@ -269,6 +269,16 @@ pub(crate) fn match_node<'pr>(
         return false;
     }
 
+    // A call's optional fields are dropped from `children` when absent, so
+    // `receiver` and `arguments` both arrive as "the first child" when the other
+    // is missing -- and the positional comparison below then lined them up.
+    // `$X.foo` matched `foo(bar)`, a receiverless call, binding `$X` to the
+    // argument list: two different programs, same child count. `find` is
+    // observation, and over-reporting is as much a lie as missing one.
+    if has_receiver(pattern) != has_receiver(target) {
+        return false;
+    }
+
     match_children(
         &generated::children(pattern),
         &generated::children(target),
@@ -276,6 +286,21 @@ pub(crate) fn match_node<'pr>(
         env,
         forbidden,
     )
+}
+
+/// Whether a call has a receiver at all.
+///
+/// `None` for anything that is not a call, so non-calls compare equal here and
+/// fall through to the positional check unchanged.
+///
+/// Receiver only, not the other optional fields. A sequence metavariable is
+/// allowed to absorb *nothing* -- `foo(*$REST)` must match `foo()`, where the
+/// pattern has an arguments node and the target has none -- so comparing
+/// argument presence would break the thing splats exist for. A block cannot
+/// line up wrongly once the receiver is pinned, because that was the only pair
+/// that could both be the lone child.
+fn has_receiver(node: &Node<'_>) -> Option<bool> {
+    Some(node.as_call_node()?.receiver().is_some())
 }
 
 /// Atoms match pairwise, except that a name atom which *is* a placeholder acts
@@ -1712,6 +1737,34 @@ end
         assert_eq!(matches("foo($A, $A)", "foo(x, y)"), 0);
         // Layout differs, structure does not.
         assert_eq!(matches("foo($A, $A)", "foo( x , x )"), 1);
+    }
+
+    /// A pattern with a receiver must not match a call that has none.
+    ///
+    /// `children` drops absent optional fields, so a call's `receiver` and its
+    /// `arguments` both arrive as the lone child when the other is missing, and
+    /// the positional comparison lined them up: `$X.foo` matched `foo(bar)`,
+    /// binding `$X` to the argument list. Two different programs -- `CALL` with
+    /// a receiver versus `FCALL` with an argument -- reported as the same site.
+    /// `find` is observation, and over-reporting is as much a lie as a miss.
+    #[test]
+    fn a_receiver_in_the_pattern_requires_one_in_the_target() {
+        assert_eq!(matches("$X.foo", "bar.foo"), 1);
+        assert_eq!(matches("$X.foo", "foo(bar)"), 0);
+        assert_eq!(matches("foo($X)", "foo(bar)"), 1);
+        assert_eq!(matches("foo($X)", "bar.foo"), 0);
+        // A block is the other thing that can be the lone child.
+        assert_eq!(matches("$X.foo { $B }", "bar.foo { 1 }"), 1);
+        assert_eq!(matches("$X.foo { $B }", "foo { 1 }"), 0);
+        assert_eq!(matches("foo { $B }", "foo { 1 }"), 1);
+
+        // Presence is compared for the receiver only. A splat must still be
+        // able to absorb nothing, where the pattern carries an arguments node
+        // and the target does not.
+        assert_eq!(matches("foo(*$REST)", "foo()"), 1);
+        // And `foo` still equals `foo()`, which is a parse artifact (D36).
+        assert_eq!(matches("foo", "foo()"), 1);
+        assert_eq!(matches("foo", "x.foo"), 0);
     }
 
     #[test]

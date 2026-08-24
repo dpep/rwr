@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+**`$X.foo` no longer matches `foo(bar)`.** A call's optional children are dropped from the child
+list when absent, so `receiver` and `arguments` both arrived as *the lone child* when the other was
+missing — and the positional comparison lined them up. `$X.foo` matched a receiverless `foo(bar)`,
+binding `$X` to the argument list: `CALL` with a receiver and `FCALL` with an argument reported as
+the same site. The same collision let `$X.foo` match `foo { 1 }`.
+
+Receiver presence is now compared before the children are. Only the receiver: a splat must still
+absorb nothing, so `foo(*$REST)` matches `foo()`, and `foo` still equals `foo()`.
+
+Renames were protected by accident — a `type:` constraint cannot resolve an argument list, so it
+declined — which is why this survived. `rwr find` was not protected, and find is observation, where
+over-reporting is as much a lie as a miss.
+
 ## 0.6.4 — 2026-08-23
 
 **`extend self` and `module_function` no longer split a rename in half.** A module that extends

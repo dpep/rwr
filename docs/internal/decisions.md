@@ -2083,3 +2083,28 @@ never a name.
 
 **Not a gap:** constant multi-assignment. `FOO, BAR = [1], [2]` is a `MultiWriteNode`, so a rule
 matching `$C = [...]` does not match it -- under-matching, which is the safe direction.
+
+## D88 - A pattern's receiver is compared for presence, not just position
+**Decided.**
+
+`generated::children` returns the children a node actually has, so an absent optional field leaves
+no gap. For a call that means `receiver` and `arguments` are both "the first child" when the other
+is missing, and comparing children positionally lined them up: `$X.foo` matched `foo(bar)`, binding
+`$X` to an `ArgumentsNode`. `bar.foo` is a `CALL` and `foo(bar)` an `FCALL` -- different programs,
+reported as the same site. A block collided the same way, so `$X.foo` also matched `foo { 1 }`.
+
+Receiver presence is now compared before the positional walk. **Receiver only**: a sequence
+metavariable must be able to absorb nothing, so `foo(*$REST)` matches `foo()` where the pattern
+carries an arguments node and the target does not, and comparing argument presence would break the
+thing splats exist for. Once the receiver is pinned, nothing else can be the lone child in its
+place.
+
+**Why it survived.** Every pack rule using `$R.method` carries either more structure
+(`$R.where($C).count > 0`) or a `type:` constraint, and a constraint cannot resolve an argument
+list -- so renames declined these sites rather than rewriting them. The exposure was `rwr find` and
+any hand-written rule with a bare `$R.method`. Find is observation, where over-reporting is as much
+a lie as a miss.
+
+**Found while** asking whether a rewrite should be validated beyond reparsing. It should, and the
+question was worth asking: this bug was invisible to `verify`, which only checks that the file
+still parses.
