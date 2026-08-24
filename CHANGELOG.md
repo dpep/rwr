@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**`-e` now says when nothing could have resolved.** "Receiver did not resolve" meant two different
+things — this receiver is hard, or there was nothing in scope to resolve it against — and they
+have opposite fixes: write a signature, or stop editing the rule. The second now says so. The
+check is whether the index read *anything*, not whether it read a return type; a repository whose
+signatures are all `params(..).void` has no return types and is emphatically not empty.
+
 **Computed dispatch that provably cannot reach the name is no longer reported.** `send("get_#{x}")`
 produces names beginning `get_`, so no value of `x` yields `display_name` — that is a proof, and
 the entry goes. The opposite inference, that `send("display_#{x}")` *does* reach it, stays a guess

@@ -42,13 +42,22 @@ pub(crate) struct Signatures {
 }
 
 impl Signatures {
-    #[cfg(test)]
+    /// Whether nothing at all was read. Distinct from `len()`, which counts
+    /// methods: a repository whose signatures are all `params(..).void` has no
+    /// return types and is emphatically not empty.
     pub(crate) fn is_empty(&self) -> bool {
-        self.returns.is_empty()
+        self.returns.is_empty() && self.params.is_empty()
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.returns.len()
+        // Methods known, not facts stored: one method with both a return type
+        // and parameter types is one signature, and counting it twice would
+        // overstate what was read.
+        self.returns
+            .keys()
+            .chain(self.params.keys())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
     }
 
     /// The types a signature gave `class#method`'s parameters, if it gave any.
@@ -418,6 +427,18 @@ mod tests {
         // used to decide whether any of it was recorded.
         let source = "class C\n  sig { params(a: String).void }\n  def m(a); end\nend\n";
         assert!(index(source).returns("C", "m", false).is_none());
+    }
+
+    /// A repository whose signatures are all `params(..).void` has no return
+    /// types and is emphatically not empty. Keying "did we read anything" off
+    /// the return count reported "no Sorbet signatures were found" about a file
+    /// that had just resolved a parameter two lines earlier.
+    #[test]
+    fn a_void_only_index_is_not_empty() {
+        let index = index("class C\n  sig { params(a: String).void }\n  def m(a); end\nend\n");
+        assert!(index.returns("C", "m", false).is_none());
+        assert!(!index.is_empty());
+        assert_eq!(index.len(), 1);
     }
 
     /// The nilable unwrapping that makes a guard resolvable: what reaches the

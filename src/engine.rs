@@ -541,7 +541,7 @@ impl Engine {
                                         rule: rule.id.clone(),
                                         capture: r.verdict.capture(),
                                         constraint: r.verdict.constraint(),
-                                        detail: r.verdict.detail(),
+                                        detail: r.verdict.detail(!ctx.sigs.is_empty()),
                                         bound: r.bound.map(|(a, b)| {
                                             String::from_utf8_lossy(&current[a..b]).into_owned()
                                         }),

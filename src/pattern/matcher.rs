@@ -1232,7 +1232,17 @@ impl Verdict {
     }
 
     /// What the constraint wanted and what it saw, in one line.
-    pub(crate) fn detail(&self) -> String {
+    ///
+    /// `any_signatures` says whether the files in scope yielded any types at
+    /// all. False changes what "did not resolve" means: not "this receiver is
+    /// hard" but "there was nothing to resolve it against", and the fix is the
+    /// repository rather than the rule. The two read identically without it,
+    /// and telling them apart is worth a clause.
+    pub(crate) fn detail(&self, any_signatures: bool) -> String {
+        let no_index = |what: &str| match any_signatures {
+            true => what.to_string(),
+            false => format!("{what}; and no Sorbet signatures were found in scope at all"),
+        };
         match self {
             Verdict::Ok => String::new(),
             Verdict::Bug(why) => (*why).to_string(),
@@ -1270,9 +1280,9 @@ impl Verdict {
                     resolved: None,
                     wanted,
                     ..
-                } => format!(
+                } => no_index(&format!(
                     "receiver did not resolve; `type: {wanted}` only matches receivers rwr can resolve"
-                ),
+                )),
                 ConstraintMiss::Type {
                     resolved: Some(got),
                     wanted,
@@ -1296,11 +1306,11 @@ impl Verdict {
                 ConstraintMiss::TypeNot {
                     resolved: None,
                     excluded,
-                } => format!(
+                } => no_index(&format!(
                     "receiver did not resolve; `type_not: [{}]` needs a receiver rwr can resolve, \
                      so that an unknown type is never mistaken for an allowed one",
                     excluded.join(", ")
-                ),
+                )),
                 ConstraintMiss::TypeNot {
                     resolved: Some(got),
                     excluded,
@@ -1800,9 +1810,9 @@ end
         // resolve" is fixed by writing a signature, "resolved to an excluded
         // class" is the constraint doing its job.
         assert!(
-            refused.detail().contains("did not resolve"),
+            refused.detail(true).contains("did not resolve"),
             "{}",
-            refused.detail()
+            refused.detail(true)
         );
 
         let excluded = Verdict::BadBinding {
@@ -1813,9 +1823,9 @@ end
             },
         };
         assert!(
-            excluded.detail().contains("resolved to Boolean"),
+            excluded.detail(true).contains("resolved to Boolean"),
             "{}",
-            excluded.detail()
+            excluded.detail(true)
         );
     }
 
@@ -1841,9 +1851,9 @@ end
                 wrong_kind: false,
             },
         };
-        assert!(unresolved.detail().contains("did not resolve"));
-        assert!(wrong.detail().contains("Gadget"));
-        assert_ne!(unresolved.detail(), wrong.detail());
+        assert!(unresolved.detail(true).contains("did not resolve"));
+        assert!(wrong.detail(true).contains("Gadget"));
+        assert_ne!(unresolved.detail(true), wrong.detail(true));
         // Both name the same predicate, so a machine consumer groups them.
         assert_eq!(unresolved.constraint(), "type");
         assert_eq!(wrong.constraint(), "type");
