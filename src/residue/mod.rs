@@ -490,6 +490,11 @@ pub(crate) fn find(
             _ => None,
         };
 
+        let mut inner = here.clone();
+        if let Some(name) = scope_name(&node) {
+            inner.push(name);
+        }
+
         if let Some(context) = context
             && !covered(start)
         {
@@ -497,15 +502,20 @@ pub(crate) fn find(
                 context,
                 byte_start: start,
                 byte_end: end.min(source.len()),
-                scope: here.clone(),
+                // A *definition* belongs to the class it defines on, which is
+                // not always the one it is written inside: `def Foo.bar` in
+                // `class Bar` defines on Foo. Recording it against the enclosing
+                // scope filed it under Bar, so a rename of `Foo.bar` reported no
+                // residue for a definition it had not rewritten -- a report
+                // claiming a completeness it did not have. Every other context
+                // is a *reference*, which does sit where it is written.
+                scope: match node {
+                    Node::DefNode { .. } => inner.clone(),
+                    _ => here.clone(),
+                },
                 implicit: implicit_self,
                 via: via.clone(),
             });
-        }
-
-        let mut inner = here;
-        if let Some(name) = scope_name(&node) {
-            inner.push(name);
         }
         // A call re-labels its argument subtrees with its own name, and clears
         // the label everywhere else -- a receiver or a block body is not an

@@ -1058,11 +1058,57 @@ pub(crate) fn scope_name_of(node: &Node<'_>) -> Option<String> {
         // The *path*, not the last segment: `class Account::Exporter` names a
         // class called `Account::Exporter`, and calling it `Exporter` loses the
         // only thing distinguishing it from every other `Exporter` in the repo.
-        Node::ClassNode { .. } => qualified(&node.as_class_node()?.constant_path()),
-        Node::ModuleNode { .. } => qualified(&node.as_module_node()?.constant_path()),
-        Node::SingletonClassNode { .. } => Some(SINGLETON.to_string()),
+        Node::ClassNode { .. } => scope_entry(&node.as_class_node()?.constant_path()),
+        Node::ModuleNode { .. } => scope_entry(&node.as_module_node()?.constant_path()),
+        // `class << self` opens a context, not a class, and stays transparent.
+        // `class << Foo` opens *Foo's* singleton while sitting lexically inside
+        // whatever encloses it -- so the methods in it belong to Foo, and
+        // reading the enclosing class off the lexical nesting attributed them to
+        // the wrong class and renamed them under its name.
+        Node::SingletonClassNode { .. } => {
+            let expression = node.as_singleton_class_node()?.expression();
+            Some(match expression {
+                Node::SelfNode { .. } => SINGLETON.to_string(),
+                other => owner_reset(scope_entry(&other)),
+            })
+        }
+        // `def Foo.bar` defines on Foo, wherever it is written. Same reasoning:
+        // the receiver decides the owner, the nesting does not.
+        Node::DefNode { .. } => {
+            let receiver = node.as_def_node()?.receiver()?;
+            match receiver {
+                // `def self.bar` is the enclosing class's own, which the
+                // singleton flag already records.
+                Node::SelfNode { .. } => None,
+                other => Some(owner_reset(scope_entry(&other))),
+            }
+        }
         _ => None,
     }
+}
+
+/// A scope entry that *replaces* everything outer rather than nesting under it.
+///
+/// `None` becomes a name no Ruby constant can spell, so a rule naming a real
+/// class matches nothing inside -- under-matching, which is the safe direction,
+/// rather than silently borrowing the lexically enclosing class's name.
+fn owner_reset(name: Option<String>) -> String {
+    format!("{ROOTED}{}", name.as_deref().unwrap_or(UNKNOWN_OWNER))
+}
+
+/// A class or module name as it enters the scope stack, marked when it is
+/// *rooted* -- `class ::Bar` inside `module Foo` declares `Bar`, not `Foo::Bar`,
+/// because `::` resets to the top level.
+fn scope_entry(node: &Node<'_>) -> Option<String> {
+    let rooted = node
+        .as_constant_path_node()
+        .is_some_and(|path| path.parent().is_none());
+    let name = qualified(node)?;
+    Some(if rooted {
+        format!("{ROOTED}{name}")
+    } else {
+        name
+    })
 }
 
 /// The metavariable a parameter list's lone `*$P` stands for.
@@ -1087,6 +1133,16 @@ pub(crate) fn lone_rest_placeholder(node: &Node<'_>, prepared: &Prepared) -> Opt
 /// Not a class name: `class << self` opens a new *context*, not a new class, so
 /// it is transparent when asking which class encloses a match.
 const SINGLETON: &str = "<<self";
+
+/// Marks a scope entry that resets the namespace instead of nesting under it --
+/// a rooted `class ::Bar`, or a body whose owner is a receiver rather than the
+/// enclosing class.
+const ROOTED: &str = "::";
+
+/// The owner of a body rwr cannot name: `class << obj`, `def obj.bar`. Not a
+/// spellable constant, so no rule targets it and nothing inside is claimed for
+/// the enclosing class.
+const UNKNOWN_OWNER: &str = "<unknown>";
 
 /// A constant path rendered whole -- `Billing::Account` rather than `Account`.
 fn qualified(node: &Node<'_>) -> Option<String> {
@@ -1121,7 +1177,19 @@ pub(crate) fn enclosing_class(scope: &[String]) -> Option<String> {
         .map(String::as_str)
         .filter(|s| *s != SINGLETON)
         .collect();
-    (!named.is_empty()).then(|| named.join("::"))
+    // A rooted entry discards everything outside it. `class ::Bar` inside
+    // `module Foo` is `Bar`; `class << Foo` inside `class Bar` belongs to Foo.
+    let from = named
+        .iter()
+        .rposition(|s| s.starts_with(ROOTED))
+        .unwrap_or(0);
+    let rest = &named[from..];
+    (!rest.is_empty()).then(|| {
+        rest.iter()
+            .map(|s| s.trim_start_matches(ROOTED))
+            .collect::<Vec<_>>()
+            .join("::")
+    })
 }
 
 /// Every node in `target` matching `pattern`, with its lexical scope.
@@ -1789,6 +1857,49 @@ end
     /// match. Binding `$K` to an already-shortened `name:` fails
     /// `same_name_as` -- an implicit value has no identifier -- and the `size`
     /// pair, which would satisfy it, must still be found.
+    /// The owner of a definition is decided by the receiver, not by lexical
+    /// nesting. Three spellings put a body somewhere other than the class it is
+    /// written inside, and reading the owner off the nesting is silently wrong
+    /// for each -- catalogued in Shopify rubydex's `docs/ruby-behaviors.md`.
+    #[test]
+    fn a_definitions_owner_is_its_receiver_not_its_nesting() {
+        // `::` resets the namespace: `class ::Bar` in `module Foo` is `Bar`.
+        assert_eq!(
+            enclosing_class(&["Foo".into(), "::Bar".into()]),
+            Some("Bar".to_string())
+        );
+        // Without the reset it nests, which is what an ordinary class does.
+        assert_eq!(
+            enclosing_class(&["Foo".into(), "Bar".into()]),
+            Some("Foo::Bar".to_string())
+        );
+        // And a reset discards *everything* outside it, not one level.
+        assert_eq!(
+            enclosing_class(&["A".into(), "B".into(), "::C".into(), "D".into()]),
+            Some("C::D".to_string())
+        );
+
+        // `class << self` opens a context, not a class, and stays transparent.
+        assert_eq!(
+            enclosing_class(&["Foo".into(), SINGLETON.into()]),
+            Some("Foo".to_string())
+        );
+        // `class << Foo` inside `class Bar` belongs to Foo. Attributing it to
+        // Bar renamed methods under a class that does not own them.
+        assert_eq!(
+            enclosing_class(&["Bar".into(), "::Foo".into()]),
+            Some("Foo".to_string())
+        );
+
+        // An owner rwr cannot name -- `class << obj` -- must not borrow the
+        // enclosing class's name. It gets one no constant can spell, so a rule
+        // naming a real class matches nothing inside: under-matching, which is
+        // the safe direction.
+        let unknown = enclosing_class(&["Bar".into(), format!("{ROOTED}{UNKNOWN_OWNER}")]);
+        assert_eq!(unknown.as_deref(), Some(UNKNOWN_OWNER));
+        assert_ne!(unknown.as_deref(), Some("Bar"));
+    }
+
     /// The asymmetry that makes `type_not:` safe. `name_not:` passes when the
     /// capture has no identifier, because nothing that is not an identifier can
     /// be one of the excluded ones. A type exclusion must do the opposite: an

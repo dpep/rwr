@@ -2002,3 +2002,44 @@ buries the report is not a caveat.
 *Reverses if:* the dispatcher list proves too narrow or too wide. It is a closed set, which is
 the point -- guessing from an interpolation's prefix whether it could produce the anchor is the
 kind of inference this tool refuses.
+
+## D86 - A definition's owner is its receiver, not its lexical nesting
+**Decided.**
+
+Ruby decides which class a definition attaches to from the *receiver*; lexical nesting only
+supplies a namespace. rwr read the owner off the nesting, which is wrong three separate ways, and
+each way is silent -- the run completes, the count looks plausible, and the wrong methods moved.
+
+| written | owner | rwr said |
+|---|---|---|
+| `class ::Bar` inside `module Foo` | `Bar` -- `::` resets to top level | `Foo::Bar` |
+| `class << Foo` inside `class Bar` | `Foo`'s singleton | `Bar` |
+| `def Foo.bar` inside `class Bar` | `Foo`'s singleton | `Bar` |
+
+The middle row is the worst of the three: a rename of `Bar.bar` rewrote a method living on `Foo`,
+at exit 0, and a rename of `Foo.bar` reported *no residue* for the definition it had missed -- a
+report claiming a completeness it did not have.
+
+A scope entry may now be **rooted**, meaning it discards everything outside it rather than nesting
+under it. Rooted names, `class << Constant` and `def Constant.name` all push one. An owner rwr
+cannot name -- `class << obj`, `def obj.name` -- pushes a name no Ruby constant can spell, so a
+rule naming a real class matches nothing inside: under-matching, which is the safe direction,
+rather than silently borrowing the enclosing class's name.
+
+`class << self` is untouched and stays transparent, because `self` *is* the enclosing class.
+
+**Residue files a definition under its owner too.** The occurrence scan recorded every occurrence
+against the scope it was written in, which is right for a *reference* and wrong for a *definition*:
+`def Foo.bar` was filed under the class containing it, so the rename that cared could not see it.
+
+`def Constant.name` is reported rather than rewritten. The definition pattern cannot match an
+explicit constant receiver, and reporting a definition rwr cannot convert is the contract working;
+rewriting it is a separate change with its own risks.
+
+**Reversal.** If Prism ever exposes a resolved owner, prefer it -- the constant in `class << Foo`
+is resolved lexically by Ruby and rwr takes it as written, which under-matches for a nested
+`Bar::Foo`. Under-matching is the safe direction, so this is a limitation rather than a bug.
+
+**Found by** reading Shopify rubydex's `docs/ruby-behaviors.md` and testing rwr against the
+behaviours it catalogues. The testbed had `class << self` and nothing else in the family, so the
+engine's blind spot and the testbed's were the same blind spot -- now `testbed/lib/account_owners.rb`.

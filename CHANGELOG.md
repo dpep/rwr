@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+**A definition's owner is its receiver, not its lexical nesting.** Ruby decides which class a
+definition attaches to from the receiver; nesting only supplies a namespace. rwr read the owner off
+the nesting, which was wrong three ways and silent every time:
+
+| written | owner | rwr said |
+|---|---|---|
+| `class ::Bar` inside `module Foo` | `Bar` — `::` resets to top level | `Foo::Bar` |
+| `class << Foo` inside `class Bar` | `Foo`'s singleton | `Bar` |
+| `def Foo.bar` inside `class Bar` | `Foo`'s singleton | `Bar` |
+
+The middle row was the worst: a rename of `Bar.bar` rewrote a method living on `Foo` at exit 0, and
+a rename of `Foo.bar` reported **no residue** for the definition it had missed. An owner rwr cannot
+name — `class << obj` — now gets a name no constant can spell, so a rule naming a real class matches
+nothing inside rather than borrowing the enclosing class's. `class << self` is unchanged: `self` *is*
+the enclosing class.
+
+**Residue files a definition under its owner.** Every occurrence was recorded against the scope it
+was written in — right for a reference, wrong for a definition. `def Foo.bar` was filed under the
+class containing it, so the rename that cared could not see it.
+
+`def Constant.name` is reported rather than rewritten: the definition pattern cannot match an
+explicit constant receiver, and reporting what it cannot convert is the contract working.
+
+
 ## 0.6.2 — 2026-08-23
 
 **A `type:` that cannot be a Ruby constant is refused at load.** `is:` has a closed set and rejects
