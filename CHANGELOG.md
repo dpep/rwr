@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**Computed dispatch that provably cannot reach the name is no longer reported.** `send("get_#{x}")`
+produces names beginning `get_`, so no value of `x` yields `display_name` — that is a proof, and
+the entry goes. The opposite inference, that `send("display_#{x}")` *does* reach it, stays a guess
+and is never made: everything that cannot be disproved is kept, including a bare `send(x)` with no
+static text at all. Only the outer literal run each side is used, since matching the middle is a
+longer argument for a smaller gain.
+
 **Sorbet signatures now yield parameter types, not just return types.** A return type answers
 "what does this chain evaluate to"; a parameter type answers "what is this bare local", which is
 what most code actually asks — `return if x.nil?` guards an argument far more often than a chain.
