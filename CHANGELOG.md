@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 — 2026-08-23
 
 **`-e` now says when nothing could have resolved.** "Receiver did not resolve" meant two different
 things — this receiver is hard, or there was nothing in scope to resolve it against — and they
