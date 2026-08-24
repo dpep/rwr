@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.3 — 2026-08-23
 
 **A definition's owner is its receiver, not its lexical nesting.** Ruby decides which class a
 definition attaches to from the receiver; nesting only supplies a namespace. rwr read the owner off
