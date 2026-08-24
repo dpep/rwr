@@ -46,7 +46,7 @@ def wait_for_worker
 end
 ```
 
-Trailing on a line, or leading above one. It covers the **outermost statement
+`style/no-sleep` is a rule of your own, not one the pack ships — a directive names whatever rule id fired. Trailing on a line, or leading above one. It covers the **outermost statement
 starting on the attached line**, so above a `def` it means the whole method,
 nested blocks included, and it stops at that method's `end`.
 

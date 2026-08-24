@@ -285,7 +285,7 @@ suppress the rest of a file.
 
 Rule ids are required: a bare `# rwr:ignore` is reported as malformed and
 suppresses nothing. A reason may follow `--`:
-`# rwr:ignore style/no-sleep -- flaky in CI, see PIE-4`. `rewrite` honours directives exactly as `check` does.
+`# rwr:ignore style/no-sleep -- flaky in CI, see PIE-4`. `style/no-sleep` is a rule of your own, not one the pack ships — a directive names whatever rule id fired. `rewrite` honours directives exactly as `check` does.
 
 Every run says how many findings were accepted and which directives have nothing
 left to accept, in text and in `-j`. Stale ones do not fail the build.

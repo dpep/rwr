@@ -162,7 +162,7 @@ arrives under that name rather than as the pair it aliases.
 distinguishes the two failures, and the difference decides what you do next:
 
 ```
-$X bound `label`    -- resolved to Boolean, excluded by `type_not: [...]`
+$X bound `flag`     -- resolved to Boolean, excluded by `type_not: [...]`
 $X bound `account`  -- receiver did not resolve; `type_not: [...]` needs a receiver rwr can resolve
 ```
 
