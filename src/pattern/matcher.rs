@@ -540,6 +540,12 @@ pub(crate) fn verdict(
     }
     if let Some(wanted) = scope.singleton
         && found.singleton != wanted
+        // `extend self` and `module_function` put one method on both tables, so
+        // a `def foo` in such a module *is* the class method and the singleton
+        // flag stops discriminating. Without this a rename of `Util.foo`
+        // rewrote every call and filed the definition as residue.
+        && !enclosing_class(&found.scope)
+            .is_some_and(|class| hierarchy.extends_itself(&class))
     {
         return Verdict::WrongScope(ScopeMiss::Singleton { wanted });
     }
@@ -692,8 +698,12 @@ pub(crate) fn verdict(
                 return unresolved(false, Some(resolved.class_name().to_string()));
             }
             // `Account.foo` and `account.foo` are different methods, so a
-            // constraint must say which it means.
-            if resolved.is_instance() != constraint.wants_instance() {
+            // constraint must say which it means -- unless the receiver is a
+            // module that extends itself, where they are the same method and
+            // the distinction has nothing to separate.
+            if resolved.is_instance() != constraint.wants_instance()
+                && !hierarchy.extends_itself(resolved.class_name())
+            {
                 return unresolved(true, Some(resolved.class_name().to_string()));
             }
         }

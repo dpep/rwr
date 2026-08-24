@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+**`extend self` and `module_function` no longer split a rename in half.** A module that extends
+itself puts one method on both tables — `Util.foo` and `Util#foo` are the same method — and rwr
+treated `kind:` as decisive, so a rename rewrote the definition and filed every call as residue, or
+the reverse. The report looked complete either way, because the half it missed was reported rather
+than dropped. `extend Other` is untouched: an ordinary mixin does not collapse the extending
+module's own tables.
+
+Underneath was a pre-filter bug that hid the feature working at all. The hierarchy reads a file
+only if it contains `class` and `<`, or a mixin keyword — and a module using `module_function` has
+none of those, so the file was dropped before parsing and the module never recorded. The collector
+was correct and never ran. The pre-filter and the collector now read from one list. `extend self`
+worked throughout because `extend` is itself a mixin keyword.
+
+**Bare `attr` counts as defining a method.** It was missing from the macros whose symbols name
+methods on the enclosing class, so an unrelated class's own `attr :display_name` read as a reach
+where the `attr_reader` beside it did not.
+
 ## 0.6.3 — 2026-08-23
 
 **A definition's owner is its receiver, not its lexical nesting.** Ruby decides which class a

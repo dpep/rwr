@@ -2043,3 +2043,39 @@ is resolved lexically by Ruby and rwr takes it as written, which under-matches f
 **Found by** reading Shopify rubydex's `docs/ruby-behaviors.md` and testing rwr against the
 behaviours it catalogues. The testbed had `class << self` and nothing else in the family, so the
 engine's blind spot and the testbed's were the same blind spot -- now `testbed/lib/account_owners.rb`.
+
+## D87 - `extend self` and `module_function` collapse the two method tables
+**Decided.**
+
+A module that extends itself puts one method on both tables: `Util.foo` and `Util#foo` name the
+same method. rwr treated `kind:` as decisive there, so a rename did half its job -- rewriting the
+definition and filing every call as residue, or the reverse -- and the report looked complete
+either way, because the half it missed was reported rather than dropped.
+
+`Hierarchy` now records self-extending modules, and for those the kind check and the
+`scope: singleton:` check both stop discriminating. `extend Other` is untouched: an ordinary mixin
+does not collapse the extending module's own tables.
+
+`module_function :foo` names particular methods and this does not track which -- it marks the
+module. That over-admits *within one module* and never reaches outside it, and the alternative
+under-reports: a missed call site is a NoMethodError, where an extra candidate is a call that still
+resolves.
+
+**The pre-filter was the real bug, and it hid the feature working.** The hierarchy admits a file
+only if it contains `class` and `<`, or a mixin keyword. A module using `module_function` has none
+of those, so the file was dropped before parsing and the module was never recorded -- the collector
+was correct and never ran. `extend self` worked throughout because `extend` is a mixin keyword.
+The pre-filter and the collector now read from one list, since a pre-filter naming less than its
+collector is a silent under-report by construction.
+
+This is the second time this pre-filter has done it. The comment above it already records the
+first, and notes that the testbed scored the case anyway because a prose comment happened to
+contain the words `class` and `<`.
+
+**Also closed:** bare `attr` was missing from `DEFINERS`, so an unrelated class's own attribute
+read as a reach where the `attr_reader` beside it did not. Every symbol `attr` takes names a method
+on the enclosing class; its optional second argument decides whether a writer comes too and is
+never a name.
+
+**Not a gap:** constant multi-assignment. `FOO, BAR = [1], [2]` is a `MultiWriteNode`, so a rule
+matching `$C = [...]` does not match it -- under-matching, which is the safe direction.

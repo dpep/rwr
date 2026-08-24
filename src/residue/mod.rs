@@ -116,6 +116,12 @@ fn scope_name(node: &Node<'_>) -> Option<String> {
 ///   class, so the conclusion matches, but by a different mechanism that a
 ///   serializer's two-hop `validates` does not share.
 const DEFINERS: &[&[u8]] = &[
+    // `attr` is the same thing as `attr_reader` for this question: every symbol
+    // it takes names a method on the enclosing class. Its second argument
+    // decides whether a writer comes too (`attr :x, true`), and that argument is
+    // not a name, so it is never labelled either way. Left out, an unrelated
+    // class's own attribute read as a reach.
+    b"attr",
     b"attr_reader",
     b"attr_accessor",
     b"attr_writer",

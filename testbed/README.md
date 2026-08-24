@@ -93,6 +93,7 @@ exotic. So what is here is what a ten-year-old Rails monolith actually holds.
 | heredocs, all four flavours | `lib/reports/account_report.rb` |
 | reopened classes, `class << self`, `class_eval` | `lib/account_ext.rb` |
 | owners that are not the enclosing class: `class ::Account`, `class << Account`, `def Account.x` | `lib/account_owners.rb` |
+| modules that extend themselves: `extend self`, `module_function` | `lib/account_formatting.rb` |
 | `prepend` and `refine` | `lib/account_patches.rb` |
 | a legacy script: shebang, encoding, multibyte, `__END__` | `script/backfill_names.rb` |
 | templates, stitched and not | `app/views/accounts/` |

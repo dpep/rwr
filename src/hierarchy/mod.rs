@@ -27,6 +27,14 @@ pub(crate) struct Hierarchy {
     /// methods in concerns, so a report that only knows `class X < Y` is silent
     /// about most of the code the class actually runs.
     mixins: HashMap<String, Vec<String>>,
+    /// Modules whose instance methods are *also* singleton methods, through
+    /// `extend self` or `module_function`.
+    ///
+    /// For these the two method tables hold the same method, so `Util.foo` and
+    /// `Util#foo` are one thing and `kind:` stops discriminating. Without this a
+    /// rename did half the job and reported the other half: renaming `Util#foo`
+    /// rewrote the definition and filed every `Util.foo` call as residue.
+    self_extended: HashSet<String>,
     /// Modules that *refine* each class, kept apart from the rest.
     ///
     /// A refinement is only in force in a file that says `using`, so it is not
@@ -47,6 +55,43 @@ pub(crate) fn constant_name(node: &Node<'_>) -> Option<String> {
 
 /// The calls that attach one module's methods to another class.
 const MIXINS: [&[u8]; 4] = [b"include", b"prepend", b"extend", b"refine"];
+
+/// Every keyword a file must contain for the hierarchy to be worth parsing it.
+///
+/// A superset of [`MIXINS`]: `extend self` is spelled with a mixin keyword, but
+/// `module_function` is not, and a file admitted by neither is never read.
+const PREFILTER: [&[u8]; 5] = [
+    b"include",
+    b"prepend",
+    b"extend",
+    b"refine",
+    b"module_function",
+];
+
+/// Whether a call makes the enclosing module's instance methods reachable on
+/// the module itself.
+///
+/// `extend self` and `module_function` differ in visibility -- the latter makes
+/// the instance copy private -- and not in the thing that matters here, which is
+/// that one name now answers on both tables. `module_function :foo` names
+/// particular methods and this does not track which: it marks the module, which
+/// over-admits within a single module and never reaches outside one. The
+/// alternative under-reports a rename, and a missed call site is a
+/// NoMethodError where an extra candidate is a call that still resolves.
+fn extends_itself(node: &Node<'_>) -> bool {
+    let Some(call) = node.as_call_node() else {
+        return false;
+    };
+    match call.name().as_slice() {
+        b"module_function" => true,
+        b"extend" => call.arguments().is_some_and(|a| {
+            a.arguments()
+                .iter()
+                .any(|n| matches!(n, Node::SelfNode { .. }))
+        }),
+        _ => false,
+    }
+}
 
 /// The modules a `include`/`prepend`/`extend` call names.
 fn mixed_in(node: &Node<'_>) -> Vec<String> {
@@ -95,6 +140,7 @@ fn links(
     out: &mut Vec<(String, String)>,
     mixins: &mut Vec<(String, String)>,
     refined: &mut Vec<(String, String)>,
+    selves: &mut Vec<String>,
 ) {
     // Carries the enclosing class, which a flat stack loses -- and without it an
     // `include` cannot be attributed to anything.
@@ -120,6 +166,11 @@ fn links(
             && let Ok(name) = String::from_utf8(module.name().as_slice().to_vec())
         {
             inner = Some(name);
+        }
+        if extends_itself(&node)
+            && let Some(host) = enclosing.clone().or_else(|| inner.clone())
+        {
+            selves.push(host);
         }
         let modules = mixed_in(&node);
         if !modules.is_empty()
@@ -172,9 +223,16 @@ impl Hierarchy {
         // its `prepend` case, because a prose comment in it happens to contain
         // the words `class` and `<`. Delete that comment and recall fell by two
         // with nothing said.
-        let mixes: Vec<_> = MIXINS
+        //
+        // `module_function` is here for the same reason and was missed for it:
+        // a module using it has no `class`, no `<` and no mixin keyword, so the
+        // file was dropped before parsing and the module never recorded as
+        // self-extending -- the collector was right and never got to run. The
+        // pre-filter must name everything the collector looks for, which is why
+        // both read from one list.
+        let mixes: Vec<_> = PREFILTER
             .iter()
-            .map(|k| memchr::memmem::Finder::new(k).into_owned())
+            .map(|k| memchr::memmem::Finder::new(*k).into_owned())
             .collect();
 
         // Sources are read once by the caller and shared with the scan. Reading
@@ -193,6 +251,7 @@ impl Hierarchy {
         let mut known: HashSet<String> = roots.iter().cloned().collect();
         let mut superclass: HashMap<String, String> = HashMap::new();
         let mut mixins: HashMap<String, Vec<String>> = HashMap::new();
+        let mut self_extended: HashSet<String> = HashSet::new();
         let mut refines: HashMap<String, Vec<String>> = HashMap::new();
         let mut done = vec![false; candidates.len()];
         let mut parsed_total = 0usize;
@@ -208,6 +267,8 @@ impl Hierarchy {
                 Vec<(String, String)>,
                 Vec<(String, String)>,
                 Vec<(String, String)>,
+                // Modules that extend themselves: one name, not a pair.
+                Vec<String>,
             );
             let round: Vec<Round> = candidates
                 .par_iter()
@@ -225,14 +286,22 @@ impl Hierarchy {
                         return None;
                     }
                     let (mut found, mut mixed, mut refined) = (Vec::new(), Vec::new(), Vec::new());
-                    links(&parsed.node(), &mut found, &mut mixed, &mut refined);
-                    Some((i, found, mixed, refined))
+                    let mut selves = Vec::new();
+                    links(
+                        &parsed.node(),
+                        &mut found,
+                        &mut mixed,
+                        &mut refined,
+                        &mut selves,
+                    );
+                    Some((i, found, mixed, refined, selves))
                 })
                 .collect();
 
             parsed_total += round.len();
             let mut grew = false;
-            for (i, found, mixed, refined) in round {
+            for (i, found, mixed, refined, selves) in round {
+                self_extended.extend(selves);
                 done[i] = true;
                 for (child, parent) in found {
                     if known.contains(&parent) && known.insert(child.clone()) {
@@ -256,6 +325,7 @@ impl Hierarchy {
             Hierarchy {
                 superclass,
                 mixins,
+                self_extended,
                 refines,
             },
             parsed_total,
@@ -288,6 +358,12 @@ impl Hierarchy {
     ///
     /// Guards against a cycle, which valid Ruby cannot express but a
     /// half-written file can.
+    /// Whether this module's instance methods answer on the module itself, so
+    /// that `Util.foo` and `Util#foo` name one method rather than two.
+    pub(crate) fn extends_itself(&self, class: &str) -> bool {
+        self.self_extended.contains(class)
+    }
+
     pub(crate) fn descends_from(&self, class: &str, ancestor: &str) -> bool {
         let mut current = class;
         let mut seen = HashSet::new();
@@ -312,7 +388,14 @@ impl Hierarchy {
         let parsed = ruby_prism::parse(source.as_bytes());
         let (mut found, mut mixed) = (Vec::new(), Vec::new());
         let mut refined = Vec::new();
-        links(&parsed.node(), &mut found, &mut mixed, &mut refined);
+        let mut selves = Vec::new();
+        links(
+            &parsed.node(),
+            &mut found,
+            &mut mixed,
+            &mut refined,
+            &mut selves,
+        );
         let mut mixins: HashMap<String, Vec<String>> = HashMap::new();
         for (class, module) in mixed {
             mixins.entry(class).or_default().push(module);
@@ -324,6 +407,7 @@ impl Hierarchy {
         Hierarchy {
             superclass: found.into_iter().collect(),
             mixins,
+            self_extended: selves.into_iter().collect(),
             refines,
         }
     }
@@ -332,6 +416,31 @@ impl Hierarchy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `extend self` and `module_function` put one method on both tables, so
+    /// `Util.foo` and `Util#foo` name the same thing. Without this a rename did
+    /// half the job: it rewrote the definition and filed every call as residue.
+    #[test]
+    fn a_module_that_extends_itself_is_recorded() {
+        for source in [
+            "module Util\n  extend self\n  def foo; end\nend",
+            "module Util\n  module_function\n  def foo; end\nend",
+            "module Util\n  def foo; end\n  module_function :foo\nend",
+        ] {
+            let h = Hierarchy::from_source(source);
+            assert!(h.extends_itself("Util"), "not recorded: {source}");
+        }
+    }
+
+    /// `extend Other` is an ordinary mixin, not a self-extension, and must not
+    /// collapse the two method tables of the extending module.
+    #[test]
+    fn extending_another_module_is_not_extending_itself() {
+        let h = Hierarchy::from_source("module Util\n  extend Other\n  def foo; end\nend");
+        assert!(!h.extends_itself("Util"));
+        let plain = Hierarchy::from_source("module Util\n  def foo; end\nend");
+        assert!(!plain.extends_itself("Util"));
+    }
 
     #[test]
     fn a_class_descends_from_itself() {
