@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**A `type:` that cannot be a Ruby constant is refused at load.** `is:` has a closed set and rejects
+an unknown value outright; `type:` takes a class name and would accept any string, so `type: string`
+resolved to nothing and matched nothing without a word — silent, and in the direction that looks
+like a clean run. A value not starting with a capital now refuses, and when the value is one of
+`is:`'s own words it says so: *did you mean `is: constant`?* Every class in a `type_not:` list is
+checked, not just the first.
+
+The two predicates ask different questions and both are needed. `is:` is syntactic — which kind of
+node this is. `type:` is semantic — which class the receiver resolves to. `type: constant` is
+meaningless because a constant read is not a class.
+
 **`style/sorted-constant-array` is no longer in the pack.** Sorting a constant whose order is
 *meaning* — `PRIORITY_ORDER`, a migration sequence, anything positional — is a bug, and nothing in
 the source tells the two apart. It bought tidiness and risked behaviour, which by the pack's own

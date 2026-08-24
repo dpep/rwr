@@ -310,6 +310,14 @@ pub(crate) enum NodeKind {
     Hash,
 }
 
+impl NodeKind {
+    /// The spellings `is:` accepts, for telling a rule author that the value
+    /// they gave `type:` belongs to the other predicate.
+    fn names() -> [&'static str; 6] {
+        ["constant", "symbol", "string", "integer", "array", "hash"]
+    }
+}
+
 /// Which of a class's two method tables a constraint means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -660,6 +668,27 @@ impl Rule {
                     "{key} has both `name:` and `name_not:` -- an allowlist already says which"
                 )));
             }
+            // `type:` takes a class name and will accept any string, so a value
+            // that cannot be a Ruby constant resolves to nothing and the rule
+            // matches nothing, silently. `is:` has a closed set and says so
+            // outright; this is the same courtesy for the open one. The likely
+            // mistake is reaching for the wrong predicate -- `type: constant`
+            // when `is: constant` was meant, since one asks what a receiver
+            // resolves to and the other what kind of node it is.
+            for class in constraint.hierarchy_roots() {
+                if class.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    continue;
+                }
+                let hint = if NodeKind::names().contains(&class.as_str()) {
+                    format!(" -- did you mean `is: {class}`?")
+                } else {
+                    String::new()
+                };
+                return Err(complain(format!(
+                    "{key} names the class `{class}`, which cannot be one: a Ruby constant \
+                     starts with a capital{hint}"
+                )));
+            }
         }
 
         // A metavariable the template introduces has nothing to be replaced
@@ -936,6 +965,43 @@ pub(crate) fn load(rule: &str, replace: Option<&str>) -> Result<Rule, RuleError>
 
 #[cfg(test)]
 mod tests {
+
+    /// `is:` has a closed set and refuses an unknown value outright; `type:`
+    /// takes a class name and will accept any string at all, so a value that
+    /// cannot be a Ruby constant resolved to nothing and matched nothing without
+    /// a word. The likely mistake is reaching for the wrong predicate: one asks
+    /// what a receiver resolves to, the other what kind of node it is.
+    #[test]
+    fn a_type_that_cannot_be_a_constant_is_refused() {
+        let refuse = |yaml: &str| {
+            let rules = parse(yaml, "t", "t").expect("parses as YAML");
+            let prepared = crate::pattern::prepare::prepare(&rules[0].pattern).expect("prepares");
+            rules[0].validate(&prepared).err().map(|e| format!("{e:?}"))
+        };
+
+        let lower = refuse("match: $R.foo\nwhere:\n  $R: { type: constant }\n")
+            .expect("lowercase class refuses");
+        assert!(lower.contains("cannot be one"), "{lower}");
+        // And points at the predicate that does take this word.
+        assert!(lower.contains("is: constant"), "{lower}");
+
+        // Not a node kind, so no hint -- but still refused.
+        let odd = refuse("match: $R.foo\nwhere:\n  $R: { type: fooBar }\n").expect("refuses");
+        assert!(!odd.contains("did you mean"), "{odd}");
+
+        // Every class in an exclusion list is checked, not just the first.
+        assert!(
+            refuse("match: $R.foo\nwhere:\n  $R: { type_not: [TrueClass, boolean] }\n").is_some(),
+            "a bad class later in the list must still refuse"
+        );
+
+        // A real class name is left alone.
+        assert!(refuse("match: $R.foo\nwhere:\n  $R: { type: Account }\n").is_none());
+        assert!(
+            refuse("match: $R.foo\nwhere:\n  $R: { type: ActiveRecord::Base }\n").is_none(),
+            "a constant path is a class name too"
+        );
+    }
 
     /// Both the signature index and the hierarchy are built lazily, gated on
     /// whether any rule narrows by receiver. A predicate missing from that gate
