@@ -8,7 +8,18 @@ repository = "https://github.com/dpep/rwr"
 build = "build.rs"
 # The rule pack is compiled in, but ship the sources too: they are the
 # documentation for writing your own.
-include = ["src/**", "build.rs", "rules/**", "README.md", "LICENSE*", "CHANGELOG.md"]
+#
+# Anchored with a leading `/`, because these are gitignore-style globs and a
+# bare `README.md` matches one at *any* depth -- which swept a gitignored
+# scratch file into the 0.6.1 tarball and stopped `cargo publish` dead.
+include = [
+    "/src/**",
+    "/build.rs",
+    "/rules/**",
+    "/README.md",
+    "/LICENSE*",
+    "/CHANGELOG.md",
+]
 
 [[bin]]
 name = "rwr"

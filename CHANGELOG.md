@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**`cargo publish` no longer sweeps up files from outside the package.** `include` globs are
+gitignore-style, so a bare `README.md` matches one at *any* depth — which pulled a gitignored
+scratch file into the 0.6.1 tarball and blocked the publish. Anchored with a leading `/`.
+
 ## 0.6.1 — 2026-08-23
 
 **`-e` now says when nothing could have resolved.** "Receiver did not resolve" meant two different
