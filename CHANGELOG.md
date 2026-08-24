@@ -15,6 +15,12 @@ none of those, so the file was dropped before parsing and the module never recor
 was correct and never ran. The pre-filter and the collector now read from one list. `extend self`
 worked throughout because `extend` is itself a mixin keyword.
 
+**`def Account.foo` is rewritten by a rename, not just reported.** It was never a matcher
+limitation — the class-method expansion emitted `def self.foo` and a `def foo` inside
+`class << self`, and simply not the third spelling. It needs no scope: the receiver written in the
+source pins the class, which matters because such a definition usually sits inside a *different*
+class, and that is exactly why it was missed.
+
 **Bare `attr` counts as defining a method.** It was missing from the macros whose symbols name
 methods on the enclosing class, so an unrelated class's own `attr :display_name` read as a reach
 where the `attr_reader` beside it did not.

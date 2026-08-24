@@ -537,7 +537,21 @@ impl MethodRename {
                     scope: in_singleton(true),
                     ..Default::default()
                 },
-            ],
+            ]
+            .into_iter()
+            // And spelled a third way. `def Account.foo` defines the same method
+            // from anywhere -- most often from inside a *different* class, which
+            // is why it needs no scope: the receiver written in the source is
+            // what pins the class, and nothing else here can.
+            //
+            // Reported rather than rewritten until now, so the one occurrence
+            // guaranteed to break was the one left for a human.
+            .chain(class.map(|class| Rule {
+                pattern: format!("def {class}.{name}(*$P); $B; end"),
+                rewrite: Some(format!("def {class}.{new}(*$P); $B; end")),
+                ..Default::default()
+            }))
+            .collect(),
         };
 
         // Explicit receivers, narrowed by class *and* kind. `self.foo` inside an

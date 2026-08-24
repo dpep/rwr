@@ -2032,13 +2032,17 @@ rather than silently borrowing the enclosing class's name.
 against the scope it was written in, which is right for a *reference* and wrong for a *definition*:
 `def Foo.bar` was filed under the class containing it, so the rename that cared could not see it.
 
-`def Constant.name` is reported rather than rewritten. The definition pattern cannot match an
-explicit constant receiver, and reporting a definition rwr cannot convert is the contract working;
-rewriting it is a separate change with its own risks.
+**`def Constant.name` is now rewritten** (was reported). It was not a limitation of the matcher but
+a shape the rename never emitted: the class-method expansion covered `def self.name` and a `def
+name` inside `class << self`, and not the third spelling. It needs no scope, because the receiver
+written in the source is what pins the class and nothing else can -- the definition most often sits
+inside a *different* class, which is the whole reason it was missed.
 
-**Reversal.** If Prism ever exposes a resolved owner, prefer it -- the constant in `class << Foo`
-is resolved lexically by Ruby and rwr takes it as written, which under-matches for a nested
-`Bar::Foo`. Under-matching is the safe direction, so this is a limitation rather than a bug.
+**Kept, deliberately.** The constant in `class << Foo` is resolved lexically by Ruby and rwr takes
+it as written, so a nested `Bar::Foo` under-matches. Closing that means resolving a constant
+against the lexical nesting chain, and a wrong answer there converts a safe under-match into a
+wrong rewrite -- the trade principle 2 refuses. Revisit if Prism exposes a resolved owner, or if
+rwr grows constant resolution for its own sake; not before.
 
 **Found by** reading Shopify rubydex's `docs/ruby-behaviors.md` and testing rwr against the
 behaviours it catalogues. The testbed had `class << self` and nothing else in the family, so the
