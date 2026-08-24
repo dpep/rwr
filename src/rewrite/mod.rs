@@ -49,6 +49,11 @@ pub(crate) enum Refusal {
     /// Reordering a sequence would move a comment that shares a line with
     /// several elements, so it has no unambiguous owner (D35).
     AmbiguousComment,
+    /// The rewritten site does not match the template it was written from.
+    ///
+    /// The splice produced valid Ruby that means something other than the rule
+    /// asked for, which [`verify`] cannot see.
+    TemplateMismatch { text: String, template: String },
     /// A capture being spliced contains a heredoc, whose content is
     /// *discontiguous*: the `<<~FOO` token sits inline while the body lives
     /// after the enclosing line. Splicing it by range would drag along text
@@ -91,6 +96,11 @@ impl std::fmt::Display for Refusal {
                 f,
                 "a comment shares a line with elements being reordered and could describe \
                  either neighbour, so there is no way to say which it belongs to"
+            ),
+            Refusal::TemplateMismatch { text, template } => write!(
+                f,
+                "the rewrite produced `{text}`, which is not what `{template}` describes -- valid \
+                 Ruby, and not the transformation the rule asked for"
             ),
             Refusal::DiscontiguousCapture { at } => write!(
                 f,
@@ -535,11 +545,17 @@ pub(crate) fn plan(
         })
         .collect();
     at.sort_by_key(|s| s.start);
+    let mut matched: Vec<(usize, usize)> = sites
+        .iter()
+        .filter_map(|index| matches.get(*index).map(|m| effective_range(&m.node)))
+        .collect();
+    matched.sort_unstable();
     Ok(Planned {
         sites: sites.len(),
         at,
         edits: kept.into_iter().map(|(_, e)| e).collect(),
         dropped,
+        matched,
     })
 }
 
@@ -566,6 +582,11 @@ pub(crate) struct Planned {
     /// Matches skipped because a wider edit covered them. Non-zero means a
     /// rerun will make further progress -- the retryable outcome (exit 4).
     pub dropped: usize,
+    /// Each changed site's matched node, as a span in the *pre-edit* source.
+    ///
+    /// Kept so the result can be checked against the template it came from:
+    /// shifted by the edits, this is where the rewritten node lands.
+    pub matched: Vec<(usize, usize)>,
 }
 
 /// Apply edits to source. Edits must be disjoint and sorted, as [`plan`] leaves
@@ -597,6 +618,103 @@ pub(crate) fn verify(rewritten: &str) -> Result<(), Refusal> {
             message: e.message().to_string(),
         }),
     }
+}
+
+/// Check that each rewritten site is now what the template said it would be.
+///
+/// [`verify`] reparses and catches a splice that produces invalid Ruby. It
+/// cannot catch one that produces *valid* Ruby meaning something else, and its
+/// own comment says so: `!$X.empty?` -> `$X.any?` once wrote `any?xs`, which
+/// Ruby reads as `any?(xs)`, and every check passed. This is the one that
+/// notices, by asking the obvious question afterwards -- does the node we just
+/// wrote match the template we wrote it from?
+///
+/// **Conservative by construction.** Anything it cannot check it skips, and a
+/// skip is never a failure: refusing a correct rewrite is worse than missing an
+/// incorrect one, because the first breaks a working run and the second leaves
+/// things exactly as they were before this existed. It declines to judge an
+/// empty template (a deletion has no shape to check), a template carrying a
+/// sequence transform (`*$ITEMS.sort` is an instruction, not output), one that
+/// is not a single expression, and any site whose node it cannot locate again.
+///
+/// Only the *shape* is checked, not the bindings: metavariables match freely
+/// here. A splice that puts the right shape around the wrong capture is a
+/// narrower bug than one that mangles the shape, and this is the cheap half.
+pub(crate) fn verify_template(
+    rewritten: &str,
+    matched: &[(usize, usize)],
+    edits: &[Edit],
+    template: &str,
+    constants: &[String],
+) -> Result<(), Refusal> {
+    if template.trim().is_empty()
+        || metavar::scan(template)
+            .iter()
+            .any(|v| v.arity != Arity::One)
+    {
+        return Ok(());
+    }
+    let Some(prepared) = prepare::prepare_with(template, constants).ok() else {
+        return Ok(());
+    };
+    let parsed_pattern = ruby_prism::parse(prepared.source.as_bytes());
+    let pattern_node = parsed_pattern.node();
+    let Some(root) = matcher::pattern_root(&pattern_node) else {
+        return Ok(());
+    };
+
+    let parsed = ruby_prism::parse(rewritten.as_bytes());
+    let tree = parsed.node();
+    for (start, end) in matched {
+        let (from, to) = (shifted(edits, *start), shifted(edits, *end));
+        let Some(node) = node_at(&tree, from, to) else {
+            continue;
+        };
+        if matcher::search(&root, &node, &prepared, &matcher::Criteria::none()).is_empty() {
+            return Err(Refusal::TemplateMismatch {
+                text: rewritten
+                    .get(from..to)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                template: template.trim().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Where an offset lands once `edits` are applied.
+///
+/// Edits are disjoint and sorted, so an offset is displaced by every edit that
+/// finishes at or before it -- the site's own edits included, which is what puts
+/// its end in the right place.
+fn shifted(edits: &[Edit], offset: usize) -> usize {
+    let delta: isize = edits
+        .iter()
+        .filter(|e| e.end <= offset)
+        .map(|e| e.text.len() as isize - (e.end - e.start) as isize)
+        .sum();
+    (offset as isize + delta).max(0) as usize
+}
+
+/// The node occupying exactly `from..to`, if one does.
+///
+/// Exact rather than containing: a node that merely spans the range is the
+/// enclosing statement, and matching a template against that asks a different
+/// question than the one intended.
+fn node_at<'pr>(tree: &Node<'pr>, from: usize, to: usize) -> Option<Node<'pr>> {
+    let mut stack = vec![generated::dup(tree)];
+    while let Some(node) = stack.pop() {
+        let (s, e) = effective_range(&node);
+        if s == from && e == to {
+            return Some(node);
+        }
+        if s <= from && e >= to {
+            stack.extend(generated::children(&node));
+        }
+    }
+    None
 }
 
 /// Structural-diff editing: emit edits only where pattern and template differ.
@@ -959,6 +1077,68 @@ mod tests {
     /// receiver's own call standing: `!xs.empty?` became `any?xs`, which parses
     /// as `any?(xs)`. Valid Ruby, so `verify` passed it; the wrong program, so
     /// nothing else would have.
+    /// The check that notices a splice which parses and still means something
+    /// else. Reconstructed from the real failure: `!$X.empty?` -> `$X.any?`
+    /// once wrote `any?xs`, which Ruby reads as `any?(xs)` -- so `verify`
+    /// passed it, and every other check was silent.
+    #[test]
+    fn a_valid_but_wrong_splice_is_caught() {
+        // `a = !xs.empty?` with the `!` overwritten by `any?` and the receiver's
+        // own call replaced by `xs` -- exactly the edits the bug emitted.
+        let edits = [
+            Edit {
+                start: 4,
+                end: 5,
+                text: "any?".into(),
+            },
+            Edit {
+                start: 5,
+                end: 14,
+                text: "xs".into(),
+            },
+        ];
+        let rewritten = apply(b"a = !xs.empty?\n", &edits);
+        assert_eq!(rewritten, "a = any?xs\n");
+        // It parses, which is why this needed a second check at all.
+        assert!(verify(&rewritten).is_ok());
+
+        let matched = [(4usize, 14usize)];
+        let out = verify_template(&rewritten, &matched, &edits, "$X.any?", &[]);
+        assert!(
+            matches!(out, Err(Refusal::TemplateMismatch { .. })),
+            "{out:?}"
+        );
+
+        // And the correct rewrite passes, so this is not simply always refusing.
+        let good = [Edit {
+            start: 4,
+            end: 14,
+            text: "xs.any?".into(),
+        }];
+        let fixed = apply(b"a = !xs.empty?\n", &good);
+        assert_eq!(fixed, "a = xs.any?\n");
+        assert!(verify_template(&fixed, &matched, &good, "$X.any?", &[]).is_ok());
+    }
+
+    /// Skipping is never failing. A template it cannot reason about must let the
+    /// rewrite through: refusing a correct rewrite breaks a working run, where
+    /// missing an incorrect one only leaves things as they were.
+    #[test]
+    fn an_uncheckable_template_is_skipped_not_refused() {
+        let edits = [Edit {
+            start: 0,
+            end: 1,
+            text: "x".into(),
+        }];
+        let text = "x = [1]\n";
+        // A deletion has no shape to check.
+        assert!(verify_template(text, &[(0, 7)], &edits, "", &[]).is_ok());
+        // A sequence transform is an instruction, not output.
+        assert!(verify_template(text, &[(0, 7)], &edits, "$C = [*$I.sort]", &[]).is_ok());
+        // A span that no longer names a node is not evidence of anything.
+        assert!(verify_template(text, &[(3, 4)], &edits, "$X.any?", &[]).is_ok());
+    }
+
     #[test]
     fn a_prefix_operator_is_not_a_rename_of_a_method_name() {
         let out = rewrite("!$X.empty?", "$X.any?", "a = !xs.empty?\n").unwrap();

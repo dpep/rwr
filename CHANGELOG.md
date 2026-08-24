@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+**A rewrite is checked against the template it came from, not just reparsed.** `verify` catches a
+splice that produces invalid Ruby and cannot catch one that produces *valid* Ruby meaning something
+else — its own comment said so, and `!$X.empty?` → `$X.any?` writing `any?xs` proved it. Every site
+is now re-matched against its template after the edits are applied, and a mismatch refuses the
+whole transformation:
+
+```
+rwr: refused app.rb: the rewrite produced `any?xs`, which is not what `$X.any?`
+describes -- valid Ruby, and not the transformation the rule asked for
+```
+
+Conservative by construction: anything it cannot check it skips, and a skip is never a failure —
+refusing a correct rewrite breaks a working run, where missing an incorrect one only leaves things
+as they were. It declines to judge a deletion, a template carrying a sequence transform, one that
+is not a single expression, and any site whose node it cannot locate again. Shape only, not
+bindings.
+
+Both checks run **in memory, before anything is written**, as they always have — there is no
+partially-written file to undo.
+
 **`$X.foo` no longer matches `foo(bar)`.** A call's optional children are dropped from the child
 list when absent, so `receiver` and `arguments` both arrived as *the lone child* when the other was
 missing — and the positional comparison lined them up. `$X.foo` matched a receiverless `foo(bar)`,

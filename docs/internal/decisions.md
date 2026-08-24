@@ -2108,3 +2108,32 @@ a lie as a miss.
 **Found while** asking whether a rewrite should be validated beyond reparsing. It should, and the
 question was worth asking: this bug was invisible to `verify`, which only checks that the file
 still parses.
+
+## D89 - The result is checked against the template, not only against the parser
+**Decided.**
+
+`verify` reparses the rewritten source and discards the whole transformation if it no longer
+parses. That is the backstop for range arithmetic and it has a stated limit -- it cannot catch a
+mistake that happens to stay valid. D-era evidence: `!$X.empty?` -> `$X.any?` wrote `any?xs`, which
+Ruby reads as `any?(xs)`. Valid, wrong, and silent.
+
+Each rewritten site is now re-matched against the template it came from. The question is the
+obvious one to ask afterwards and nothing was asking it: *is what we wrote what we said we would
+write?*
+
+**Skipping is not failing.** Refusing a correct rewrite breaks a working run; missing an incorrect
+one leaves things as they were before this existed, so every uncertainty resolves toward letting
+the rewrite through. Skipped: an empty template (a deletion has no shape), a template carrying a
+sequence transform (`*$ITEMS.sort` is an instruction, not output), a template that is not a single
+expression, and any site whose node cannot be located again in the rewritten tree.
+
+**Shape, not bindings.** Metavariables match freely, so this catches a mangled shape and not a
+correct shape wrapped around the wrong capture. The second is a narrower bug and needs the match
+environment threaded through; this is the cheap half and it is the half that failed in practice.
+
+**Both checks are in memory, before the write.** `apply` -> `verify` -> `verify_template` all run
+on a `String`, and `cli` writes only once the outcome comes back clean. There has never been a
+partially-written file to undo, and there should not be one.
+
+**Cost.** One extra parse of the rewritten source per rule application -- the same source `verify`
+already parses, so the marginal cost is the match, which is bounded by the number of changed sites.

@@ -646,7 +646,18 @@ impl Engine {
                                         Err(r) => Err(r.to_string()),
                                         Ok(planned) => {
                                             let text = rewrite::apply(&current, &planned.edits);
-                                            match rewrite::verify(&text) {
+                                            // Parses, *and* says what the rule
+                                            // said it would. The first alone
+                                            // passed `any?xs`.
+                                            match rewrite::verify(&text).and_then(|()| {
+                                                rewrite::verify_template(
+                                                    &text,
+                                                    &planned.matched,
+                                                    &planned.edits,
+                                                    template,
+                                                    &rule.constant_captures(),
+                                                )
+                                            }) {
                                                 Err(r) => Err(r.to_string()),
                                                 Ok(()) => Ok(Some((
                                                     text,
