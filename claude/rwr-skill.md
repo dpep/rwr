@@ -177,6 +177,21 @@ closed by writing a signature, not by loosening the rule. A repo with no
 signatures at all resolves almost nothing, and such a rule correctly rewrites
 nothing.
 
+`*$ITEMS` captures a *run* of elements, and a suffix reorders it in the template
+— `.sort`, `.uniq`, `.reverse`, and nothing else:
+
+```yaml
+match: $C = [*$ITEMS]
+where:
+  $C: { is: constant }
+rewrite: $C = [*$ITEMS.sort]        # PERMS = [:zebra, :apple] -> [:apple, :zebra]
+```
+
+An unrecognised suffix is **refused**, never emitted as text — `*$ITEMS.srot`
+would otherwise write `items.srot` into the source and parse fine. Comments
+travel with the element on their line; one that could describe either neighbour
+refuses rather than guessing.
+
 And `scope:` constrains the match as a whole — `inside: Account`,
 `singleton: true`, `subclasses: true`.
 

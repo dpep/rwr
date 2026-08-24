@@ -117,6 +117,69 @@ fn the_rewrite_verb_writes() {
     assert_eq!(after, "def a\n  return\nend\n");
 }
 
+/// Sequence transforms, end to end through a rule file.
+///
+/// The pack shipped exactly one rule using `*$ITEMS.sort` and it was removed --
+/// a rewrite that risks behaviour for tidiness does not belong in a pack run
+/// unattended. That left a documented capability with unit coverage only, and a
+/// feature nothing exercises end to end is one that breaks quietly, so this
+/// stands in for the rule that used to.
+#[test]
+fn a_sequence_transform_reorders_a_captured_run() {
+    let dir = fixture("PERMS = [:zebra, :apple]\norder = [:zebra, :apple]\n");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(
+        &rule,
+        "match: $C = [*$ITEMS]\nwhere:\n  $C: { is: constant }\nrewrite: $C = [*$ITEMS.sort]\n",
+    )
+    .expect("write");
+
+    let out = rwr(&[
+        "rewrite",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    // The constant sorts; the local is not a constant and is left exactly alone.
+    assert!(after.contains("PERMS = [:apple, :zebra]"), "{after}");
+    assert!(after.contains("order = [:zebra, :apple]"), "{after}");
+}
+
+/// A transform rwr does not recognise is refused rather than written out.
+/// `items.srot` in the source would parse and mean something else -- the silent
+/// wrong rewrite the whole refusal contract exists to prevent.
+#[test]
+fn an_unknown_sequence_transform_is_refused() {
+    let dir = fixture("PERMS = [:zebra, :apple]\n");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(
+        &rule,
+        "match: $C = [*$ITEMS]\nwhere:\n  $C: { is: constant }\nrewrite: $C = [*$ITEMS.srot]\n",
+    )
+    .expect("write");
+
+    let out = rwr(&[
+        "rewrite",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    let text = format!("{}{}", stderr(&out), String::from_utf8_lossy(&out.stdout));
+    assert_ne!(out.status.code(), Some(0), "must not succeed: {text}");
+    assert!(text.contains("srot"), "names the suffix: {text}");
+    // Readable, not a Debug struct: a refusal is the product, not a diagnostic.
+    assert!(
+        text.contains("is not a sequence transform"),
+        "explains itself: {text}"
+    );
+    // And nothing was written.
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    assert_eq!(
+        after, "PERMS = [:zebra, :apple]\n",
+        "file must be untouched"
+    );
+}
+
 /// A rule with no `rewrite:` is a lint: it flags a shape for a human without
 /// proposing an edit. Some things are worth surfacing and not worth rewriting.
 #[test]

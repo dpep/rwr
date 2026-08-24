@@ -194,6 +194,45 @@ rwr refuses loudly when a pattern arrives truncated, rather than running a rule
 that quietly matches nothing. `$` and `.` are ordinary characters to YAML, so
 `{ contains: $X.$ASSOC.$FIELD }` needs no quotes at all.
 
+## Reordering a captured run: sequence transforms
+
+`*$ITEMS` captures a *run* of elements rather than one node, and a suffix in the
+template reorders that run:
+
+```yaml
+match: $C = [*$ITEMS]
+where:
+  $C: { is: constant }
+rewrite: $C = [*$ITEMS.sort]
+```
+
+```ruby
+PERMS = [:zebra, :apple]    ->    PERMS = [:apple, :zebra]
+```
+
+Three exist, and the set is closed:
+
+| suffix | |
+|---|---|
+| `.sort` | alphabetise, by each element's own source text |
+| `.uniq` | drop repeats, keeping the first |
+| `.reverse` | reverse the run |
+
+**A suffix rwr does not recognise is refused, not emitted.** `*$ITEMS.srot` would
+otherwise write `items.srot` into your source, which parses and means something
+else — the silent wrong rewrite this tool exists to avoid. The refusal names the
+suffix and the run makes no edits.
+
+Comments travel with the element on their line, so reordering carries them along.
+An element sharing a line with a comment that could describe either neighbour is
+**refused** rather than guessed at, because there is no way to tell which element
+the comment is about.
+
+The pack ships no rule that uses this. The obvious one — alphabetising a constant
+array — is a rewrite that risks behaviour for tidiness, and by the standard above
+that belongs in your own directory rather than in a pack run unattended. It is
+four lines, and they are the four above.
+
 ## Lints: rules that flag without rewriting
 
 A rule with no `rewrite:` is a **finding**. It reports its matches with its

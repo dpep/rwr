@@ -61,6 +61,46 @@ pub(crate) enum Refusal {
     DiscontiguousCapture { at: usize },
 }
 
+/// A refusal is a *product*, not a diagnostic: refusing rather than guessing is
+/// the whole contract, and it costs the caller a round trip -- so it has to say
+/// what happened in a sentence they can act on. These were being printed with
+/// `{:?}`, so a typo'd sequence transform read `UnknownTransform { name: "srot" }`.
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::PartialDeletion { text } => write!(
+                f,
+                "deleting `{text}` would leave a hole in the expression around it, \
+                 and the result can still parse"
+            ),
+            Refusal::Overlap { first, second } => write!(
+                f,
+                "two edits overlap and neither can apply without corrupting the other \
+                 ({}..{} and {}..{})",
+                first.start, first.end, second.start, second.end
+            ),
+            Refusal::VerifyFailed { message } => {
+                write!(f, "the rewritten source did not verify: {message}")
+            }
+            Refusal::UnknownTransform { name } => write!(
+                f,
+                "`.{name}` is not a sequence transform -- expected `.sort`, `.uniq` or \
+                 `.reverse`. Emitting it as literal text would write `.{name}` into your source"
+            ),
+            Refusal::AmbiguousComment => write!(
+                f,
+                "a comment shares a line with elements being reordered and could describe \
+                 either neighbour, so there is no way to say which it belongs to"
+            ),
+            Refusal::DiscontiguousCapture { at } => write!(
+                f,
+                "a capture at byte {at} contains a heredoc, whose body sits outside the \
+                 expression -- splicing it by range would drag along surrounding text"
+            ),
+        }
+    }
+}
+
 /// The span a node truly occupies, including content its own location excludes.
 ///
 /// A heredoc's `closing_loc` sits past its body, so unioning every location the

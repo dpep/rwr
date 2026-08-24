@@ -643,11 +643,11 @@ impl Engine {
                                         &current,
                                         &rule.constant_captures(),
                                     ) {
-                                        Err(r) => Err(format!("{r:?}")),
+                                        Err(r) => Err(r.to_string()),
                                         Ok(planned) => {
                                             let text = rewrite::apply(&current, &planned.edits);
                                             match rewrite::verify(&text) {
-                                                Err(r) => Err(format!("{r:?}")),
+                                                Err(r) => Err(r.to_string()),
                                                 Ok(()) => Ok(Some((
                                                     text,
                                                     planned.sites,

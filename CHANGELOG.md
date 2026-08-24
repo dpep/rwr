@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+**`style/sorted-constant-array` is no longer in the pack.** Sorting a constant whose order is
+*meaning* — `PRIORITY_ORDER`, a migration sequence, anything positional — is a bug, and nothing in
+the source tells the two apart. It bought tidiness and risked behaviour, which by the pack's own
+standard belongs in your own rules directory rather than in a set run unattended. Nothing in the
+shipped pack is held back as `unsafe:` for a style reason any more.
+
+**Sequence transforms are documented for the first time.** `*$ITEMS` captures a run of elements and
+a suffix reorders it — `.sort`, `.uniq`, `.reverse`, and the set is closed. The removed rule was
+their only user in the pack, so the capability would otherwise have gone dark; it is now in
+[rules/README.md](rules/README.md), in the skill, and pinned by end-to-end tests rather than unit
+tests alone. An unrecognised suffix is still refused rather than written into your source.
+
+**Refusals read as sentences.** They were printed with `{:?}`, so a typo'd transform arrived as
+`UnknownTransform { name: "srot" }`. A refusal is the product of refusing rather than guessing, and
+it costs the caller a round trip, so it now says what happened and what was expected — for every
+refusal, not just that one.
+
 **`cargo publish` no longer sweeps up files from outside the package.** `include` globs are
 gitignore-style, so a bare `README.md` matches one at *any* depth — which pulled a gitignored
 scratch file into the 0.6.1 tarball and blocked the publish. Anchored with a leading `/`.
