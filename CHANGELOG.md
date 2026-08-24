@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.4 — 2026-08-23
 
 **`extend self` and `module_function` no longer split a rename in half.** A module that extends
 itself puts one method on both tables — `Util.foo` and `Util#foo` are the same method — and rwr
