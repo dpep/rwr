@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+**The hierarchy's structural pre-filter is gone**, and with it the whole class of bug it kept
+producing. A file used to be worth parsing only if it held `class` and `<`, or a mixin keyword —
+a rule restating what the collector looks for, which drifted from it every time the collector grew.
+It cost two silent under-reports (`module_function`, then constant aliases): the collector was
+correct both times and never got to run, and a dropped file is indistinguishable from a file with
+nothing in it.
+
+Measured rather than argued, and the measurement went against the plan — which was to *derive* the
+filter from the collector rather than delete it:
+
+| | files parsed | hierarchy phase |
+|---|---|---|
+| with the filter | 60 of 3,321 | 56.5ms |
+| without it | 60 of 3,321 | 41.8ms |
+
+It saved no parses, because the per-round search already requires a file to name a class known to be
+in the tree — and running it over every file cost more than the scans it saved.
+
+It was also hiding a third gap. A file is a candidate only once, so an alias to a class discovered in
+a *later* round — `Widget = Premium`, where Premium arrives in round two — was filtered out before
+its round came. Every file being a candidate closes that by construction.
+
 **A rename follows constant aliases.** `Alias = Account` is a second name for one class, so
 `Alias.new.display_name` is `Account#display_name` — and a rename that stopped at the spelling left
 a `NoMethodError` behind. Chains resolve (`A = B; B = C`) and a cycle stops rather than spinning.

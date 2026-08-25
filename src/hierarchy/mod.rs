@@ -63,18 +63,6 @@ pub(crate) fn constant_name(node: &Node<'_>) -> Option<String> {
 /// The calls that attach one module's methods to another class.
 const MIXINS: [&[u8]; 4] = [b"include", b"prepend", b"extend", b"refine"];
 
-/// Every keyword a file must contain for the hierarchy to be worth parsing it.
-///
-/// A superset of [`MIXINS`]: `extend self` is spelled with a mixin keyword, but
-/// `module_function` is not, and a file admitted by neither is never read.
-const PREFILTER: [&[u8]; 5] = [
-    b"include",
-    b"prepend",
-    b"extend",
-    b"refine",
-    b"module_function",
-];
-
 /// Whether a call makes the enclosing module's instance methods reachable on
 /// the module itself.
 ///
@@ -237,49 +225,32 @@ impl Hierarchy {
         sources: &[crate::source::Source],
         roots: &[String],
     ) -> (Self, usize) {
-        let class = memchr::memmem::Finder::new(b"class").into_owned();
-        let inherits = memchr::memmem::Finder::new(b"<").into_owned();
-        // A mixin edge needs no `class X < Y` line: `Account.prepend(Audit)` in
-        // a file that never writes `class` is the ordinary way to patch a model
-        // you do not own. Admitting only the inheritance shape dropped every
-        // such file before it was ever parsed -- and the testbed still scored
-        // its `prepend` case, because a prose comment in it happens to contain
-        // the words `class` and `<`. Delete that comment and recall fell by two
-        // with nothing said.
+        // No structural pre-filter. There used to be one -- a file was a
+        // candidate only if it held `class` and `<`, or a mixin keyword -- and
+        // it was wrong three times before it was measured.
         //
-        // `module_function` is here for the same reason and was missed for it:
-        // a module using it has no `class`, no `<` and no mixin keyword, so the
-        // file was dropped before parsing and the module never recorded as
-        // self-extending -- the collector was right and never got to run. The
-        // pre-filter must name everything the collector looks for, which is why
-        // both read from one list.
-        let mixes: Vec<_> = PREFILTER
-            .iter()
-            .map(|k| memchr::memmem::Finder::new(*k).into_owned())
-            .collect();
-
-        // Sources are read once by the caller and shared with the scan. Reading
-        // them here as well made the two phases each pay full I/O, which was
-        // most of the run -- parsing 72 files instead of 8,700 changed nothing
-        // until the reads stopped repeating.
-        // A file naming a root is a candidate whatever its shape, because
-        // `Alias = Account` carries no structural signal at all -- no `class`,
-        // no `<`, no mixin keyword. Measured on rails: 23 files hold a constant
-        // alias and 2 of them are invisible to the structural tests alone. The
-        // roots are specific class names, so this stays selective rather than
-        // admitting the repository.
-        let named: Vec<_> = roots
-            .iter()
-            .map(|r| memchr::memmem::Finder::new(r.as_bytes()).into_owned())
-            .collect();
+        // It cost two silent under-reports, each the same shape: the collector
+        // learned something new, the filter did not, and the file was dropped
+        // before parsing. `module_function` (D87) and a constant alias (D91)
+        // both carry no structural signal at all, so the collector was correct
+        // and never got to run. A filter that restates what the collector looks
+        // for will drift from it every time the collector grows, and a dropped
+        // file is indistinguishable from a file with nothing in it.
+        //
+        // It also bought nothing. The per-round search below already requires a
+        // file to name a class known to be in the tree, and *that* is what keeps
+        // the parse count down -- measured on rails, 60 files parsed of 3,321
+        // either way. Removing the filter is a little faster, because running it
+        // over every file cost more than the scans it saved: 42ms against 56ms,
+        // minimum of seven runs.
+        //
+        // And it was hiding a real gap. A file is only a candidate once, so an
+        // alias to a class discovered in a *later* round -- `Widget = Premium`
+        // where Premium arrives in round two -- was filtered out before its
+        // round came. Every file being a candidate closes that by construction.
         let candidates: Vec<&[u8]> = sources
             .par_iter()
             .map(crate::source::Source::bytes)
-            .filter(|src| {
-                (class.find(src).is_some() && inherits.find(src).is_some())
-                    || mixes.iter().any(|f| f.find(src).is_some())
-                    || named.iter().any(|f| f.find(src).is_some())
-            })
             .collect();
 
         let mut known: HashSet<String> = roots.iter().cloned().collect();

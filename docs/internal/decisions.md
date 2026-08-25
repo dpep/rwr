@@ -2225,3 +2225,35 @@ is the one the per-round filter already applied, moved earlier.
 **Not covered.** `Alias.display_name` where the rename is for an *instance* method stays residue,
 which is correct: `Account.display_name` would get the same treatment, and the class method does not
 exist either way.
+
+## D92 - The hierarchy has no pre-filter, because it never paid for itself
+**Decided.** Reverses the pre-filter half of D87 and D91.
+
+A file was a candidate for the hierarchy only if it held `class` and `<`, or one of a list of mixin
+keywords. That list restated what the collector looks for, and a restatement drifts from its
+original every time the original grows: `module_function` (D87) and constant assignment (D91) were
+both added to the collector and not to the filter, and both times the file was dropped before
+parsing, so the collector was correct and never ran. A filtered-out file looks exactly like a file
+with nothing in it, which is why both were silent.
+
+The obvious fix was to make the filter *derive* from the collector. Measuring first said not to
+bother, and said something better:
+
+| | parsed | hierarchy |
+|---|---|---|
+| with the filter | 60 of 3,321 | 56.5ms |
+| without it | 60 of 3,321 | 41.8ms |
+
+**It saved no parses at all.** The per-round search already requires a file to name a class known to
+be in the tree, and that is what keeps the count at 60; the pre-filter only decided which files got
+*scanned* in later rounds. Running it over every file cost more than those scans -- minimum of seven
+runs, on the same corpus, same binary otherwise.
+
+**And it was hiding a third gap.** Candidates are chosen once, so a file relevant only in a later
+round -- `Widget = Premium` where Premium is discovered in round two -- was excluded before its round
+arrived. Every file being a candidate closes that by construction rather than by another keyword.
+
+**Reversal.** If a corpus ever shows the per-round scan dominating, the answer is a better *index*
+over names, not a filter that guesses which files are structural. The rule this cost three times: a
+cheap test that restates an expensive one has to be derived from it or deleted, and deleting is
+cheaper than deriving when it was not buying anything.

@@ -117,6 +117,46 @@ fn the_rewrite_verb_writes() {
     assert_eq!(after, "def a\n  return\nend\n");
 }
 
+/// The hierarchy reads every file, and this is the case that proves it must.
+///
+/// `Widget = Premium` names neither the class the rename is about nor anything
+/// structural -- no `class`, no `<`, no mixin keyword. Premium only becomes
+/// interesting in the *second* round, by which time a pre-filtered candidate
+/// list has already dropped the file that mentions it. There used to be such a
+/// filter; it cost two silent under-reports and this third gap, and measured
+/// against no filter at all it parsed the same 60 files of 3,321 while taking
+/// longer to run.
+#[test]
+fn the_hierarchy_reaches_a_file_with_no_structural_signal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("a.rb"),
+        "class Account\n  def display_name; 1; end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(dir.path().join("b.rb"), "class Premium < Account\nend\n").expect("write");
+    // Names Premium, not Account, and carries no structural signal.
+    std::fs::write(
+        dir.path().join("c.rb"),
+        "Widget = Premium\nWidget.new.display_name\n",
+    )
+    .expect("write");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(&rule, "method: Account#display_name\nrename: full_name\n").expect("write");
+
+    let out = rwr(&[
+        "rewrite",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = std::fs::read_to_string(dir.path().join("c.rb")).expect("read back");
+    assert!(
+        after.contains("Widget.new.full_name"),
+        "alias to a class found in a later round: {after}"
+    );
+}
+
 /// A rename reaches code written through a constant alias.
 ///
 /// `Alias = Account` is a second name for one class, so `Alias.new.foo` is
