@@ -226,6 +226,12 @@ as bad luck:
 3. **Correctness is spread across parallel structures updated by convention**
    (§5) — index-aligned vectors, twin output planes, offset spaces. Each is cheap
    to get wrong in a way that type-checks.
+4. **The guards are where the bugs live.** Repeatedly, the defect has been in a
+   mechanism whose job was to protect something else — the hierarchy's file
+   pre-filter, the rewrite verification. That follows from (1) and (2) rather
+   than being bad luck: a guard's own failure mode is *doing less*, which is the
+   one thing the design's slack exists to tolerate, so nothing downstream can
+   tell a guard that over-fired from a corpus that was quiet.
 
 What that means for a feature author:
 
@@ -240,7 +246,18 @@ What that means for a feature author:
   test asserting "exit 0" cannot catch this class by definition — exit 0 is the
   symptom.
 - **Check both output planes and the exit code** whenever the report changes.
-- **Run the identity-rewrite property** when touching `rewrite/`.
+- **Run the identity-rewrite property** when touching `rewrite/`. Note what it
+  cannot do: an identity rewrite emits zero edits, so it never reaches a changed
+  site and cannot exercise anything that inspects the *result*.
+- **A cheap check that restates an expensive one must derive from it or not
+  exist**, and measure before writing one. The hierarchy pre-filter restated what
+  its collector looked for, drifted twice, and was deleted once measured — it
+  saved no parses and cost more than the scans it saved (D92).
+- **Test a guard against the thing it guards, not against the suite.** A
+  verification layer that refused correct work passed every corpus, testbed and
+  fixture, because no rule in the pack had the shape that broke it (D89). The
+  suite proves a guard is quiet on shapes the pack happens to use, which is not
+  the same as correct.
 
 ## 7. Extension points
 

@@ -28,6 +28,12 @@ for what is still unresolved.
   and the result still parses. `effective_range()` is the only splice-able
   range. RuboCop has had the right data for a decade and still ships heredoc
   bugs — documenting the hazard is not enough.
+- **A cheap check that restates an expensive one will drift from it.** Derive it
+  from the original or don't write it — and measure first. The hierarchy's file
+  pre-filter listed what its collector looked for; the collector grew twice, the
+  list neither time, and a correct collector never ran because the file was
+  dropped before parsing. Silent both times, because a filtered-out file is
+  indistinguishable from an empty one. Measured, it saved no parses at all (D92).
 - **Minimal diffs.** Never rewrite code that doesn't need rewriting. Formatting
   is a separate concern and rwr does not own style.
 - **Syntax works without semantics.** Structural matching must not require a
