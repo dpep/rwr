@@ -9,6 +9,15 @@ class Company
     legal_name
   end
 
+  # A deliberate `style/return-nil` site, so the pull-request tooling has a real
+  # simplification to demonstrate against. Nothing here is broken -- which is
+  # exactly the point of the framing.
+  def legacy_label
+    return nil unless display_name
+
+    display_name.upcase
+  end
+
   def banner
     # GT:ignore -- a call on a Company, not an Account
     display_name.upcase
