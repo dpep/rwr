@@ -2146,6 +2146,23 @@ own captures, since a capture is spliced verbatim, so a corrupted splice is stil
 Recorded as much for the shape of the reasoning as the fix: a verification layer's own failure mode
 is refusing correct work, and it needs the same evidence standard as the thing it checks.
 
+**And the suite could not supply it.** Every property test asserted the run had not *errored* --
+exit 2 -- where a refusal is exit 5, discards everything, and leaves the files byte-identical. An
+assertion that the files match the original therefore passes on a total refusal. Three tests were
+blind that way, so the suite could not distinguish "did nothing because there was nothing to do"
+from "did nothing because it gave up".
+
+The identity property cannot help here either, however good it is at splices: an identity rewrite
+emits zero edits, so no site is ever checked. Only a rewrite that moves something reaches the
+result checks, and only real code holds the shapes that break them -- `Date.today.freeze.freeze`
+appears in rails, and nothing in the pack, the testbed or the fixtures matches inside its own
+capture.
+
+So the properties now assert on refusal (and on the per-file message, since a many-file run can
+refuse some and exit differently -- which the round-trip test read straight through), and one runs
+changing rewrites over the corpus. Verified by removing the guard and watching it fail, before it
+was written to pass.
+
 **Both checks are in memory, before the write.** `apply` -> `verify` -> `verify_template` all run
 on a `String`, and `cli` writes only once the outcome comes back clean. There has never been a
 partially-written file to undo, and there should not be one.

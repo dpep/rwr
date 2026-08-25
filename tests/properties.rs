@@ -51,6 +51,28 @@ fn rwr(args: &[&str]) -> std::process::Output {
         .expect("rwr runs")
 }
 
+/// A refused run is not a passed run.
+///
+/// Every property test here asserted `!= Some(2)` -- *errored* -- and exit 5 is
+/// **Refused**, which is a different outcome entirely. A refusal discards the
+/// whole transformation, so the files come back byte-identical to the original
+/// and an assertion that they match passes with flying colours. Three tests
+/// were blind to it, which is how a verification layer that refused correct
+/// work reached a release: the suite could not tell "did nothing because there
+/// was nothing to do" from "did nothing because it gave up".
+fn assert_not_refused(out: &std::process::Output, what: &str) {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(2), "{what} errored: {stderr}");
+    assert_ne!(out.status.code(), Some(5), "{what} was refused: {stderr}");
+    // The exit code is not enough on its own: a run over many files can refuse
+    // some and still finish with a different code, and the round-trip test read
+    // clean through exactly that. The message is per file, so look for it.
+    assert!(
+        !stderr.contains("refused"),
+        "{what} refused at least one file: {stderr}"
+    );
+}
+
 /// Rewriting a pattern to itself must change nothing, byte for byte.
 ///
 /// A wrong offset here produces output that still parses -- so reparse-verify
@@ -131,11 +153,7 @@ fn an_identity_rewrite_changes_nothing() {
             pattern,
             dir.path().to_str().expect("utf8"),
         ]);
-        assert!(
-            out.status.code() != Some(2),
-            "{pattern} errored: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        assert_not_refused(&out, &format!("identity rewrite of {pattern:?}"));
         for (file, original) in files.iter().zip(&before) {
             let now = std::fs::read(file).expect("read");
             assert_eq!(
@@ -162,9 +180,9 @@ fn a_rename_round_trips() {
     let path = dir.path().to_str().expect("utf8");
 
     let there = rwr(&["rewrite", "$R.size", "-r", "$R.rwr_tmp_size", path]);
-    assert_ne!(there.status.code(), Some(2), "forward rename errored");
+    assert_not_refused(&there, "forward rename");
     let back = rwr(&["rewrite", "$R.rwr_tmp_size", "-r", "$R.size", path]);
-    assert_ne!(back.status.code(), Some(2), "reverse rename errored");
+    assert_not_refused(&back, "reverse rename");
 
     for (file, original) in files.iter().zip(&before) {
         let now = std::fs::read(file).expect("read");
@@ -187,7 +205,7 @@ fn rewritten_output_always_parses() {
         "$R.length",
         dir.path().to_str().expect("utf8"),
     ]);
-    assert_ne!(out.status.code(), Some(2), "rename errored");
+    assert_not_refused(&out, "rename");
 
     for file in &files {
         let src = std::fs::read(file).expect("read");
@@ -197,5 +215,68 @@ fn rewritten_output_always_parses() {
             "{} no longer parses",
             file.display()
         );
+    }
+}
+
+/// Rewrites that actually change real code, over patterns that nest.
+///
+/// The identity property cannot exercise the result checks at all: an identity
+/// rewrite emits zero edits, so there is no changed site to check. Only a
+/// rewrite that *moves* something reaches them, and only real code contains the
+/// shapes that break them -- a rule matching inside its own capture refused a
+/// correct rewrite, and nothing in the pack, the testbed or the fixtures
+/// matches inside its own capture, so every one of them was silent.
+///
+/// Measured before being written: with the nested-capture guard removed, this
+/// refuses on `$R.size` and `$R.freeze` over rails. It is the test that would
+/// have caught it.
+#[test]
+fn a_changing_rewrite_over_real_code_is_never_refused() {
+    for (pattern, template) in [
+        // Chains where the receiver of a match is itself a match.
+        ("$R.size", "$R.rwr_len"),
+        ("$R.freeze", "$R.rwr_frozen"),
+        ("$R.to_s", "$R.rwr_str"),
+        ("$R.map { |$P| $B }", "$R.rwr_collect { |$P| $B }"),
+    ] {
+        let Some((dir, files)) = scratch_copy(&corpus_root().join("rails"), 400) else {
+            eprintln!("skipping: no rails corpus");
+            return;
+        };
+        let before: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
+        let out = rwr([
+            "rewrite",
+            pattern,
+            "-r",
+            template,
+            dir.path().to_str().expect("utf8"),
+        ]
+        .as_ref());
+        assert_not_refused(&out, &format!("{pattern:?} -> {template:?}"));
+
+        // And it has to have done something, or the assertion above is vacuous:
+        // a run that quietly matched nothing would sail through it.
+        let touched = files
+            .iter()
+            .zip(&before)
+            .filter(|(f, original)| {
+                std::fs::read(f).expect("read").as_slice() != original.as_slice()
+            })
+            .count();
+        assert!(
+            touched > 0,
+            "{pattern:?} changed nothing, so this proves nothing"
+        );
+
+        // Whatever it wrote must still parse.
+        for file in &files {
+            let src = std::fs::read(file).expect("read");
+            assert_eq!(
+                ruby_prism::parse(&src).errors().count(),
+                0,
+                "{} no longer parses after {pattern:?}",
+                file.display()
+            );
+        }
     }
 }

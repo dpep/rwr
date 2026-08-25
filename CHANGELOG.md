@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+**The property tests could not see a refusal, which is how a false refusal shipped.** Every one of
+them asserted the run had not *errored* (exit 2); a refusal is exit 5, discards the whole
+transformation, and leaves the files byte-identical — so an assertion that they match the original
+passed with flying colours. The suite could not tell "did nothing because there was nothing to do"
+from "did nothing because it gave up".
+
+They now assert on refusal, and on the per-file message too, because a run over many files can
+refuse some and finish with a different code — which is exactly what the round-trip test read
+straight through.
+
+A new property runs *changing* rewrites over real code, since an identity rewrite emits zero edits
+and never reaches the result checks at all. Measured before being written: with the nested-capture
+guard removed it refuses on `$R.freeze` over rails, on a real `Date.today.freeze.freeze`. It is the
+test that would have caught it.
+
 ## 0.6.5 — 2026-08-24
 
 **If a rewrite that used to work now refuses**, that is these two new checks, and it is worth
