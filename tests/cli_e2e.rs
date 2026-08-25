@@ -117,6 +117,37 @@ fn the_rewrite_verb_writes() {
     assert_eq!(after, "def a\n  return\nend\n");
 }
 
+/// A rename reaches code written through a constant alias.
+///
+/// `Alias = Account` is a second name for one class, so `Alias.new.foo` is
+/// `Account#foo` and a rename that stops at the spelling leaves a
+/// NoMethodError behind. The alias carries no structural signal at all -- no
+/// `class`, no `<`, no mixin keyword -- so the file holding it has to be
+/// admitted by the class name it mentions.
+#[test]
+fn a_rename_follows_a_constant_alias() {
+    let dir = fixture(
+        "class Account\n  def display_name; 1; end\nend\n\nAlias = Account\nAlias.new.display_name\n",
+    );
+    let rule = dir.path().join("r.yml");
+    std::fs::write(&rule, "method: Account#display_name\nrename: full_name\n").expect("write");
+
+    let out = rwr(&[
+        "rewrite",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    assert!(after.contains("Alias.new.full_name"), "alias call: {after}");
+    assert!(after.contains("def full_name"), "definition: {after}");
+    // The alias itself names a class, not a method, and must not be renamed.
+    assert!(
+        after.contains("Alias = Account"),
+        "the alias survives: {after}"
+    );
+}
+
 /// A rule that matches inside its own capture must not be refused.
 ///
 /// `$R.freeze` matches `x.freeze.freeze` twice: the outer match captures

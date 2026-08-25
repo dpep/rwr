@@ -27,6 +27,13 @@ pub(crate) struct Hierarchy {
     /// methods in concerns, so a report that only knows `class X < Y` is silent
     /// about most of the code the class actually runs.
     mixins: HashMap<String, Vec<String>>,
+    /// `Alias = Account` -- another name for the same class.
+    ///
+    /// A constant alias is not inheritance and not a mixin: it is the *same*
+    /// class reached by a second name, so a rename of `Account#foo` has to reach
+    /// `Alias.new.foo` too. Kept apart from `superclass` for the reason the
+    /// mixin map is: the question it answers is different.
+    aliases: HashMap<String, String>,
     /// Modules whose instance methods are *also* singleton methods, through
     /// `extend self` or `module_function`.
     ///
@@ -134,6 +141,18 @@ fn mixin_host(node: &Node<'_>, enclosing: Option<&String>) -> Option<String> {
     }
 }
 
+/// The class a `CONST = Other` assignment aliases, if it is one.
+///
+/// Only a bare constant on the right: `Alias = Account` is a second name for a
+/// class, while `LIMIT = 5` or `Klass = Class.new` are not, and a value rwr
+/// cannot name is left alone rather than guessed at.
+fn constant_alias(node: &Node<'_>) -> Option<(String, String)> {
+    let write = node.as_constant_write_node()?;
+    let name = String::from_utf8(write.name().as_slice().to_vec()).ok()?;
+    let target = constant_name(&write.value())?;
+    (name != target).then_some((name, target))
+}
+
 /// Collect `class X < Y` pairs and the modules each class mixes in.
 fn links(
     root: &Node<'_>,
@@ -141,6 +160,7 @@ fn links(
     mixins: &mut Vec<(String, String)>,
     refined: &mut Vec<(String, String)>,
     selves: &mut Vec<String>,
+    aliases: &mut Vec<(String, String)>,
 ) {
     // Carries the enclosing class, which a flat stack loses -- and without it an
     // `include` cannot be attributed to anything.
@@ -166,6 +186,9 @@ fn links(
             && let Ok(name) = String::from_utf8(module.name().as_slice().to_vec())
         {
             inner = Some(name);
+        }
+        if let Some(pair) = constant_alias(&node) {
+            aliases.push(pair);
         }
         if extends_itself(&node)
             && let Some(host) = enclosing.clone().or_else(|| inner.clone())
@@ -239,12 +262,23 @@ impl Hierarchy {
         // them here as well made the two phases each pay full I/O, which was
         // most of the run -- parsing 72 files instead of 8,700 changed nothing
         // until the reads stopped repeating.
+        // A file naming a root is a candidate whatever its shape, because
+        // `Alias = Account` carries no structural signal at all -- no `class`,
+        // no `<`, no mixin keyword. Measured on rails: 23 files hold a constant
+        // alias and 2 of them are invisible to the structural tests alone. The
+        // roots are specific class names, so this stays selective rather than
+        // admitting the repository.
+        let named: Vec<_> = roots
+            .iter()
+            .map(|r| memchr::memmem::Finder::new(r.as_bytes()).into_owned())
+            .collect();
         let candidates: Vec<&[u8]> = sources
             .par_iter()
             .map(crate::source::Source::bytes)
             .filter(|src| {
                 (class.find(src).is_some() && inherits.find(src).is_some())
                     || mixes.iter().any(|f| f.find(src).is_some())
+                    || named.iter().any(|f| f.find(src).is_some())
             })
             .collect();
 
@@ -252,6 +286,7 @@ impl Hierarchy {
         let mut superclass: HashMap<String, String> = HashMap::new();
         let mut mixins: HashMap<String, Vec<String>> = HashMap::new();
         let mut self_extended: HashSet<String> = HashSet::new();
+        let mut aliases: HashMap<String, String> = HashMap::new();
         let mut refines: HashMap<String, Vec<String>> = HashMap::new();
         let mut done = vec![false; candidates.len()];
         let mut parsed_total = 0usize;
@@ -269,6 +304,8 @@ impl Hierarchy {
                 Vec<(String, String)>,
                 // Modules that extend themselves: one name, not a pair.
                 Vec<String>,
+                // Constant aliases: alias -> the class it names.
+                Vec<(String, String)>,
             );
             let round: Vec<Round> = candidates
                 .par_iter()
@@ -287,21 +324,24 @@ impl Hierarchy {
                     }
                     let (mut found, mut mixed, mut refined) = (Vec::new(), Vec::new(), Vec::new());
                     let mut selves = Vec::new();
+                    let mut aliased = Vec::new();
                     links(
                         &parsed.node(),
                         &mut found,
                         &mut mixed,
                         &mut refined,
                         &mut selves,
+                        &mut aliased,
                     );
-                    Some((i, found, mixed, refined, selves))
+                    Some((i, found, mixed, refined, selves, aliased))
                 })
                 .collect();
 
             parsed_total += round.len();
             let mut grew = false;
-            for (i, found, mixed, refined, selves) in round {
+            for (i, found, mixed, refined, selves, aliased) in round {
                 self_extended.extend(selves);
+                aliases.extend(aliased);
                 done[i] = true;
                 for (child, parent) in found {
                     if known.contains(&parent) && known.insert(child.clone()) {
@@ -325,6 +365,7 @@ impl Hierarchy {
             Hierarchy {
                 superclass,
                 mixins,
+                aliases,
                 self_extended,
                 refines,
             },
@@ -358,6 +399,24 @@ impl Hierarchy {
     ///
     /// Guards against a cycle, which valid Ruby cannot express but a
     /// half-written file can.
+    /// The class a name really means, following constant aliases.
+    ///
+    /// `Alias = Account` makes `Alias` a second name for one class, so every
+    /// question about it -- descent, method tables, a `type:` constraint -- is a
+    /// question about `Account`. Chains resolve (`A = B; B = C`), and a cycle
+    /// stops rather than spins: `A = B; B = A` is degenerate Ruby and must not
+    /// hang a linter.
+    pub(crate) fn canonical<'a>(&'a self, name: &'a str) -> &'a str {
+        let mut current = name;
+        for _ in 0..self.aliases.len() + 1 {
+            match self.aliases.get(current) {
+                Some(target) if target != current => current = target,
+                _ => break,
+            }
+        }
+        current
+    }
+
     /// Whether this module's instance methods answer on the module itself, so
     /// that `Util.foo` and `Util#foo` name one method rather than two.
     pub(crate) fn extends_itself(&self, class: &str) -> bool {
@@ -389,12 +448,14 @@ impl Hierarchy {
         let (mut found, mut mixed) = (Vec::new(), Vec::new());
         let mut refined = Vec::new();
         let mut selves = Vec::new();
+        let mut aliased = Vec::new();
         links(
             &parsed.node(),
             &mut found,
             &mut mixed,
             &mut refined,
             &mut selves,
+            &mut aliased,
         );
         let mut mixins: HashMap<String, Vec<String>> = HashMap::new();
         for (class, module) in mixed {
@@ -407,6 +468,7 @@ impl Hierarchy {
         Hierarchy {
             superclass: found.into_iter().collect(),
             mixins,
+            aliases: aliased.into_iter().collect(),
             self_extended: selves.into_iter().collect(),
             refines,
         }
@@ -430,6 +492,41 @@ mod tests {
             let h = Hierarchy::from_source(source);
             assert!(h.extends_itself("Util"), "not recorded: {source}");
         }
+    }
+
+    /// `Alias = Account` is a second name for one class, so every question about
+    /// the alias is a question about the class.
+    #[test]
+    fn a_constant_alias_resolves_to_the_class_it_names() {
+        let h = Hierarchy::from_source("class Account; end\nAlias = Account\n");
+        assert_eq!(h.canonical("Alias"), "Account");
+        // A name with no alias is already canonical.
+        assert_eq!(h.canonical("Account"), "Account");
+        assert_eq!(h.canonical("Unknown"), "Unknown");
+    }
+
+    /// Chains resolve, and a cycle stops rather than spinning. `A = B; B = A` is
+    /// degenerate Ruby and must not hang a linter.
+    #[test]
+    fn alias_chains_resolve_and_cycles_terminate() {
+        let chain = Hierarchy::from_source("A = B\nB = C\nclass C; end\n");
+        assert_eq!(chain.canonical("A"), "C");
+
+        let cycle = Hierarchy::from_source("A = B\nB = A\n");
+        // Whichever end it stops at, it stops.
+        assert!(matches!(cycle.canonical("A"), "A" | "B"));
+    }
+
+    /// Only a bare constant is an alias. `LIMIT = 5` names no class, and
+    /// `Klass = Class.new` names one rwr cannot follow -- both are left alone
+    /// rather than guessed at.
+    #[test]
+    fn only_a_constant_valued_assignment_is_an_alias() {
+        let h = Hierarchy::from_source("LIMIT = 5\nKlass = Class.new\nSelf = Self\n");
+        assert_eq!(h.canonical("LIMIT"), "LIMIT");
+        assert_eq!(h.canonical("Klass"), "Klass");
+        // A self-assignment is not a chain to follow.
+        assert_eq!(h.canonical("Self"), "Self");
     }
 
     /// `extend Other` is an ordinary mixin, not a self-extension, and must not

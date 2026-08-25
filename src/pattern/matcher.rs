@@ -716,9 +716,13 @@ pub(crate) fn verdict(
             let Some(resolved) = resolve_type(node, &at) else {
                 return unresolved(false, None);
             };
-            let matches_class = resolved.class_name() == wanted.as_str()
-                || (constraint.subclasses.unwrap_or(false)
-                    && hierarchy.descends_from(resolved.class_name(), wanted));
+            // Through constant aliases on both sides: `Alias = Account` makes
+            // the two names one class, so a rule naming either must reach code
+            // written with the other.
+            let got = hierarchy.canonical(resolved.class_name());
+            let want = hierarchy.canonical(wanted);
+            let matches_class = got == want
+                || (constraint.subclasses.unwrap_or(false) && hierarchy.descends_from(got, want));
             if !matches_class {
                 return unresolved(false, Some(resolved.class_name().to_string()));
             }

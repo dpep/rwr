@@ -2196,3 +2196,32 @@ test used `attr_reader` as its example of a blind spot, and `006-metaprogramming
 it unchanged. Both failed loudly, which is the job -- but the pattern is worth naming: a fixture
 written to pin *current* behaviour becomes a specification for a limitation the moment the
 limitation is worth removing, and it will always look like a regression first.
+
+## D91 - A constant alias is the same class, and the hierarchy has to see it
+**Decided.**
+
+`Alias = Account` is not inheritance and not a mixin: it is one class reached by a second name. So
+every question about the alias is a question about the class -- descent, method tables, a `type:`
+constraint -- and a rename that stopped at the spelling left `Alias.new.foo` behind as a
+`NoMethodError`.
+
+`Hierarchy::canonical` follows the chain, with a bound rather than a visited set: `A = B; B = A` is
+degenerate Ruby and the requirement is only that it stop. Both sides are canonicalised, so a rule
+naming either spelling reaches code written with the other.
+
+**Only a bare constant is an alias.** `LIMIT = 5` names no class; `Klass = Class.new` names one rwr
+cannot follow and would have to guess at. Absent beats guessed, as everywhere else.
+
+**The pre-filter had to widen, and this is the second time it has been the real bug.** The hierarchy
+reads a file only if it looks structural -- `class` and `<`, or a mixin keyword -- and a constant
+alias has none of those, exactly as `module_function` had none (D87). A file naming one of the
+classes the rules are about is now a candidate whatever its shape.
+
+Measured before and after rather than argued: static analysis said 23 rails files hold a constant
+alias and 2 are invisible to the structural tests; the hierarchy's parse count went from 58 to 60
+of 3,321. The roots are specific class names, which is what keeps this selective -- the predicate
+is the one the per-round filter already applied, moved earlier.
+
+**Not covered.** `Alias.display_name` where the rename is for an *instance* method stays residue,
+which is correct: `Account.display_name` would get the same treatment, and the class method does not
+exist either way.

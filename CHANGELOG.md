@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**A rename follows constant aliases.** `Alias = Account` is a second name for one class, so
+`Alias.new.display_name` is `Account#display_name` — and a rename that stopped at the spelling left
+a `NoMethodError` behind. Chains resolve (`A = B; B = C`) and a cycle stops rather than spinning.
+Only a bare constant counts: `LIMIT = 5` names no class and `Klass = Class.new` names one rwr
+cannot follow, so both are left alone.
+
+The file holding an alias needed the hierarchy's attention and had no way to ask for it — no
+`class`, no `<`, no mixin keyword. A file naming one of the classes the rules are about is now a
+candidate whatever its shape. That stays selective because the roots are specific class names:
+measured on rails, it takes the hierarchy from 58 files parsed to 60, out of 3,321.
+
 **A rename rewrites the symbols that name its method, instead of reporting them.** `attr_accessor
 :display_name`, `private :display_name`, `alias_method :old, :display_name`, `define_method(:display_name)`
 — the family a rename most often left broken. The argument is D85's argument for `send`, already
