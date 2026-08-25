@@ -307,11 +307,16 @@ fn check_never_writes() {
 /// to silence and nothing would notice.
 #[test]
 fn a_rename_reports_what_it_could_not_account_for() {
-    // The macro sits inside the class -- both the realistic shape and what the
-    // class-anchored scoping keeps, since an unrelated class's symbol is
-    // correctly filtered out.
-    let dir =
-        fixture("class Account\n  attr_reader :display_name\n  def display_name; 1; end\nend\n");
+    // `delegate` forwards to *another* class, so which method the symbol names
+    // cannot be settled from here -- the genuine blind spot.
+    //
+    // This used to use `attr_reader :display_name`, which is no longer one: a
+    // macro whose every symbol lands on the enclosing class is now rewritten.
+    // The fixture had quietly become a specification for the limitation rather
+    // than a test of the report, which is the failure D85 already recorded once.
+    let dir = fixture(
+        "class Account\n  delegate :display_name, to: :other\n  def display_name; 1; end\nend\n",
+    );
     let rule = dir.path().join("r.yml");
     std::fs::write(&rule, "method: Account#display_name\nrename: full_name\n").expect("write");
 

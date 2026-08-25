@@ -604,6 +604,93 @@ impl MethodRename {
             ..Default::default()
         });
 
+        // Macros that hand a *symbol* to the enclosing class, which is the
+        // largest family of sites a rename used to leave behind.
+        //
+        // The argument for rewriting these is D85's argument for `send`, and it
+        // was already accepted there: the name is a literal sitting in the
+        // source, and the only open question is which class receives it --
+        // answered here by lexical scope rather than by receiver narrowing.
+        // Declining them was a limitation wearing the clothes of a judgement.
+        //
+        // The allowlist is what makes it safe, and the bar is the one `DEFINERS`
+        // already sets: every symbol the macro takes must land on the enclosing
+        // class. `delegate :display_name, to: :account` forwards to *another*
+        // class and stays residue; so do `validates` and the callbacks, which
+        // reach the enclosing class by a mechanism a serializer's two-hop
+        // spelling does not share. Those are judgements a symbol cannot settle,
+        // which is exactly when reporting is the right answer.
+        //
+        // `*$BEFORE` and `*$AFTER` are why a multi-symbol macro survives:
+        // `attr_accessor :a, :display_name, :b` keeps its siblings and its
+        // layout, because only the one symbol is spliced.
+        if class.is_some() {
+            let macros = match kind {
+                Kind::Instance => [
+                    "attr",
+                    "attr_reader",
+                    "attr_accessor",
+                    "attr_writer",
+                    "private",
+                    "public",
+                    "protected",
+                    "module_function",
+                ]
+                .as_slice(),
+                // A class method's visibility is set by its own pair, and the
+                // attr family has no class-side spelling.
+                Kind::Class => ["private_class_method", "public_class_method"].as_slice(),
+            };
+            let mut macro_names = HashMap::new();
+            macro_names.insert(
+                "$MACRO".to_string(),
+                Constraint {
+                    name: Some(macros.iter().map(|m| (*m).to_string()).collect()),
+                    ..Default::default()
+                },
+            );
+            rules.push(Rule {
+                pattern: format!("$MACRO(*$BEFORE, :{name}, *$AFTER)"),
+                rewrite: Some(format!("$MACRO(*$BEFORE, :{new}, *$AFTER)")),
+                constraints: macro_names,
+                scope: scope(),
+                ..Default::default()
+            });
+
+            // `define_method` and `alias_method` name one method in a fixed
+            // position rather than a list, so the list form cannot reach them.
+            // `alias_method` names two, and both are the enclosing class's: the
+            // alias being created and the method it points at.
+            for (pattern, rewrite) in [
+                // Two shapes, because a block with no parameters is a
+                // different node from one with them -- `*$P` absorbs a missing
+                // *argument* list, not a missing parameter list.
+                (
+                    format!("define_method(:{name}) {{ $B }}"),
+                    format!("define_method(:{new}) {{ $B }}"),
+                ),
+                (
+                    format!("define_method(:{name}) {{ |*$P| $B }}"),
+                    format!("define_method(:{new}) {{ |*$P| $B }}"),
+                ),
+                (
+                    format!("alias_method :$ALIAS, :{name}"),
+                    format!("alias_method :$ALIAS, :{new}"),
+                ),
+                (
+                    format!("alias_method :{name}, :$TARGET"),
+                    format!("alias_method :{new}, :$TARGET"),
+                ),
+            ] {
+                rules.push(Rule {
+                    pattern,
+                    rewrite: Some(rewrite),
+                    scope: scope(),
+                    ..Default::default()
+                });
+            }
+        }
+
         // Implicit self, the largest receiver bucket -- reachable only through
         // lexical scope, so it needs a class to be anchored to. The singleton
         // flag is what keeps a class-method rename from touching an instance

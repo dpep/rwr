@@ -8,14 +8,17 @@ notes: >
   *reports the rest* -- and this fixture is deliberately built so the reported
   residue is the difference between working code and a NoMethodError.
 
-  The `send` here used to be part of that residue, and is now rewritten: the
+  Twice now this file has recorded a limitation as its expected output, which is
+  how a fixture written after the behaviour goes stale. First the `send`: the
   receiver is an ivar assigned from a constructor, so `@account.send(:x)` is as
-  provable as `@account.x`, and the same narrowing decides both. Declining it was
-  a limitation rather than a judgement -- and this file had recorded the
-  limitation as the expected output, which is how a fixture written after the
-  behaviour goes stale. What remains residue here is what rwr genuinely cannot
-  prove: a `delegate` naming a method on another class, and an `attr_reader`
-  that defines rather than calls.
+  provable as `@account.x` and the same narrowing decides both. Then the
+  `attr_reader`: every symbol it takes lands on the enclosing class, so lexical
+  scope settles which method is named exactly as receiver narrowing settled the
+  `send`. Both were limitations wearing the clothes of judgements, and this
+  fixture failed loudly each time, which is the job.
+
+  What remains residue is what rwr genuinely cannot prove: `delegate` names a
+  method on *another* class, and no amount of scope says which.
 
   Scored on the rewrite; the residue report is asserted by
   `cli_e2e::a_rename_reports_what_it_could_not_account_for`.

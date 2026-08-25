@@ -43,7 +43,11 @@ class Account
     respond_to?(:display_name) ? send(:display_name) : nil
   end
 
-  # GT:residue -- the classic metaprogramming reach
+  # Both names here are the enclosing class's own, so lexical scope settles
+  # which method the symbol means -- the same argument that made `send` with a
+  # literal name rewritable, applied to a macro instead of a receiver.
+  #
+  # GT:rewrite
   alias_method :name_for_display, :display_name
 
   def documented

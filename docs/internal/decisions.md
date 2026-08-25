@@ -2169,3 +2169,30 @@ partially-written file to undo, and there should not be one.
 
 **Cost.** One extra parse of the rewritten source per rule application -- the same source `verify`
 already parses, so the marginal cost is the match, which is bounded by the number of changed sites.
+
+## D90 - A symbol naming the renamed method is rewritten where scope settles it
+**Decided.**
+
+D85 settled this for `send`: a literal name is not dynamic dispatch, and the only open question is
+which class receives it -- which receiver narrowing answers. The same argument covers a macro
+handed a symbol, with lexical scope in place of receiver narrowing: `attr_accessor :display_name`
+inside `Account` names Account's own method and nothing else can be meant.
+
+Rewritten now: the `attr` family, `private`/`public`/`protected`, `module_function`,
+`private_class_method`/`public_class_method` for a class-method rename, `define_method`, and both
+positions of `alias_method`. These were the largest family of sites a rename left broken.
+
+**The allowlist is the safety argument**, at the bar `DEFINERS` already sets: every symbol the macro
+takes must land on the enclosing class. `delegate :display_name, to: :account` forwards to another
+class, and no amount of scope says which -- it stays residue, with `validates` and the callbacks,
+whose two-hop spelling in a serializer a symbol cannot distinguish from the local one.
+
+`*$BEFORE` and `*$AFTER` are what keep a multi-symbol macro intact: only the one symbol is spliced,
+so siblings and layout survive.
+
+**Two fixtures had recorded the limitation as the specification**, which is the same failure D85
+recorded once already and is now on its second occurrence in the same corpus entry. The e2e residue
+test used `attr_reader` as its example of a blind spot, and `006-metaprogramming-residue` expected
+it unchanged. Both failed loudly, which is the job -- but the pattern is worth naming: a fixture
+written to pin *current* behaviour becomes a specification for a limitation the moment the
+limitation is worth removing, and it will always look like a regression first.

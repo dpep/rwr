@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**A rename rewrites the symbols that name its method, instead of reporting them.** `attr_accessor
+:display_name`, `private :display_name`, `alias_method :old, :display_name`, `define_method(:display_name)`
+— the family a rename most often left broken. The argument is D85's argument for `send`, already
+accepted there: the name is a literal in the source, and the only open question is which class
+receives it, answered here by lexical scope rather than receiver narrowing.
+
+An allowlist is what makes it safe, at the bar `DEFINERS` already sets — every symbol the macro
+takes must land on the enclosing class. `delegate :display_name, to: :account` forwards to *another*
+class and stays residue; so do `validates` and the callbacks. Multi-symbol macros keep their
+siblings and layout: `attr_accessor :a, :display_name, :b` becomes `attr_accessor :a, :full_name, :b`.
+
 **The property tests could not see a refusal, which is how a false refusal shipped.** Every one of
 them asserted the run had not *errored* (exit 2); a refusal is exit 5, discards the whole
 transformation, and leaves the files byte-identical — so an assertion that they match the original

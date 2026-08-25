@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 class Account
-  attr_reader :display_name
+  attr_reader :full_name
 
   def full_name
     "#{first} #{last}"
