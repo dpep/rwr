@@ -257,12 +257,6 @@ Design notes and research, kept because the reasoning is worth having:
 - [docs/internal/scaling.md](docs/internal/scaling.md) — the cost model, measured
 - [docs/internal/prior-art.md](docs/internal/prior-art.md) — ast-grep, Comby, Semgrep, RuboCop, Ruby LSP
 
-## Gathering data from another machine
-
-`rwr-phase0` emits JSON aggregates — counts, timings, receiver distributions —
-with no source text or paths, so a codebase that cannot be shared can still be
-measured. See [docs/internal/data-collection.md](docs/internal/data-collection.md).
-
 ## License
 
 MIT

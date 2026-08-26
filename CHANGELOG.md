@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**The `rwr-phase0` binary is gone.** It existed to collect the Phase 0 measurements, which are
+done and recorded in `docs/internal/phase0-results.md`. `cargo install rwr` now installs only
+`rwr`; delete any stray `~/.cargo/bin/rwr-phase0` by hand.
+
 **The hierarchy's structural pre-filter is gone**, and with it the whole class of bug it kept
 producing. A file used to be worth parsing only if it held `class` and `<`, or a mixin keyword —
 a rule restating what the collector looks for, which drifted from it every time the collector grew.
