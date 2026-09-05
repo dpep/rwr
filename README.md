@@ -31,13 +31,20 @@ methods. No other Ruby structural tool does this: `node_pattern` has no notion
 of a receiver, ast-grep's FAQ disclaims type analysis, and Ruby LSP matches
 methods by bare name.
 
+```sh
+rwr find 'Account#display_name' app/     # read-only: where is this method?
+```
+
 ```yaml
 method: Account#display_name
 rename: full_name
 ```
 
 That reaches the definition, an override in a subclass, explicit-receiver calls,
-and implicit-self calls — and nothing else. Where a repository has Sorbet
+and implicit-self calls — and nothing else. The same designator works for all
+three verbs and names the same sites under each, so a preview cannot cover less
+than the apply; `rwr rewrite 'Account#display_name' -r full_name app/` is the
+whole rename with no file at all. Where a repository has Sorbet
 signatures, `sig { returns(X) }` is read as a return type, so a chain like
 `parser.document.name` resolves too — no RBI parser, no new file format, just
 Ruby already in the tree. On one real monolith 76% of methods carry a signature.

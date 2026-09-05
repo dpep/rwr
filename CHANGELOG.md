@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+**Ruby's method notation now works wherever a rule is named.** `rwr check 'Account#display_name'`
+reports every site of that method — the definition in all three spellings, explicit-receiver calls
+narrowed by class and kind, `send`/`try` with a literal name, the `attr_*` and visibility macros,
+`define_method`/`alias_method`, and implicit-self calls inside the class — and proposes no edit.
+`Account.display_name` is the class method, `#display_name` is the method on any class. This
+previously answered "no such file, directory, or built-in rule" (D94).
+
+`rwr rewrite 'Account#display_name' -r full_name` does the whole rename with no YAML file. Naming a
+method with no new name for it now refuses (exit 5), rather than reporting its sites and exiting 0
+having written nothing.
+
+A rule that reports rather than rewrites no longer has its own findings listed back as residue.
+Residue means "neither rewritten nor shown to you", and a finding rule rewrites nothing, so every
+site it reported used to come back twice.
+
+**`rwr find 'Account#display_name'` now finds the method.** It used to read `#` as a Ruby comment,
+parse the argument as the bare constant `Account`, and report every mention of it at exit 0 — a
+confidently wrong answer. `Account.display_name` is the class method and `#display_name` is the
+method on any class. Write `Account.display_name()` for the literal call shape (D95).
+
+find, check and rewrite now run one pipeline, so a designator names the same sites under all three —
+a preview can no longer cover less than the apply. find keeps observation polarity: exit 0 when there
+are sites, 1 when there are none. The reading taken is printed to stderr and carried as
+`interpreted` in `-j`.
+
+`find -j` now carries `residue` and `suppressed`. It used to collect residue, print it, and drop it
+from the document, so an agent got matches with no account of what the search could not see.
+
+**Fixed: a literal receiver no longer matches or misses on the caller's declarations.**
+`rwr find 'widget.status'` matched `widget.status` when `widget` was an inherited reader and missed
+the identical line when `widget` was a method parameter or a block variable — Prism gives a bare name
+a different node kind depending on the scope around it, and a pattern is parsed with no scope. The
+miss was silent: zero results and exit 1, the same answer as "no such code exists". A repo-wide
+rename therefore rewrote some sites, skipped others, and reported success. Both spellings now
+correspond wherever the identifier sits below the pattern root (D93).
+
+A bare pattern still means the method call, so renaming `Account#display_name` does not touch a local
+variable that shadows it.
+
 **The `rwr-phase0` binary is gone.** It existed to collect the Phase 0 measurements, which are
 done and recorded in `docs/internal/phase0-results.md`. `cargo install rwr` now installs only
 `rwr`; delete any stray `~/.cargo/bin/rwr-phase0` by hand.

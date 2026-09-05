@@ -458,26 +458,100 @@ impl std::fmt::Display for RuleError {
 pub(crate) struct MethodRename {
     /// `Account#display_name`, `Account.display_name`, or a bare `display_name`.
     pub method: String,
-    /// The new name.
-    pub rename: String,
+    /// The new name, or absent to *report* the method's sites rather than
+    /// change them.
+    ///
+    /// Absent, every rule in the expansion loses its template and becomes a
+    /// finding. So "where is this method" and "rename this method" are answered
+    /// from one list rather than two -- a second list would drift from this one,
+    /// and a search that under-reports where the rename over-reaches is the
+    /// worst version of that drift.
+    #[serde(default)]
+    pub rename: Option<String>,
+}
+
+/// A method named in Ruby's own notation, given where a rule is expected.
+///
+/// The notation already means something exact in a rule file's `method:` key,
+/// and a name that means one thing in a file and nothing on the command line is
+/// a notation with a hole in it (D94). `rwr check 'Account#display_name'` used
+/// to report "no such rule".
+///
+/// Deliberately narrow: only a bare `Konstant#name`, `Konstant.name` or
+/// `#name`. Anything richer -- arguments, a chain, a metavariable -- is a
+/// pattern and stays one. That matters most for `.`, which is valid Ruby: the
+/// notation claims the two-part form and nothing else.
+pub(crate) fn method_notation(arg: &str) -> Option<MethodRename> {
+    let arg = arg.trim();
+    let (class, name) = arg.split_once(['#', '.'])?;
+    // A method name, optionally with Ruby's predicate or bang suffix.
+    let is_name = |s: &str| {
+        let mut chars = s.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+            && s.trim_end_matches(['?', '!'])
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && s.matches(['?', '!']).count() <= 1
+    };
+    // `Foo`, or `Foo::Bar`. Empty means "any class", which only `#` can spell:
+    // a leading `.` is not notation anyone writes.
+    let is_class = |s: &str| {
+        !s.is_empty()
+            && s.split("::").all(|seg| {
+                seg.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                    && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+    };
+    if !is_name(name) {
+        return None;
+    }
+    if !(is_class(class) || (class.is_empty() && arg.starts_with('#'))) {
+        return None;
+    }
+    Some(MethodRename {
+        method: arg.to_string(),
+        rename: None,
+    })
 }
 
 impl MethodRename {
+    /// The designator's parts, for saying out loud how it was read.
+    pub(crate) fn parts_for_report(&self) -> (Option<String>, String, &'static str) {
+        let (class, name, kind) = self.parts();
+        let kind = match (class, kind) {
+            // With no class there is nothing for `kind:` to compare against, so
+            // the rules reach explicit calls of either kind. Saying "instance"
+            // here would announce a narrowing that did not happen.
+            (None, _) => "any",
+            (_, Kind::Class) => "class",
+            (_, Kind::Instance) => "instance",
+        };
+        (class.map(str::to_string), name.to_string(), kind)
+    }
+
     /// Split `Account#foo` / `Account.foo` into its class, name, and kind.
     fn parts(&self) -> (Option<&str>, &str, Kind) {
-        if let Some((class, name)) = self.method.split_once('#') {
-            (Some(class), name, Kind::Instance)
-        } else if let Some((class, name)) = self.method.split_once('.') {
-            (Some(class), name, Kind::Class)
+        let (class, name, kind) = if let Some((c, n)) = self.method.split_once('#') {
+            (c, n, Kind::Instance)
+        } else if let Some((c, n)) = self.method.split_once('.') {
+            (c, n, Kind::Class)
         } else {
-            (None, self.method.as_str(), Kind::Instance)
-        }
+            ("", self.method.as_str(), Kind::Instance)
+        };
+        // `#display_name` names an instance method of no particular class,
+        // which is the read-only question "where is this method at all".
+        ((!class.is_empty()).then_some(class), name, kind)
     }
 
     /// The rules this notation stands for.
     pub(crate) fn expand(&self) -> Vec<Rule> {
         let (class, name, kind) = self.parts();
-        let new = &self.rename;
+        // With no rename, the templates are built and then dropped below. Built
+        // from `name` so they stay well-formed either way -- a half-built
+        // template is a splice waiting to happen.
+        let new = self.rename.as_deref().unwrap_or(name);
         // A rename covers the hierarchy: reaching subclass call sites without
         // renaming an override's definition would ship a NoMethodError, and
         // renaming the definition without the call sites would too.
@@ -707,6 +781,16 @@ impl MethodRename {
                 ..Default::default()
             });
         }
+
+        // Reporting, not renaming: the templates go and everything that decides
+        // *which sites* -- patterns, constraints, scopes -- stays.
+        if self.rename.is_none() {
+            for rule in &mut rules {
+                rule.rewrite = None;
+                rule.description
+                    .get_or_insert_with(|| format!("Sites of {}", self.method));
+            }
+        }
         rules
     }
 }
@@ -865,8 +949,25 @@ impl Rule {
 /// A rule file may hold a single rule or a list of them. A complete rename
 /// genuinely needs several -- the definition and the call sites are different
 /// shapes -- so a rule set is the unit of work, not a single pattern.
+/// Name every rule in an expansion after the notation that produced it, so a
+/// report attributes them to what the caller actually typed.
+fn identified(mut rules: Vec<Rule>, id: &str) -> Vec<Rule> {
+    for r in &mut rules {
+        r.id.get_or_insert_with(|| id.to_string());
+    }
+    rules
+}
+
 pub(crate) fn load_all(rule: &str, replace: Option<&str>) -> Result<Vec<Rule>, RuleError> {
     if let Some(template) = replace {
+        // `Account#display_name -r full_name` is a rename in Ruby's notation,
+        // not a pattern and a template: a method is renamed by the whole rule
+        // set -- definition, dispatchers, macros, implicit self -- and
+        // rewriting the one call shape would leave every other spelling behind.
+        if let Some(mut method) = method_notation(rule) {
+            method.rename = Some(template.to_string());
+            return Ok(identified(method.expand(), rule));
+        }
         return Ok(vec![Rule {
             pattern: rule.to_string(),
             rewrite: Some(template.to_string()),
@@ -879,6 +980,12 @@ pub(crate) fn load_all(rule: &str, replace: Option<&str>) -> Result<Vec<Rule>, R
         return load_pack(path);
     }
     if !path.is_file() {
+        // Ruby's own notation, as an argument rather than a file. Checked after
+        // the path so a file always wins, and before the pack because no
+        // built-in id can hold a `#` or a capitalised `.`.
+        if let Some(method) = method_notation(rule) {
+            return Ok(identified(method.expand(), rule));
+        }
         // Not a path, so it may name part of the built-in pack. A real path
         // always wins: resolving the other way round would mean a rule shipped
         // in a later version could quietly shadow the caller's own directory.
@@ -1144,12 +1251,83 @@ mod tests {
         assert!(matches!(load("foo($A)", None), Err(RuleError::NoTemplate)));
     }
 
+    /// The notation is recognised only in the shapes a person actually writes.
+    /// Anything richer is a pattern, and reading it as a method would answer a
+    /// different question from the one that was asked.
+    #[test]
+    fn method_notation_is_recognised_narrowly() {
+        for good in [
+            "Account#display_name",
+            "Account.display_name",
+            "Admin::Account#display_name",
+            "#display_name",
+            "Account#valid?",
+            "Account#save!",
+        ] {
+            assert!(method_notation(good).is_some(), "{good}");
+        }
+        for not in [
+            // Real patterns, which must keep meaning what they mean.
+            "$R.display_name",
+            "Account.display_name(1)",
+            "Account.new.display_name",
+            "display_name",
+            "Account",
+            "foo.bar",
+            // Neither half is what it would have to be.
+            "Account#Display",
+            ".display_name",
+            "Account#",
+        ] {
+            assert!(method_notation(not).is_none(), "{not}");
+        }
+    }
+
+    /// The reporting form is the renaming form with the templates dropped, so
+    /// the two cover the same sites by construction. A second list would drift,
+    /// and a search that under-reports where the rename over-reaches is the
+    /// worst way for it to do that.
+    #[test]
+    fn the_reporting_form_covers_the_same_sites_as_the_rename() {
+        let renaming = MethodRename {
+            method: "Account#display_name".into(),
+            rename: Some("full_name".into()),
+        };
+        let reporting = method_notation("Account#display_name").expect("notation");
+
+        let (a, b) = (renaming.expand(), reporting.expand());
+        assert_eq!(a.len(), b.len());
+        for (r, f) in a.iter().zip(&b) {
+            assert_eq!(r.pattern, f.pattern);
+            assert_eq!(r.scope.inside, f.scope.inside);
+            assert_eq!(r.scope.singleton, f.scope.singleton);
+            assert!(r.rewrite.is_some(), "a rename proposes an edit");
+            assert!(f.rewrite.is_none(), "a report proposes none");
+        }
+    }
+
+    /// `#name` is the same question with no class to pin it to, so the rules
+    /// that need one are exactly the ones it does not get.
+    #[test]
+    fn a_classless_method_notation_drops_the_scoped_rules() {
+        let rules = method_notation("#display_name").expect("notation").expand();
+        assert!(!rules.is_empty());
+        assert!(
+            rules.iter().all(|r| r.scope.inside.is_none()),
+            "nothing to scope by"
+        );
+        assert!(
+            rules.iter().any(|r| r.pattern == "$R.display_name"),
+            "explicit-receiver calls still covered"
+        );
+    }
+
     /// Ruby's own notation, expanded.
     #[test]
     fn method_notation_expands_to_a_rule_set() {
         let rename = MethodRename {
             method: "Account#display_name".into(),
-            rename: "full_name".into(),
+            rename: Some("full_name".into()),
         };
         let rules = rename.expand();
         assert_eq!(rules[0].pattern, "def display_name(*$P); $B; end");
@@ -1191,7 +1369,7 @@ mod tests {
     fn the_dot_form_targets_class_methods() {
         let rename = MethodRename {
             method: "Account.display_name".into(),
-            rename: "full_name".into(),
+            rename: Some("full_name".into()),
         };
         let rules = rename.expand();
         assert_eq!(rules[0].pattern, "def self.display_name(*$P); $B; end");
@@ -1223,7 +1401,7 @@ mod tests {
     fn the_hash_form_stays_out_of_the_singleton() {
         let rename = MethodRename {
             method: "Account#display_name".into(),
-            rename: "full_name".into(),
+            rename: Some("full_name".into()),
         };
         let rules = rename.expand();
         assert_eq!(rules[0].pattern, "def display_name(*$P); $B; end");

@@ -46,6 +46,395 @@ fn no_match_exits_one() {
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
 }
 
+/// The reported bug, at the boundary it was reported from. Prism gives a bare
+/// receiver a different node kind depending on whether the enclosing scope
+/// declares the name, so `widget.status` matched the inherited-reader spelling
+/// and missed the parameter and block-variable ones -- reporting exit 1, which
+/// is the same answer as "no such code exists". A rename sweep therefore
+/// rewrote some sites, skipped others, and claimed to be done (D93).
+#[test]
+fn a_literal_receiver_matches_however_the_scope_declares_it() {
+    let cases = [
+        ("an inherited reader", "def check\n  widget.status\nend\n"),
+        (
+            "a keyword parameter",
+            "def check(widget:)\n  widget.status\nend\n",
+        ),
+        (
+            "a positional parameter",
+            "def check(widget)\n  widget.status\nend\n",
+        ),
+        (
+            "a block parameter",
+            "[1].each do |widget|\n  widget.status\nend\n",
+        ),
+        ("an assigned local", "widget = Widget.new\nwidget.status\n"),
+    ];
+    for (what, source) in cases {
+        let dir = fixture(source);
+        let out = rwr(&["widget.status", dir.path().to_str().expect("utf8")]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{what}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// `it` is a block parameter Ruby writes for you, so it has the same two
+/// spellings and the same hazard.
+#[test]
+fn the_implicit_block_parameter_is_a_receiver_like_any_other() {
+    let dir = fixture("[1].each do\n  it.status\nend\n");
+    let out = rwr(&["it.status", dir.path().to_str().expect("utf8")]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// An argument names an object the same way a receiver does, so the
+/// equivalence has to reach there too -- it is "below the root", not
+/// "receiver".
+#[test]
+fn a_literal_argument_matches_a_declared_local_too() {
+    let dir = fixture("def a(widget)\n  process(widget)\nend\n");
+    let out = rwr(&["process(widget)", dir.path().to_str().expect("utf8")]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The half of the bug that costs the most: the sweep has to actually write
+/// the sites it now sees, and write only the method name.
+#[test]
+fn a_rename_reaches_a_declared_receiver_on_disk() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = "def check(widget:)\n  widget.status == :active\nend\n";
+    let file = dir.path().join("fixture.rb");
+    std::fs::write(&file, source).expect("write fixture");
+    let rule = dir.path().join("rename.yml");
+    std::fs::write(&rule, "match: widget.status\nrewrite: widget.state\n").expect("write rule");
+
+    let out = rwr(&[
+        "rewrite",
+        rule.to_str().expect("utf8"),
+        file.to_str().expect("utf8"),
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read back"),
+        "def check(widget:)\n  widget.state == :active\nend\n"
+    );
+}
+
+/// Ruby's own method notation, given where a rule is expected. It reports the
+/// method's sites and proposes no edit, because it names a method without
+/// naming a new name for it.
+#[test]
+fn method_notation_reports_a_methods_sites() {
+    let source = [
+        "class Account",
+        "  def self.display_name",
+        "    'Accounts'",
+        "  end",
+        "",
+        "  def self.label",
+        "    display_name",
+        "  end",
+        "end",
+        "",
+        "puts Account.display_name",
+        "puts Account.send(:display_name)",
+        "puts other.display_name",
+        "",
+    ]
+    .join("\n");
+    let dir = fixture(&source);
+    let out = rwr(&[
+        "check",
+        "Account.display_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    // The definition, the implicit-self call, the explicit call, and the
+    // dispatcher -- none of which a literal `Account.display_name` pattern sees.
+    for want in [
+        "def self.display_name",
+        "    display_name",
+        "puts Account.display_name",
+        "puts Account.send(:display_name)",
+    ] {
+        assert!(text.contains(want), "missing {want}: {text}");
+    }
+    // A receiver that does not resolve is the blind spot, and is reported as
+    // one rather than as a match. On stderr, which is where the account of what
+    // a run could not see goes, so stdout stays pipeable.
+    let account = stderr(&out);
+    assert!(account.contains("could not account for"), "{account}");
+    assert!(account.contains("other.display_name"), "{account}");
+}
+
+/// The reported bug's other half. `#` opens a Ruby comment, so this used to
+/// parse as the bare constant `Account` and report every mention of it at exit
+/// 0 -- a confidently wrong answer to "where is this method".
+#[test]
+fn find_takes_a_method_designator() {
+    let source = [
+        "class Account",
+        "  def self.display_name",
+        "    'Accounts'",
+        "  end",
+        "",
+        "  def self.label",
+        "    display_name",
+        "  end",
+        "end",
+        "",
+        "puts Account.display_name",
+        "puts Account.send(:display_name)",
+        "puts other.display_name",
+        "",
+    ]
+    .join("\n");
+    let dir = fixture(&source);
+    let out = rwr(&[
+        "find",
+        "Account.display_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    // The definition, the implicit-self call, the explicit call and the
+    // dispatcher -- and not the constant, which is what it used to report.
+    assert_eq!(text.lines().filter(|l| !l.is_empty()).count(), 4, "{text}");
+    assert!(!text.contains("class Account"), "{text}");
+    // The reading taken is said out loud, because `Account.display_name` is
+    // also a valid pattern.
+    assert!(stderr(&out).contains("class method"), "{}", stderr(&out));
+}
+
+/// find and rewrite must agree on which sites a designator names: a preview
+/// that covered a different set from the apply would make "check, then rewrite"
+/// worthless. They share one pipeline so they cannot disagree -- this pins it.
+#[test]
+fn find_and_rewrite_agree_on_a_designators_sites() {
+    let source = [
+        "class Account",
+        "  def display_name",
+        "    'x'",
+        "  end",
+        "",
+        "  def greet",
+        "    display_name",
+        "  end",
+        "end",
+        "",
+        "acct = Account.new",
+        "puts acct.display_name",
+        "puts other.display_name",
+        "",
+    ]
+    .join("\n");
+
+    let found = fixture(&source);
+    let out = rwr(&[
+        "find",
+        "Account#display_name",
+        found.path().to_str().expect("utf8"),
+    ]);
+    let sites = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .count();
+
+    let written = fixture(&source);
+    let apply = rwr(&[
+        "rewrite",
+        "Account#display_name",
+        "-r",
+        "full_name",
+        written.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(apply.status.code(), Some(0), "{}", stderr(&apply));
+    let after = std::fs::read_to_string(written.path().join("fixture.rb")).expect("read");
+
+    assert_eq!(
+        sites,
+        after.matches("full_name").count(),
+        "find reported {sites} sites, rewrite wrote a different number: {after}"
+    );
+    // And the one neither of them claims stays put, in both.
+    assert!(after.contains("puts other.display_name"), "{after}");
+}
+
+/// find's polarity is observation: found is 0, nothing found is 1. Residue does
+/// not make it a success -- an occurrence rwr could not tie to this method is
+/// precisely not a site of it, so exiting 0 would answer "found" for a method
+/// that is not there.
+#[test]
+fn a_designator_with_only_residue_exits_one() {
+    let dir = fixture("class Account\nend\n\nputs other.display_name\n");
+    let out = rwr(&[
+        "find",
+        "Account#display_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    // Reported all the same: the blind spot is never conditional.
+    assert!(
+        stderr(&out).contains("could not account for"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// `find -j` carries the account of what the search could not see. It used to
+/// collect residue, print it, and drop it from the document entirely -- so an
+/// agent got matches with no blind-spot report at all.
+#[test]
+fn find_json_carries_residue_and_the_reading() {
+    let dir = fixture(
+        "class Account\n  def display_name\n    'x'\n  end\nend\n\nputs other.display_name\n",
+    );
+    let out = rwr(&[
+        "find",
+        "Account#display_name",
+        dir.path().to_str().expect("utf8"),
+        "-j",
+    ]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+    assert!(!doc["matches"].as_array().expect("matches").is_empty());
+    assert!(!doc["residue"].as_array().expect("residue").is_empty());
+    assert_eq!(doc["interpreted"]["kind"], "instance");
+    assert_eq!(doc["interpreted"]["class"], "Account");
+}
+
+/// A bare pattern is still a pattern, and adding `()` is how the literal call
+/// shape stays reachable now that the two-part spelling names the method.
+#[test]
+fn a_pattern_is_not_read_as_a_designator() {
+    let dir = fixture(
+        "class Account\n  def self.display_name\n    'x'\n  end\nend\n\nputs Account.display_name\n",
+    );
+    let out = rwr(&[
+        "find",
+        "Account.display_name()",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Only the literal call, not the definition a designator would also report.
+    assert_eq!(text.lines().filter(|l| !l.is_empty()).count(), 1, "{text}");
+    assert!(text.contains("puts Account.display_name"), "{text}");
+    assert!(!stderr(&out).contains("read `"), "no reading to disclose");
+}
+
+/// A designator names a method but not a new name for it, so `rewrite` has
+/// nothing to write. It must refuse: the version this replaced reported the
+/// method's sites and exited 0 having changed nothing.
+#[test]
+fn rewriting_a_method_with_no_new_name_refuses() {
+    let dir = fixture("class Account\n  def display_name\n    'x'\n  end\nend\n");
+    let before = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    let out = rwr(&[
+        "rewrite",
+        "Account#display_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert!(stderr(&out).contains("-r <new_name>"), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read"),
+        before,
+        "a refusal writes nothing"
+    );
+}
+
+/// `-r` through the notation is the whole rename, not a rewrite of the one call
+/// shape -- so the definition and the dispatcher move with the call sites.
+#[test]
+fn a_designator_with_a_new_name_renames_every_spelling() {
+    let source = [
+        "class Account",
+        "  def self.display_name",
+        "    'Accounts'",
+        "  end",
+        "",
+        "  def self.label",
+        "    display_name",
+        "  end",
+        "end",
+        "",
+        "puts Account.display_name",
+        "puts Account.send(:display_name)",
+        "puts other.display_name",
+        "",
+    ]
+    .join("\n");
+    let dir = fixture(&source);
+    let out = rwr(&[
+        "rewrite",
+        "Account.display_name",
+        "-r",
+        "full_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    for want in [
+        "def self.full_name",
+        "    full_name",
+        "puts Account.full_name",
+        "puts Account.send(:full_name)",
+    ] {
+        assert!(after.contains(want), "missing {want}: {after}");
+    }
+    // A receiver that does not resolve is not this method, so it keeps its name
+    // and is reported instead.
+    assert!(after.contains("puts other.display_name"), "{after}");
+    assert!(
+        stderr(&out).contains("could not account for"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// The sites a finding reported are accounted for. Residue means "neither
+/// rewritten nor shown to you", and a finding rule rewrites nothing -- so
+/// without this every site came back twice, once as a finding and again as an
+/// occurrence the run could not account for.
+#[test]
+fn a_reported_site_is_not_also_reported_as_residue() {
+    let dir = fixture("class Account\n  def display_name\n    \"x\"\n  end\nend\n");
+    let out = rwr(&[
+        "check",
+        "Account#display_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("def display_name"), "{text}");
+    let account = stderr(&out);
+    assert!(
+        !account.contains("could not account for"),
+        "the definition was reported, so nothing is left over: {account}"
+    );
+}
+
 /// A pattern that is not valid Ruby gets its own code, distinct from an I/O or
 /// internal failure -- the caller must fix the rule, not the invocation.
 #[test]

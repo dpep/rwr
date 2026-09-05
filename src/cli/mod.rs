@@ -480,7 +480,7 @@ pub fn run() -> ExitCode {
             &rule,
             &paths,
             template(replace.as_deref(), delete),
-            false,
+            Mode::Check,
             &cli.common,
             out,
         ),
@@ -493,7 +493,7 @@ pub fn run() -> ExitCode {
             &rule,
             &paths,
             template(replace.as_deref(), delete),
-            true,
+            Mode::Rewrite,
             &cli.common,
             out,
         ),
@@ -861,6 +861,75 @@ struct Matches<'a> {
     schema: u32,
     rwr_version: &'static str,
     matches: &'a [Found],
+    /// Occurrences of the name this run could not account for.
+    ///
+    /// `find` used to collect these, print them, and drop them from `-j`
+    /// entirely -- so the account of what a search could not see was text-only,
+    /// which is principle 3's failure in the plane where an agent acts (D95).
+    residue: &'a [Residue],
+    /// Sites a `# rwr:ignore` directive held back.
+    ///
+    /// Carried because a suppression means "do not act", and `find` does not
+    /// act -- so dropping these would remove a real call site from the answer to
+    /// "where is this method", which is the one thing a search must not do.
+    suppressed: &'a [crate::suppress::Suppressed],
+    /// Present when the argument named a method rather than a shape, saying
+    /// which reading was taken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interpreted: Option<Interpreted>,
+}
+
+/// How a method designator was read, reported so the reading is never implicit.
+#[derive(Debug, Serialize)]
+struct Interpreted {
+    /// The designator as typed.
+    method: String,
+    /// The method's own name.
+    name: String,
+    /// `instance`, `class`, or `any` when no class pins it down.
+    kind: &'static str,
+    /// The class it is scoped to, absent for the classless form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    class: Option<String>,
+}
+
+impl Interpreted {
+    /// One line saying what was read, for a human.
+    ///
+    /// The classless form deliberately does not claim "instance": with no class
+    /// to resolve against, `kind:` has nothing to compare and the rules reach
+    /// explicit calls of either kind. Announcing a narrowing that did not happen
+    /// would make the announcement itself the lie.
+    fn line(&self) -> String {
+        match (&self.class, self.kind) {
+            (Some(class), "class") => format!(
+                "read `{}` as the class method `{}` on {class} and its subclasses",
+                self.method, self.name
+            ),
+            (Some(class), _) => format!(
+                "read `{}` as the instance method `{}` on {class} and its subclasses",
+                self.method, self.name
+            ),
+            (None, _) => format!(
+                "read `{}` as the instance method `{}` on any class; with no class to resolve \
+                 against, explicit calls of either kind match",
+                self.method, self.name
+            ),
+        }
+    }
+}
+
+impl From<&Finding> for Found {
+    fn from(f: &Finding) -> Self {
+        Found {
+            file: f.file.clone(),
+            line: f.line,
+            col: f.col,
+            byte_start: f.byte_start,
+            byte_end: f.byte_end,
+            text: f.text.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -874,6 +943,19 @@ struct Found {
 }
 
 fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> ExitCode {
+    // A method designator is not a shape, so it does not go through the pattern
+    // path at all -- it needs the constraints, the lexical scope and the class
+    // hierarchy that only the rule pipeline carries. Running the same pipeline
+    // as `check` and `rewrite` is the point: a designator that meant one set of
+    // sites to `find` and another to `rewrite` would make "preview, then apply"
+    // worthless (D95).
+    //
+    // A designator only. `find` still never takes a rule *file*: once it did,
+    // it and `check` would be one capability wearing two exit codes.
+    if rule::method_notation(pattern).is_some() {
+        return cmd_apply(pattern, paths, None, Mode::Find, common, out);
+    }
+
     let prepared = match prepare::prepare(pattern) {
         Ok(p) => p,
         Err(e) => {
@@ -993,9 +1075,10 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                         (l.start_offset(), l.end_offset())
                     })
                     .collect();
-                // Unscoped, and it stays that way: `find` takes a bare
-                // pattern, so there is never a class to scope by. Class
-                // anchoring is `check`/`rewrite`'s, where a rule names one.
+                // Unscoped, because a *pattern* names a shape and no class.
+                // A designator does name one, and gets receiver-qualified
+                // residue for it -- but it never reaches here: it routes to the
+                // rule pipeline above rather than through the pattern path.
                 let extra = residue::find(&parsed.node(), &anchors, &matched, &src);
                 if let Ok(mut sink) = residues.lock() {
                     sink.extend(extra.into_iter().map(|o| {
@@ -1064,6 +1147,12 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                         schema: REPORT_SCHEMA,
                         rwr_version: env!("CARGO_PKG_VERSION"),
                         matches: &found,
+                        residue: &residues,
+                        // The pattern path has no rule to carry a directive.
+                        suppressed: &[],
+                        // A bare pattern names a shape, so there is no reading
+                        // to disclose.
+                        interpreted: None,
                     },
                 )
             } else {
@@ -1183,14 +1272,48 @@ struct RuleHits {
 /// `check` and `rewrite` differ only in whether they write and in how their
 /// exit codes read -- the verb carries the mode (D29) and the polarity (D22).
 #[allow(clippy::too_many_lines)]
+/// Which verb is driving the shared pipeline.
+///
+/// The three verbs run the *same* engine over the same rules; what differs is
+/// what they do with the result and which way their exit code points. Keeping
+/// that the only difference is what stops `find` drifting into a second
+/// implementation of matching -- and a designator has to mean the same thing
+/// under all three, or "preview then apply" stops being a guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Observation. Exit 0 when there are sites, 1 when there are none.
+    Find,
+    /// Enforcement. Exit 1 when there is work to do, so a gate can act on it.
+    Check,
+    /// Writes.
+    Rewrite,
+}
+
 fn cmd_apply(
     rule_arg: &str,
     paths: &[String],
     replace: Option<&str>,
-    write: bool,
+    mode: Mode,
     common: &Common,
     out: Output,
 ) -> ExitCode {
+    let write = mode == Mode::Rewrite;
+    // The reading taken, when the argument named a method rather than a shape.
+    // Announced rather than assumed: `Account.display_name` is also a valid
+    // pattern, and a result set that silently answered a different question
+    // than the one typed is the failure this whole notation exists to avoid.
+    let designator = rule::method_notation(rule_arg).map(|m| {
+        let (class, name, kind) = m.parts_for_report();
+        Interpreted {
+            method: rule_arg.to_string(),
+            name,
+            kind,
+            class,
+        }
+    });
+    if let (Some(read), Output::Text) = (&designator, out) {
+        eprintln!("rwr: {}", read.line());
+    }
     let (scoped, named) = match targets(paths, common) {
         Ok(t) => t,
         Err(e) => {
@@ -1216,6 +1339,17 @@ fn cmd_apply(
             return Exit::PatternError.into();
         }
     };
+
+    // A method designator names a method but not a new name for it, so there is
+    // nothing to write. Refusing beats the alternative this replaced: `rewrite`
+    // reported the method's sites and exited 0 having changed nothing, which is
+    // the "clean run, wrong amount of work" failure in miniature.
+    if write && rule::method_notation(rule_arg).is_some() && replace.is_none() {
+        eprintln!("rwr: `{rule_arg}` names a method but not a new name for it");
+        eprintln!("  to rename it:  rwr rewrite '{rule_arg}' -r <new_name>");
+        eprintln!("  to see its sites unchanged:  rwr check '{rule_arg}'");
+        return Exit::Refused.into();
+    }
 
     // Rules that can change behaviour are held back unless asked for -- and the
     // holding back is *reported*, because a zero that means "not run" reads
@@ -1709,7 +1843,15 @@ fn cmd_apply(
                 let verb = if write { "rewrote" } else { "would rewrite" };
                 println!("{}: {verb} {} site(s)", c.file, c.sites);
             }
-            report_findings(&findings);
+            if mode == Mode::Find {
+                // find's own line format, so a designator run and a pattern run
+                // are the same thing to read and to pipe.
+                for f in &findings {
+                    println!("{}:{}:{}: {}", f.file, f.line, f.col, f.text);
+                }
+            } else {
+                report_findings(&findings);
+            }
             report_by_rule(&changed);
             report_spread(
                 &outcomes
@@ -1817,6 +1959,30 @@ fn cmd_apply(
                 }
             }
         }
+        _ if mode == Mode::Find => {
+            // find's document shape, whichever kind of argument produced it: a
+            // consumer branches on the verb it ran, not on what it happened to
+            // pass.
+            let rows: Vec<Found> = findings.iter().map(Found::from).collect();
+            let emitted = if out == Output::Json {
+                emit_document(
+                    out,
+                    &Matches {
+                        schema: REPORT_SCHEMA,
+                        rwr_version: env!("CARGO_PKG_VERSION"),
+                        matches: &rows,
+                        residue: &left_over,
+                        suppressed: &suppressed,
+                        interpreted: designator,
+                    },
+                )
+            } else {
+                emit_rows(out, &rows)
+            };
+            if emitted.is_some() {
+                return Exit::Error.into();
+            }
+        }
         _ => {
             // Residue is the product, not a diagnostic, so it cannot be text-only:
             // an agent runs `-j` and was getting the edits with no account of what
@@ -1862,6 +2028,17 @@ fn cmd_apply(
     }
     if deferred > 0 && write {
         return Exit::Retryable.into();
+    }
+    // `find` is observation polarity: found is success. Residue does not make it
+    // a success -- an occurrence rwr could not tie to this method is precisely
+    // not a site of it, and exiting 0 on one would answer "found" to a method
+    // that is not there.
+    if mode == Mode::Find {
+        return if findings.is_empty() {
+            Exit::Negative.into()
+        } else {
+            Exit::Ok.into()
+        };
     }
     // `check` is enforcement polarity: nothing to change is success, and
     // something to change is the signal a hook or CI acts on (D22). `rewrite`

@@ -27,6 +27,25 @@ rwr 'Account.find($ID)'
 rwr '$R.select { |$X| $B }.first' app/services
 ```
 
+## Find a method
+
+A shape is not the same question as a method. For a method, use Ruby's own
+notation — `#` for an instance method, `.` for a class method:
+
+```sh
+rwr find 'Account#display_name' app/
+```
+
+That reports the definition, calls on a receiver that resolves to `Account` or a
+subclass, `send(:display_name)`, the `attr_*` and visibility macros, and
+implicit-self calls inside the class — and leaves `Company#display_name` alone.
+Anything it could not tie to the method is reported as residue rather than
+claimed as a match.
+
+Since a pattern is Ruby and `#` starts a comment, the notation is the only way to
+say this; and because the two-part form always means the method, write
+`Account.display_name()` if you want the literal call shape instead.
+
 `$NAME` captures one node, `*$NAME` a run of them, `_` and `*_` match without
 capturing. All four are valid Ruby, so a pattern stays copy-pasteable from real
 code.

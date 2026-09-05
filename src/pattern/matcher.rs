@@ -89,6 +89,39 @@ fn bare_name<'a>(node: &Node<'a>) -> Option<Vec<u8>> {
     }
 }
 
+/// Whether two nodes are the same bare identifier spelled two different ways.
+///
+/// Prism parses an undeclared lowercase name as a receiverless `CallNode` and a
+/// declared one as a `LocalVariableReadNode`, so the receiver of `widget.status`
+/// has a different node kind depending on whether `widget` is a parameter, a
+/// block variable, or an inherited reader. A pattern is parsed with no
+/// surrounding scope and so always gets the call spelling -- which made
+/// byte-identical source match or miss on the *caller's* declarations, silently
+/// and with a zero-result exit (D93).
+///
+/// **Below the pattern root only**, which is why the sole caller is
+/// [`match_children`]. Below the root a bare identifier names an object, and
+/// both spellings name the same object. At the root it *is* the call, and there
+/// the two spellings are different programs: applied at the root, the testbed's
+/// `Account#display_name` rename reached the local that shadows the method in
+/// `ArchivedAccount#to_s` -- a ground-truth `GT:ignore` site, and a wrong
+/// rewrite of exactly the kind principle 1 exists to prevent.
+///
+/// Only the cross-kind pair; a same-kind pair goes through the ordinary path,
+/// which also compares the atoms this shortcut skips.
+pub(crate) fn same_identifier(a: &Node<'_>, b: &Node<'_>) -> bool {
+    fn identifier(node: &Node<'_>) -> Option<Vec<u8>> {
+        match node {
+            Node::CallNode { .. } | Node::LocalVariableReadNode { .. } => bare_name(node),
+            // Always spelled `it`, and carries no name atom to read it from.
+            Node::ItLocalVariableReadNode { .. } => Some(b"it".to_vec()),
+            _ => None,
+        }
+    }
+    std::mem::discriminant(a) != std::mem::discriminant(b)
+        && identifier(a).is_some_and(|n| identifier(b) == Some(n))
+}
+
 /// The *metavariable* a node stands for, if it is a placeholder reference.
 ///
 /// Keyed on the metavariable rather than the placeholder, since one
@@ -406,7 +439,13 @@ fn match_children<'pr>(
             .all(|p| vanishes(p, prepared, env, forbidden));
     };
     let mut trial = env.clone();
-    if match_node(head, t_head, prepared, &mut trial, forbidden)
+    // Child position is what restricts `same_identifier` to below the pattern
+    // root; see its doc for why the root must not get it. Tried first because
+    // `match_node` binds into `trial` as it goes, so it cannot be fallen back
+    // from -- and placeholders are excluded, being bare names themselves.
+    let head_corresponds =
+        placeholder(head, &prepared.bindings).is_none() && same_identifier(head, t_head);
+    if (head_corresponds || match_node(head, t_head, prepared, &mut trial, forbidden))
         && match_children(rest, t_rest, prepared, &mut trial, forbidden)
     {
         *env = trial;
@@ -1719,6 +1758,50 @@ def a
 end
 "#;
         assert_eq!(matches("return nil", src), 1);
+    }
+
+    /// Prism spells a bare name as a `CallNode` or a `LocalVariableReadNode`
+    /// depending on whether anything in scope declares it, and a pattern is
+    /// parsed with no scope at all. So `widget.status` used to match only the
+    /// undeclared spelling -- a parameter or block variable of the same name
+    /// made byte-identical source a silent zero-result miss.
+    #[test]
+    fn a_declared_receiver_matches_the_same_as_an_undeclared_one() {
+        let p = "widget.status";
+        assert_eq!(matches(p, "def check; widget.status; end"), 1);
+        assert_eq!(matches(p, "def check(widget:); widget.status; end"), 1);
+        assert_eq!(matches(p, "def check(widget); widget.status; end"), 1);
+        assert_eq!(matches(p, "[1].each { |widget| widget.status }"), 1);
+        assert_eq!(matches(p, "widget = Widget.new; widget.status"), 1);
+        // The identifier still has to be the right one.
+        assert_eq!(matches(p, "def check(gadget:); gadget.status; end"), 0);
+    }
+
+    /// A local that shadows a method is not that method. The equivalence stops
+    /// at the pattern root for this: a bare pattern is a call, and `to_s`'s
+    /// local `display_name` is a `GT:ignore` site in the testbed that the
+    /// unrestricted version rewrote.
+    #[test]
+    fn a_bare_pattern_does_not_match_a_local_that_shadows_the_method() {
+        let src = "def to_s\n  display_name = short_code if short_code\n  display_name\nend\n";
+        assert_eq!(matches("display_name", src), 0);
+        // The method call it *is* meant to reach still matches.
+        assert_eq!(matches("display_name", "def to_s; display_name; end"), 1);
+    }
+
+    /// The equivalence is between two spellings of one identifier, not a
+    /// licence to conflate a name with anything else that reads like one.
+    #[test]
+    fn the_identifier_equivalence_does_not_reach_past_bare_names() {
+        // A constant is not a local, whatever the case of the letters.
+        assert_eq!(matches("Widget.status", "widget = 1; widget.status"), 0);
+        // Nor is an instance variable.
+        assert_eq!(matches("widget.status", "def a; @widget.status; end"), 0);
+        // A call with arguments is a call, not a bare name.
+        assert_eq!(
+            matches("widget.status", "def a(widget); widget(1).status; end"),
+            0
+        );
     }
 
     /// `return nil_value` must not match `return nil` -- the prefix bug that

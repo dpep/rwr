@@ -2257,3 +2257,151 @@ arrived. Every file being a candidate closes that by construction rather than by
 over names, not a filter that guesses which files are structural. The rule this cost three times: a
 cheap test that restates an expensive one has to be derived from it or deleted, and deleting is
 cheaper than deriving when it was not buying anything.
+
+## D93 - A bare identifier below the pattern root names an object, not a call
+**Decided.** Narrows D88's "compared for presence" to the receiver's *contents*.
+
+Prism spells a bare lowercase name two ways depending on the scope around it: a `CallNode` with no
+receiver when nothing declares the name, a `LocalVariableReadNode` when something does. Which one you
+get is decided by the *caller's* declarations, not by the text.
+
+A pattern is parsed on its own, with no surrounding scope, so it always gets the call spelling. The
+matcher compared node kinds by discriminant, so `widget.status` matched only the undeclared spelling:
+
+```ruby
+def check;             widget.status; end   # CallNode receiver  -- matched
+def check(widget:);    widget.status; end   # local read         -- missed
+[1].each { |widget|    widget.status }      # local read         -- missed
+```
+
+Byte-identical source, matching or missing on whether the enclosing method happened to declare a
+parameter of that name -- and missing *silently*, as a zero-result exit 1, which is the same answer
+rwr gives for "no such code exists". Found during a repo-wide rename, where the failure is worse than
+a missed grep: the sites that matched got rewritten and the sites that missed did not, so the sweep
+left the codebase half-renamed and said it was done.
+
+**The two spellings correspond below the pattern root, and only there.** Below the root a bare
+identifier names an object, and both spellings name the same object; the pattern's `widget` and the
+target's `widget` are the same receiver either way. At the root the identifier *is* the call, and
+there the two spellings are different programs.
+
+The distinction is not theoretical -- the testbed found it. Applied at the root as well, the
+`Account#display_name` rename reached this, a `GT:ignore` site in `ArchivedAccount#to_s`:
+
+```ruby
+display_name = short_code if short_code
+display_name || "archived"
+```
+
+That `display_name` is a local that shadows the method from the point Ruby parses the assignment. It
+is not the method, renaming it is wrong, and the ground truth says so. Restricting the equivalence to
+child position is what separates the two cases, and it needs no new parameter: `match_children` is
+the only caller that sees a non-root pair.
+
+**Not covered, deliberately.** A constant is not a local and an instance variable is not either, so
+the equivalence reaches neither -- it is between two spellings of one identifier, not a licence to
+conflate a name with anything else that reads like one. A metavariable placeholder is spelled as a
+bare name too, and is excluded so `match_node` still binds it.
+
+**Reversal.** If rwr ever grows a way to *spell* the difference -- a constraint meaning "the local"
+or "the method" -- the widening should become the default rather than the only behaviour, and the
+root restriction becomes the explicit form.
+
+## D94 - Ruby's method notation is a designator wherever a rule is named
+**Decided.** Extends D19's `method:`/`rename:` shorthand from the rule file to the argument.
+
+`method: Account#display_name` is how a rule file names a method, and it carries the
+instance-versus-class distinction Ruby itself carries. On the command line the same string meant
+nothing -- `rwr check 'Account#display_name'` answered "no such file, directory, or built-in rule",
+and `rwr find 'Account#display_name'` was worse: `#` opens a Ruby comment, so the pattern parsed as
+the bare constant `Account` and reported every mention of it, exit 0, no diagnostic.
+
+A notation that means something exact in a file and nothing at the prompt is a notation with a hole
+in it. `load_all` now accepts `Konstant#name`, `Konstant.name` and `#name` wherever a rule is named.
+
+**The reporting form is the renaming form with its templates dropped.** `rename:` became optional;
+absent, `expand()` builds the same rule set and then clears every `rewrite:`, leaving findings. So
+"where is this method" and "rename this method" are answered from *one* list. A second list is the
+D92 mistake in a new place -- a cheap restatement of an expensive one -- and the way it would fail
+here is the worst available: a search that under-reports where the rename over-reaches, so the
+preview looks safe and the rename is not.
+
+**Narrow on purpose.** Only the bare two-part form. `Account.display_name(1)`, `Account.new.foo` and
+`$R.foo` are patterns and stay patterns, which matters because `.` is valid Ruby -- the notation
+claims the two-part spelling and nothing else. `#name` names an instance method of no particular
+class; with no class to resolve against, `kind:` is inert and it reaches explicit calls of either
+kind, which is the right answer for a question asked without a class.
+
+**`-r` renames through the notation.** `rwr rewrite 'Account#display_name' -r full_name` is the whole
+rename with no YAML file -- definition, dispatchers, macros, implicit self. Without this the
+designator would have been read-only for no reason: `-r` short-circuits `load_all` into a
+pattern-and-template pair, which for a designator would rewrite the one call shape and leave every
+other spelling behind.
+
+**And `rewrite` with no new name refuses (exit 5).** It named a method but not a name to give it.
+The version this replaced reported the method's sites and exited **0** having written nothing --
+principle 1's failure in miniature, and the reason the refusal is a refusal rather than a warning.
+
+**Residue means "neither rewritten nor shown to you".** Residue is reported against the rewritten
+source, so a site a rule handled no longer carries the anchor. A finding rule rewrites nothing, so
+that mechanism does not cover it and every site it reported came back a second time as unaccounted
+for. Reported sites are now passed in as matched, and only when the run rewrote nothing -- otherwise
+the recorded offsets are stale.
+
+**Not covered.** `find` still reads its argument as a pattern, so the silent-comment case above is
+only half fixed. Closing it means giving `find` the constraints, scope and hierarchy the designator
+needs, which is `check`'s pipeline -- and routing it through `cmd_find` instead would reintroduce the
+ERB blind spot, since only `cmd_apply` gives templates the structural-or-text treatment. That is its
+own decision, with its own question about what `Account.display_name` should mean when it is also a
+valid pattern.
+
+## D95 - `find` takes a designator, through the same pipeline as `rewrite`
+**Decided.** Completes D94; supersedes its "not covered" paragraph.
+
+`rwr find 'Account#display_name'` was the worst spelling of the bug D94 half-fixed. `#` opens a Ruby
+comment, so the pattern parsed as the bare constant `Account` and the command reported every mention
+of it -- exit 0, no diagnostic, a confidently wrong answer to the single question the skill's own
+routing description leads with ("find every place that calls X").
+
+**One pipeline, three verbs.** A designator routes to `cmd_apply` in a new `Mode::Find`, not through
+`cmd_find`'s pattern path. The verbs now differ only in what they do with the result and which way
+their exit code points. That is the property worth having: if `find` and `rewrite` computed a
+designator's sites separately, "preview, then apply" would stop being a guarantee, and the way it
+would break is a preview that covered *less* than the apply. Pinned by a test that runs both and
+compares the counts.
+
+Routing through `cmd_find` instead was the obvious shortcut and would have been a real regression:
+`cmd_find` discards templates, while `cmd_apply` gives them the structural-or-text treatment. A find
+path built on it would have reintroduced the ERB blind spot for exactly the query -- "where is this
+Rails method called" -- where views matter most.
+
+**`.` is read as the method too, not only `#`.** `Account.display_name` is valid Ruby and previously
+meant the literal call shape. Reading it as the class method is a widening: `$R.display_name`
+narrowed to `Account` matches that same site, and adds the definition, the dispatchers and the
+subclass receivers it was missing. The alternative -- `#` names a method, `.` names a shape -- was
+rejected because it makes the *class-method* query a silent subset: no definition, no `send`, no
+subclasses, exit 0, looking complete. That is D93's failure class again, and worse than the widening
+it avoids. The literal shape stays reachable by writing `Account.display_name()`, which the notation
+does not claim; a test pins that.
+
+**The reading is announced, never assumed.** One stderr line in text mode and an `interpreted` object
+in `-j`. D57's argument exactly: a result set that answers a different question from the one typed
+reads identically to one that doesn't, unless it says so.
+
+**Exit polarity is observation.** 0 when there are sites, 1 when there are none. Residue does not make
+it 0 -- an occurrence rwr could not tie to this method is precisely *not* a site of it, and exiting 0
+would answer "found" for a method that is not there. Reported either way.
+
+**`find -j` now carries residue and suppressions.** It collected residue, printed it, and dropped it
+from the document -- so the account of blind spots was text-only, which is principle 3's failure in
+the plane where an agent acts. Suppressed sites are carried for a sharper reason: a suppression means
+"do not act", and `find` does not act, so dropping one would remove a real call site from the answer.
+Both fields are populated on the pattern path too.
+
+**The boundary: `find` takes a designator or a pattern, never a rule file.** Once it took a file, it
+and `check` would be one capability wearing two exit codes.
+
+**Known edge.** `#display_name` is Ruby's instance-method sigil, so its definition rules are
+instance-only -- but with no class to resolve against, `kind:` has nothing to compare and its
+explicit-call rules reach either kind. The announcement says so rather than claiming a narrowing that
+did not happen, and `def self.display_name` shows up in residue rather than vanishing.
