@@ -24,6 +24,45 @@ rwr check my-rules/detect.yml app/
 A real path wins over a built-in name, so your own pack is selected the same way
 the shipped one is — a pack *is* a directory.
 
+## Renaming a method, in one line
+
+A rename is not one shape, so it is not one `match:`. The method is defined in
+three spellings, called on an explicit receiver, called on implicit self, handed
+to `send`, and named as a symbol by `attr_accessor` and friends — and a rename
+that reaches some of those and not others leaves a `NoMethodError` behind.
+
+So it has its own key, written in Ruby's own notation:
+
+```yaml
+method: Account#display_name    # `#` instance, `.` class — different methods
+rename: full_name
+```
+
+That one line expands to the whole rule set. `#` and `.` are the distinction
+Ruby itself draws, and rwr keeps it: renaming `Account#display_name` leaves
+`Account.display_name` and `Company#display_name` alone.
+
+You do not need a file for a plain one — the same notation works as the
+argument, and means the same sites:
+
+```sh
+rwr find 'Account#display_name' app/                    # where is it?
+rwr rewrite 'Account#display_name' -r full_name app/    # rename it
+```
+
+Write the file when the rename needs fixtures, or a `description:` worth
+keeping.
+
+**`rename:` is optional.** Without it you get a finding: every site of the
+method, reported, with no edit proposed. Which is the same thing `rwr find`
+gives you, from the same rule set — the report and the rename are one list, so a
+preview cannot cover less than the apply.
+
+**A rename target must be a Ruby method name.** `rename: "Account.other"` or a
+stray space is refused, because the alternative is worse than an error: the
+expansion would build templates that cannot match, every site would come back as
+residue, and the run would exit 0 looking clean.
+
 ## `where:` predicates
 
 | Key | Constrains |
