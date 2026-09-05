@@ -71,24 +71,11 @@ until it has real mileage. `.release.conf` at the repo root handles it — the
 script sources it after computing its defaults, so `release <version>` needs no
 incantation.
 
-**That file is gitignored**, because it names a private marketplace and holds
-machine-specific paths. So a fresh clone has to recreate it, and this is what it
-must contain:
-
-```sh
-PLUGINS_REPO="$HOME/code/lib/myclaude"
-SKILL_DST="$PLUGINS_REPO/plugins/rwr/skills/rwr/SKILL.md"
-PLUGIN_MANIFEST="$PLUGINS_REPO/plugins/rwr/.claude-plugin/plugin.json"
-```
-
-Assign plainly — **not** `PLUGINS_REPO="${PLUGINS_REPO:-…}"`. The script assigns
-its own default before sourcing this, so a `:-` override never fires: the release
-then computes a skill path that does not exist and dies. Contour's config had
-exactly that bug, and it was invisible until `release --audit` learned to derive
-the destination the way a real release does instead of assuming `plugins/code`.
-
-Without the file, a release copies the skill to the wrong marketplace or dies.
-`release --audit`'s SKILL column is the check that catches it.
+**That file is gitignored** — it names a private marketplace and this repo is
+public — so a fresh clone has to recreate it before releasing. The `release`
+skill carries the template and the one trap worth knowing. Without the file a
+release sends the skill to the wrong marketplace or dies; `release --audit`'s
+SKILL column is what catches it.
 
 Earlier this said `PLUGIN_MANIFEST` was not overridable and the plugin bump had
 to be manual. It is overridable, and `.release.conf` is the documented place for
