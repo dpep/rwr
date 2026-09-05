@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.7 — 2026-09-04
 
 **Fixed: a malformed `rename:` silently did nothing.** A rename target that is not a Ruby method
 name — a typo, an empty string, `Account.other` — built templates like `def (*$P); $B; end`, which

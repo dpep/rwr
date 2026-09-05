@@ -1,6 +1,6 @@
 [package]
 name = "rwr"
-version = "0.6.6"
+version = "0.6.7"
 edition = "2024"
 description = "Ruby structural search and rewrites"
 license = "MIT"
