@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.6 — 2026-09-04
 
 **Ruby's method notation now works wherever a rule is named.** `rwr check 'Account#display_name'`
 reports every site of that method — the definition in all three spellings, explicit-receiver calls
