@@ -470,6 +470,27 @@ pub(crate) struct MethodRename {
     pub rename: Option<String>,
 }
 
+/// A Ruby method name, optionally with a predicate or bang suffix.
+fn is_method_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && s.trim_end_matches(['?', '!'])
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && s.matches(['?', '!']).count() <= 1
+}
+
+/// `Foo`, or `Foo::Bar`.
+fn is_class_path(s: &str) -> bool {
+    !s.is_empty()
+        && s.split("::").all(|seg| {
+            seg.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
 /// A method named in Ruby's own notation, given where a rule is expected.
 ///
 /// The notation already means something exact in a rule file's `method:` key,
@@ -484,30 +505,12 @@ pub(crate) struct MethodRename {
 pub(crate) fn method_notation(arg: &str) -> Option<MethodRename> {
     let arg = arg.trim();
     let (class, name) = arg.split_once(['#', '.'])?;
-    // A method name, optionally with Ruby's predicate or bang suffix.
-    let is_name = |s: &str| {
-        let mut chars = s.chars();
-        chars
-            .next()
-            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
-            && s.trim_end_matches(['?', '!'])
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            && s.matches(['?', '!']).count() <= 1
-    };
-    // `Foo`, or `Foo::Bar`. Empty means "any class", which only `#` can spell:
-    // a leading `.` is not notation anyone writes.
-    let is_class = |s: &str| {
-        !s.is_empty()
-            && s.split("::").all(|seg| {
-                seg.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-                    && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            })
-    };
-    if !is_name(name) {
+    if !is_method_name(name) {
         return None;
     }
-    if !(is_class(class) || (class.is_empty() && arg.starts_with('#'))) {
+    // An empty class means "any class", which only `#` can spell: a leading
+    // `.` is not notation anyone writes.
+    if !(is_class_path(class) || (class.is_empty() && arg.starts_with('#'))) {
         return None;
     }
     Some(MethodRename {
@@ -517,6 +520,39 @@ pub(crate) fn method_notation(arg: &str) -> Option<MethodRename> {
 }
 
 impl MethodRename {
+    /// Refuse a designator, or a new name, that is not a Ruby method name.
+    ///
+    /// Without this a bad `rename:` was **silent**: the templates came out as
+    /// `def (*$P); $B; end`, which matches nothing, so the run reported every
+    /// site as residue and exited 0. A typo in a rename read as "clean, nothing
+    /// to do" -- and the residue report only means anything as the account of a
+    /// run that worked.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let (class, name, _) = self.parts();
+        if !is_method_name(name) {
+            return Err(format!(
+                "`{}` does not name a Ruby method -- expected `Klass#name`, `Klass.name`, \
+                 or a bare `name`",
+                self.method
+            ));
+        }
+        if let Some(class) = class
+            && !is_class_path(class)
+        {
+            return Err(format!(
+                "`{class}` is not a class name, in `{}`",
+                self.method
+            ));
+        }
+        match self.rename.as_deref() {
+            Some(new) if !is_method_name(new) => Err(format!(
+                "`{new}` is not a Ruby method name, so there is nothing to rename `{}` to",
+                self.method
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// The designator's parts, for saying out loud how it was read.
     pub(crate) fn parts_for_report(&self) -> (Option<String>, String, &'static str) {
         let (class, name, kind) = self.parts();
@@ -966,6 +1002,10 @@ pub(crate) fn load_all(rule: &str, replace: Option<&str>) -> Result<Vec<Rule>, R
         // rewriting the one call shape would leave every other spelling behind.
         if let Some(mut method) = method_notation(rule) {
             method.rename = Some(template.to_string());
+            method.validate().map_err(|message| RuleError::Malformed {
+                path: rule.to_string(),
+                message,
+            })?;
             return Ok(identified(method.expand(), rule));
         }
         return Ok(vec![Rule {
@@ -1064,6 +1104,10 @@ fn load_file(path: &Path, id: &str) -> Result<Vec<Rule>, RuleError> {
 fn parse(raw: &str, id: &str, origin: &str) -> Result<Vec<Rule>, RuleError> {
     // The method-notation shorthand expands to a rule set.
     let mut rules = if let Ok(rename) = serde_yaml::from_str::<MethodRename>(raw) {
+        rename.validate().map_err(|message| RuleError::Malformed {
+            path: origin.to_string(),
+            message,
+        })?;
         rename.expand()
     } else if let Ok(rules) = serde_yaml::from_str::<Vec<Rule>>(raw) {
         // A sequence is a rule set; a mapping is one rule. Trying the sequence
@@ -1280,6 +1324,40 @@ mod tests {
             "Account#",
         ] {
             assert!(method_notation(not).is_none(), "{not}");
+        }
+    }
+
+    /// A rename to something that is not a method name built templates like
+    /// `def (*$P); $B; end`, which match nothing -- so the run reported every
+    /// site as residue and exited 0. A typo read as "clean, nothing to do".
+    #[test]
+    fn a_rename_to_something_that_is_not_a_method_name_is_refused() {
+        for bad in ["", "not a name!", "Account.other", "Klass", "a?b?"] {
+            let r = MethodRename {
+                method: "Account#display_name".into(),
+                rename: Some(bad.into()),
+            };
+            assert!(r.validate().is_err(), "{bad:?}");
+        }
+        for good in ["full_name", "valid?", "save!", "_private"] {
+            let r = MethodRename {
+                method: "Account#display_name".into(),
+                rename: Some(good.into()),
+            };
+            assert!(r.validate().is_ok(), "{good:?}");
+        }
+    }
+
+    /// The designator itself gets the same treatment: a rule file is not held
+    /// to the CLI's parser, so `method:` can hold anything at all.
+    #[test]
+    fn a_designator_that_names_no_method_is_refused() {
+        for bad in ["Account#not a name", "account#foo", "Account#Foo"] {
+            let r = MethodRename {
+                method: bad.into(),
+                rename: Some("full_name".into()),
+            };
+            assert!(r.validate().is_err(), "{bad:?}");
         }
     }
 

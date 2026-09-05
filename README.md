@@ -41,29 +41,34 @@ rename: full_name
 ```
 
 That reaches the definition, an override in a subclass, explicit-receiver calls,
-and implicit-self calls — and nothing else. The same designator works for all
-three verbs and names the same sites under each, so a preview cannot cover less
-than the apply; `rwr rewrite 'Account#display_name' -r full_name app/` is the
-whole rename with no file at all. Where a repository has Sorbet
-signatures, `sig { returns(X) }` is read as a return type, so a chain like
-`parser.document.name` resolves too — no RBI parser, no new file format, just
-Ruby already in the tree. On one real monolith 76% of methods carry a signature.
+and implicit-self calls — and nothing else. All three verbs read that notation
+and name the same sites, so a preview cannot cover less than the apply;
+`rwr rewrite 'Account#display_name' -r full_name app/` is the whole rename with
+no file at all. Where a repository has Sorbet signatures, `sig { returns(X) }` is
+read as a return type, so a chain like `parser.document.name` resolves too — no
+RBI parser, no new file format, just Ruby already in the tree. On one real
+monolith 76% of methods carry a signature.
 
-**It tells you what it missed.** Ruby dispatches through symbols, and a rename
-that only rewrites call sites silently breaks `attr_accessor :display_name`. rwr
-reports every occurrence it could not account for, classified:
+**It tells you what it missed.** Ruby dispatches through symbols, so a rename
+that reaches only call sites leaves `attr_accessor :display_name` behind and the
+class breaks. rwr moves the symbols that name the method, and everything it
+cannot account for it names rather than guessing at:
 
 ```
-rewrote 3 site(s)
+app/models/account.rb: rewrote 2 site(s)
 
-3 occurrence(s) this rule could not account for (1 symbol, 1 call, 1 comment):
-  app/models/account.rb:4:17: Symbol:   attr_accessor :display_name
-  app/models/account.rb:9:3:  Comment:  # Returns the display_name
-  app/jobs/sync.rb:22:5:      Call:     thing.display_name
+3 occurrence(s) `Account#display_name` could not account for (1 symbol, 1 call, 1 comment):
+  app/jobs/sync.rb:3:5: Call:     thing.display_name
+  app/models/account.rb:5:12: Symbol:   delegate :display_name, to: :profile
+  app/models/account.rb:8:19: Comment:     # Returns the display_name
 ```
 
-Comments are reported and never rewritten: `# See also #display_name on Company`
-is about a different class, and nothing in the prose says so.
+Each of those is a judgement a symbol cannot settle. `delegate` forwards to
+*another* class, so whether that class's method should move too is not rwr's
+call. `thing`'s type never resolves, so the receiver might be any class that
+happens to share the name. And comments are reported but never rewritten:
+`# See also #display_name on Company` is about a different class, and nothing in
+the prose says so.
 
 **Its diffs are minimal.** Only what changed moves. Layout, block spelling and
 heredocs survive, because an unchanged subtree is never spliced.

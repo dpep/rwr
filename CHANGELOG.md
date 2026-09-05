@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+**Fixed: a malformed `rename:` silently did nothing.** A rename target that is not a Ruby method
+name — a typo, an empty string, `Account.other` — built templates like `def (*$P); $B; end`, which
+match nothing. The run then reported every site as residue and exited 0, so the mistake read as
+"clean, nothing to do". It is now refused at exit 3, naming the bad value. A rule file could hit
+this long before the CLI took a method name, so re-run any rename that has only ever reported
+residue.
+
+`-d` on a method refuses (exit 5) rather than renaming it to the empty string. Deleting a method is
+not a rename: the definition and the call sites go separately, and removing one without the other
+leaves a `NoMethodError` — so rwr will not guess which was meant.
+
+`--help` now documents both kinds of argument. `find` describes the full placeholder set
+(`$NAME`, `*$NAME`, `**$NAME`, `_`, `*_`) alongside the method notation and the `#`-is-a-comment
+hazard; `check` and `rewrite` say that `RULE` takes a method too, and that `-r` is then the new
+name rather than a replacement template.
+
 ## 0.6.6 — 2026-09-04
 
 **Ruby's method notation now works wherever a rule is named.** `rwr check 'Account#display_name'`
@@ -19,18 +37,18 @@ site it reported used to come back twice.
 
 **`rwr find 'Account#display_name'` now finds the method.** It used to read `#` as a Ruby comment,
 parse the argument as the bare constant `Account`, and report every mention of it at exit 0 — a
-confidently wrong answer. `Account.display_name` is the class method and `#display_name` is the
-method on any class. Write `Account.display_name()` for the literal call shape (D95).
+confidently wrong answer. Going the other way, write `Account.display_name()` for the literal call
+shape (D95).
 
-find, check and rewrite now run one pipeline, so a designator names the same sites under all three —
-a preview can no longer cover less than the apply. find keeps observation polarity: exit 0 when there
-are sites, 1 when there are none. The reading taken is printed to stderr and carried as
+find, check and rewrite now run one pipeline, so a method names the same sites under all three — a
+preview can no longer cover less than the apply. find keeps observation polarity: exit 0 when there
+are sites, 1 when there are none. The reading rwr took is printed to stderr and carried as
 `interpreted` in `-j`.
 
 `find -j` now carries `residue` and `suppressed`. It used to collect residue, print it, and drop it
 from the document, so an agent got matches with no account of what the search could not see.
 
-**Fixed: a literal receiver no longer matches or misses on the caller's declarations.**
+**Fixed: whether a literal receiver matched used to depend on how it was declared.**
 `rwr find 'widget.status'` matched `widget.status` when `widget` was an inherited reader and missed
 the identical line when `widget` was a method parameter or a block variable — Prism gives a bare name
 a different node kind depending on the scope around it, and a pattern is parsed with no scope. The
@@ -64,7 +82,7 @@ It saved no parses, because the per-round search already requires a file to name
 in the tree — and running it over every file cost more than the scans it saved.
 
 It was also hiding a third gap. A file is a candidate only once, so an alias to a class discovered in
-a *later* round — `Widget = Premium`, where Premium arrives in round two — was filtered out before
+a *later* round — `Widget = Premium`, where `Premium` arrives in round two — was filtered out before
 its round came. Every file being a candidate closes that by construction.
 
 **A rename follows constant aliases.** `Alias = Account` is a second name for one class, so
@@ -101,7 +119,7 @@ straight through.
 
 A new property runs *changing* rewrites over real code, since an identity rewrite emits zero edits
 and never reaches the result checks at all. Measured before being written: with the nested-capture
-guard removed it refuses on `$R.freeze` over rails, on a real `Date.today.freeze.freeze`. It is the
+guard removed it refuses on `$R.freeze` over rails, at a real `Date.today.freeze.freeze`. It is the
 test that would have caught it.
 
 ## 0.6.5 — 2026-08-24

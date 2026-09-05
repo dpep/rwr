@@ -2401,6 +2401,16 @@ Both fields are populated on the pattern path too.
 **The boundary: `find` takes a designator or a pattern, never a rule file.** Once it took a file, it
 and `check` would be one capability wearing two exit codes.
 
+**A designator and a rename are validated, not trusted.** A `rename:` that is not a Ruby method name
+built templates matching nothing, so the run reported every site as residue and exited 0 -- a typo
+reading as "clean, nothing to do". That predates the designator by a long way; the CLI merely added a
+second door to it, since `-d` arrives as an empty replacement and renamed the method to `""`. Both
+are refused now, and deleting a method is refused outright: its definition and its call sites come
+out separately, and removing one without the other is a `NoMethodError`. The general shape:
+**an expansion that builds its own patterns has to check its inputs, because a malformed pattern does
+not fail, it just fails to match** -- and a rule set that matches nothing is indistinguishable from a
+codebase that is already clean.
+
 **Known edge.** `#display_name` is Ruby's instance-method sigil, so its definition rules are
 instance-only -- but with no class to resolve against, `kind:` has nothing to compare and its
 explicit-call rules reach either kind. The announcement says so rather than claiming a narrowing that

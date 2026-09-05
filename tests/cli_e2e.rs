@@ -364,6 +364,54 @@ fn rewriting_a_method_with_no_new_name_refuses() {
     );
 }
 
+/// Deleting a *method* is not a rename and rwr will not guess what it would
+/// mean. Left alone, `-d` renamed the method to the empty string, which built
+/// templates matching nothing -- so it exited 0 having done nothing.
+#[test]
+fn deleting_a_method_designator_refuses() {
+    let dir = fixture("class Account\n  def display_name\n    'x'\n  end\nend\n");
+    let before = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    for args in [
+        vec!["rewrite", "Account#display_name", "-d"],
+        vec!["check", "Account#display_name", "-d"],
+        vec!["check", "Account#display_name", "-r", ""],
+    ] {
+        let mut argv = args.clone();
+        argv.push(dir.path().to_str().expect("utf8"));
+        let out = rwr(&argv);
+        assert_eq!(out.status.code(), Some(5), "{args:?}: {}", stderr(&out));
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read"),
+        before
+    );
+}
+
+/// A rename target that is not a Ruby method name is refused rather than
+/// silently matching nothing. This reached rwr through a rule file long before
+/// the designator existed: `rename: "not a name!"` reported every site as
+/// residue and exited 0, so a typo read as "clean, nothing to do".
+#[test]
+fn a_rename_to_a_non_method_name_is_refused() {
+    let dir = fixture("class Account\n  def display_name\n    'x'\n  end\nend\n");
+    std::fs::write(
+        dir.path().join("rename.yml"),
+        "method: Account#display_name\nrename: \"not a name!\"\n",
+    )
+    .expect("write rule");
+    let out = rwr(&[
+        "check",
+        dir.path().join("rename.yml").to_str().expect("utf8"),
+        dir.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("not a Ruby method name"),
+        "{}",
+        stderr(&out)
+    );
+}
+
 /// `-r` through the notation is the whole rename, not a rewrite of the one call
 /// shape -- so the definition and the dispatcher move with the call sites.
 #[test]

@@ -27,10 +27,14 @@ rwr 'Account.find($ID)'
 rwr '$R.select { |$X| $B }.first' app/services
 ```
 
+`$NAME` captures one node, `*$NAME` a run of them, `_` and `*_` match without
+capturing. All four are valid Ruby, so a pattern stays copy-pasteable from real
+code.
+
 ## Find a method
 
-A shape is not the same question as a method. For a method, use Ruby's own
-notation — `#` for an instance method, `.` for a class method:
+Where a method is used is a different question from where a shape appears. Ask it
+in Ruby's own notation — `#` for an instance method, `.` for a class method:
 
 ```sh
 rwr find 'Account#display_name' app/
@@ -42,13 +46,9 @@ implicit-self calls inside the class — and leaves `Company#display_name` alone
 Anything it could not tie to the method is reported as residue rather than
 claimed as a match.
 
-Since a pattern is Ruby and `#` starts a comment, the notation is the only way to
-say this; and because the two-part form always means the method, write
-`Account.display_name()` if you want the literal call shape instead.
-
-`$NAME` captures one node, `*$NAME` a run of them, `_` and `*_` match without
-capturing. All four are valid Ruby, so a pattern stays copy-pasteable from real
-code.
+A pattern is Ruby and `#` starts a comment, so the notation is the only way to
+say this. Going the other way, the two-part form always means the method, so
+write `Account.display_name()` when you want the literal call shape.
 
 ## Change something
 
@@ -91,9 +91,9 @@ to do, so `check && rewrite` would rename only when there was nothing to rename.
 The polarity is what makes `check` usable as a CI gate, and it is the opposite of
 what a shell pipeline reads like.
 
-That one line expands to the whole rename — the definition, subclass overrides,
-explicit-receiver calls, and implicit-self calls inside the class. It leaves
-`Company#display_name` and `Account.display_name` alone, because those are
+The `method:` line expands to the whole rename — the definition, subclass
+overrides, explicit-receiver calls, and implicit-self calls inside the class. It
+leaves `Company#display_name` and `Account.display_name` alone, because those are
 different methods.
 
 ## Read the residue report

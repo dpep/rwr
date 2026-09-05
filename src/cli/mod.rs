@@ -304,11 +304,15 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Shorthand: the pattern to find. `rwr 'foo($A)'` is `rwr find 'foo($A)'`;
-    /// adding `-r` makes it `rwr check`.
+    /// Shorthand: the shape or method to find. `rwr 'foo($A)'` is
+    /// `rwr find 'foo($A)'`; adding `-r` makes it `rwr check`.
     ///
-    /// The shorthand is **read-only by construction** — writing always requires
-    /// typing `rewrite`, so terseness never buys a foot-gun (D30).
+    /// A shape carries `$A` placeholders; a method is Ruby's own notation
+    /// (`Account#display_name`, `Account.display_name`, `#display_name`). See
+    /// `rwr find --help`.
+    ///
+    /// Read-only by construction: writing always requires typing `rewrite`, so
+    /// terseness never buys a foot-gun (D30).
     #[arg(value_name = "PATTERN", value_hint = clap::ValueHint::Other)]
     pattern: Option<String>,
 
@@ -316,10 +320,11 @@ struct Cli {
     #[arg(value_name = "PATH", value_hint = clap::ValueHint::AnyPath)]
     paths: Vec<String>,
 
-    /// Replacement template — previews the diff. A flag rather than a second
-    /// positional so that trailing arguments are unambiguously paths: deciding
-    /// between the two by probing the filesystem would be a guess, and
-    /// principle 2 is refuse rather than guess (D31).
+    /// Replacement template — previews the diff.
+    ///
+    /// A flag rather than a second positional, so trailing arguments are
+    /// unambiguously paths: deciding between the two by probing the filesystem
+    /// would be a guess, and principle 2 is refuse rather than guess (D31).
     #[arg(short = 'r', long = "replace", value_name = "TEMPLATE")]
     replace: Option<String>,
 
@@ -337,12 +342,29 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Find code matching a structural pattern. Read-only.
+    /// Find a shape of code, or every site of a method. Read-only.
     ///
     /// Reports every match including nested ones, with nesting metadata —
     /// find is observation, and suppressing would be a lie (decision D15).
     Find {
-        /// Ruby source with `$METAVAR` placeholders, e.g. `foo($A, $B)`.
+        /// A shape, or a method.
+        ///
+        /// A *shape* is Ruby with placeholders: `$NAME` captures a node,
+        /// `*$NAME` a run of them (`**$NAME` inside a hash), `_` and `*_`
+        /// match without capturing. All four are valid Ruby, so a pattern
+        /// stays copy-pasteable from real code.
+        ///
+        /// A *method* is Ruby's own notation: `Account#display_name`
+        /// instance, `Account.display_name` class, `#display_name` on any
+        /// class. It reports the definition, calls on a receiver resolving to
+        /// that class or a subclass, `send`/`try` with a literal name, the
+        /// `attr_*` and visibility macros, and implicit-self calls — where a
+        /// shape reports only the spelling you wrote.
+        ///
+        /// `#` starts a Ruby comment, which is why the notation exists: bare,
+        /// `Account#display_name` is the constant `Account` and a comment.
+        /// Going the other way, write `Account.display_name()` for the literal
+        /// call shape.
         #[arg(value_name = "PATTERN", value_hint = clap::ValueHint::Other)]
         pattern: String,
 
@@ -360,7 +382,8 @@ enum Command {
     /// That same polarity reads correctly as a preview — exit 1 means "there is
     /// work to do." ast-grep splits `run` and `scan` the same way.
     Check {
-        /// A rule file or directory of them, or a bare pattern with `-r`.
+        /// A rule file or directory of them, a method in Ruby's notation
+        /// (`Account#display_name`), or a pattern with `-r`.
         #[arg(value_name = "RULE", value_hint = clap::ValueHint::AnyPath)]
         rule: String,
 
@@ -368,16 +391,23 @@ enum Command {
         #[arg(value_name = "PATH", value_hint = clap::ValueHint::AnyPath)]
         paths: Vec<String>,
 
-        /// Replacement template. Given, `rule` is read as a pattern, not a file.
+        /// Replacement template; with it, `rule` is read as a pattern or a
+        /// method rather than a file.
+        ///
+        /// For a method it is the *new name*, and the whole rename follows —
+        /// definition, dispatchers, macros, implicit self. For a pattern it is
+        /// what the match is rewritten to.
         #[arg(short = 'r', long = "replace", value_name = "TEMPLATE")]
         replace: Option<String>,
 
-        /// Delete what matches, rather than replacing it. Given, `rule` is read
-        /// as a pattern, not a file.
+        /// Delete what matches instead of replacing it; with it, `rule` is read
+        /// as a pattern rather than a file.
         ///
-        /// Deletion takes the whole *unit*: the match, the comments written
-        /// directly above it, and its line. `-r ''` means the same thing and is
-        /// harder to read.
+        /// Deletion takes the whole *unit*: the match, the comments directly
+        /// above it, and its line. `-r ''` means the same and reads worse.
+        ///
+        /// Not available for a method: its definition and its call sites go
+        /// separately, and rwr will not guess which you meant.
         #[arg(short = 'd', long = "delete", conflicts_with = "replace")]
         delete: bool,
     },
@@ -399,7 +429,12 @@ enum Command {
     /// a command named `rewrite` that did not rewrite would be a mismatch no
     /// documentation fixes. To see what would happen, use `check` (D29).
     Rewrite {
-        /// A rule file, or a bare pattern with `-r`.
+        /// A rule file, a method in Ruby's notation (`Account#display_name`),
+        /// or a pattern with `-r`.
+        ///
+        /// A method needs `-r <new_name>`. Without one there is nothing to
+        /// write, and rwr refuses rather than listing its sites and exiting 0
+        /// having changed nothing.
         #[arg(value_name = "RULE", value_hint = clap::ValueHint::AnyPath)]
         rule: String,
 
@@ -407,16 +442,23 @@ enum Command {
         #[arg(value_name = "PATH", value_hint = clap::ValueHint::AnyPath)]
         paths: Vec<String>,
 
-        /// Replacement template. Given, `rule` is read as a pattern, not a file.
+        /// Replacement template; with it, `rule` is read as a pattern or a
+        /// method rather than a file.
+        ///
+        /// For a method it is the *new name*, and the whole rename follows —
+        /// definition, dispatchers, macros, implicit self. For a pattern it is
+        /// what the match is rewritten to.
         #[arg(short = 'r', long = "replace", value_name = "TEMPLATE")]
         replace: Option<String>,
 
-        /// Delete what matches, rather than replacing it. Given, `rule` is read
-        /// as a pattern, not a file.
+        /// Delete what matches instead of replacing it; with it, `rule` is read
+        /// as a pattern rather than a file.
         ///
-        /// Deletion takes the whole *unit*: the match, the comments written
-        /// directly above it, and its line. `-r ''` means the same thing and is
-        /// harder to read.
+        /// Deletion takes the whole *unit*: the match, the comments directly
+        /// above it, and its line. `-r ''` means the same and reads worse.
+        ///
+        /// Not available for a method: its definition and its call sites go
+        /// separately, and rwr will not guess which you meant.
         #[arg(short = 'd', long = "delete", conflicts_with = "replace")]
         delete: bool,
     },
@@ -1311,9 +1353,6 @@ fn cmd_apply(
             class,
         }
     });
-    if let (Some(read), Output::Text) = (&designator, out) {
-        eprintln!("rwr: {}", read.line());
-    }
     let (scoped, named) = match targets(paths, common) {
         Ok(t) => t,
         Err(e) => {
@@ -1332,13 +1371,19 @@ fn cmd_apply(
         },
     };
 
-    let rules = match rule::load_all(rule_arg, replace) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("rwr: {e}");
-            return Exit::PatternError.into();
-        }
-    };
+    // Deleting a *method* is not a rename, and rwr does not have an opinion on
+    // what it would mean: removing a definition while its call sites stand is a
+    // NoMethodError, and removing the call sites changes what the program does.
+    // Left alone this renamed the method to the empty string, which built
+    // templates like `def (*$P)` that match nothing -- so it exited 0 having
+    // done nothing, under both `check` and `rewrite`.
+    if rule::method_notation(rule_arg).is_some() && replace.is_some_and(str::is_empty) {
+        eprintln!("rwr: `{rule_arg}` names a method, and a method cannot be deleted as one");
+        eprintln!("  its definition and its call sites go separately, and rwr will not guess");
+        eprintln!("  to rename it:  rwr rewrite '{rule_arg}' -r <new_name>");
+        eprintln!("  to delete a definition:  rwr rewrite 'def display_name($A); $B; end' -d");
+        return Exit::Refused.into();
+    }
 
     // A method designator names a method but not a new name for it, so there is
     // nothing to write. Refusing beats the alternative this replaced: `rewrite`
@@ -1350,6 +1395,20 @@ fn cmd_apply(
         eprintln!("  to see its sites unchanged:  rwr check '{rule_arg}'");
         return Exit::Refused.into();
     }
+
+    // Said only once the argument is going to be acted on: a reading disclosed
+    // and then refused in the next breath is noise, not disclosure.
+    if let (Some(read), Output::Text) = (&designator, out) {
+        eprintln!("rwr: {}", read.line());
+    }
+
+    let rules = match rule::load_all(rule_arg, replace) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("rwr: {e}");
+            return Exit::PatternError.into();
+        }
+    };
 
     // Rules that can change behaviour are held back unless asked for -- and the
     // holding back is *reported*, because a zero that means "not run" reads
