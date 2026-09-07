@@ -19,7 +19,7 @@ help:
 	@echo "  make test       cargo test"
 	@echo "  make check      pre-push gate: fmt + clippy + tests"
 	@echo "  make lint       cargo fmt --check && cargo clippy"
-	@echo "  make fmt        cargo fmt"
+	@echo "  make fmt        cargo fmt, reporting which files it reflowed"
 	@echo "  make clean      cargo clean"
 
 build:
@@ -45,7 +45,7 @@ lint:
 	$(CARGO) clippy --all-targets -- -D warnings
 
 fmt:
-	$(CARGO) fmt
+	CARGO=$(CARGO) ./script/fmt.sh
 
 clean:
 	$(CARGO) clean

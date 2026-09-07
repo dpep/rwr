@@ -138,6 +138,13 @@ exit status. Both look correct and neither is; two commits went out red before
 text replacement written against pre-format source stops matching after it runs.
 Batch related edits, then format once, then build.
 
+Use **`make fmt`**, which names the files it reflowed. The trap the bare command
+sets is not the first edit but the next one: formatting is silent, so an anchor
+read earlier in the session is already stale and nothing says so until an edit
+mysteriously fails to apply. Re-read the files it lists before editing them
+again. `make check` only ever runs `fmt --check`, so the gate never moves code
+under you.
+
 ## Testing conventions
 
 - Write tests for new code, focused on quality not quantity — edge cases and
