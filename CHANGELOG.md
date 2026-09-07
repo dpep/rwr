@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.8 — 2026-09-07
 
 **A rename now reports the name left behind in strings.** A method's doc comment was already
 accounted for; the error message it raises was not. `raise ArgumentError, "display_name needs a
