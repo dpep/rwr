@@ -828,6 +828,7 @@ fn report_residue(residues: &[Residue]) {
         ("call", residue::Context::Call),
         ("definition", residue::Context::Definition),
         ("comment", residue::Context::Comment),
+        ("prose", residue::Context::Prose),
         ("dynamic", residue::Context::Dynamic),
     ]
     .iter()

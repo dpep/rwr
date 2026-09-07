@@ -2415,3 +2415,63 @@ codebase that is already clean.
 instance-only -- but with no class to resolve against, `kind:` has nothing to compare and its
 explicit-call rules reach either kind. The announcement says so rather than claiming a narrowing that
 did not happen, and `def self.display_name` shows up in residue rather than vanishing.
+
+## D96 - A name mentioned inside a string is prose, and prose is reported
+**Decided.** Extends D7's residue account; narrows nothing.
+
+A rename moves code. The name it moves is also written in places a parser must *not* treat as code,
+and those places cluster exactly where a public method documents itself: the doc comment above the
+definition, the spec description, and the error message the method raises at its own caller. Reported
+from a real rename of an RSpec matcher, where the defining file held **one** code occurrence and
+**four** prose ones -- including `raise ArgumentError, "have_fetched reads a Router's #trace"`, which
+after the rename named a method nobody could call. The better documented the method, the worse the
+ratio, because a well-commented method is precisely the one whose stale prose reads as authoritative.
+
+Comments were already covered. **Strings were not**, and the gap had a sharp edge: `Context::String`
+fires only when the string's whole content *is* the name (`send("display_name")`), so a name inside a
+sentence was invisible. `Context::Prose` covers that.
+
+**They stay separate contexts, because the reader does different things with them.** A string that is
+the name may be a live dispatch and will *break*; a name inside one is documentation and will go
+*stale*. Collapsing them would hide which of those you are looking at.
+
+**Reported, never rewritten** -- D7's rule for comments, for D7's reason. Prose containing an
+identifier may be naming it or may be using an ordinary word, and rwr cannot tell. Reporting is a
+fact; rewriting would be a guess, and the request that prompted this asked for the reporting half
+precisely because it is the half that is well defined.
+
+**Only a standalone mention.** `t("accounts.display_name")` is an i18n key and `"admin/display_name"`
+a path -- one segment of a qualified name, not prose naming a method. A dotted, slashed or colonned
+neighbour excludes it, and a string whose *trimmed* content is the name is the name rather than prose
+about it, so a heredoc body holding just the identifier is not a mention either.
+
+**The testbed decided that boundary, against the first version of this.** Reporting every string
+occurrence took false positives from 3 to 6, and the two it added were both marked `GT:ignore` there
+-- the i18n key and the heredoc body. Ground truth written earlier says a string is not code and must
+never be reported; a fresh user report says the opposite. Both are right about their own example, and
+the qualifier rule is what separates them. Precision is back to the prior budget with the reported
+case still caught.
+
+**Scoped like a comment, not like a call.** A call is a reach wherever it lives; prose is kept only
+inside the anchor class, its contributors and its descendants. Unscoped, renaming a name as ordinary
+as `name` or `save` would report every string in the repository containing that word and discredit
+the report. The wide net has a spelling already: the classless designator `#display_name` has no class
+to scope by, so it reports prose everywhere.
+
+## D97 - A `def` pattern anchors on the name it renames
+**Decided.** A bug, recorded because of what it says about the shape of the report.
+
+`residue::anchors` began `let Some(call) = pattern.as_call_node() else { return Vec::new() }`, so a
+pattern whose root is a `DefNode` produced no anchors at all. But `defines_a_method` returns true for
+a `DefNode`, so such a rule *claimed completeness* and then searched for nothing.
+
+The output was `residue: []` -- an empty list, which the skill documents as "rwr moved a name and
+found nothing left over". It meant "nothing was looked for". A hand-written
+`def foo($A); $B; end` -> `def bar($A); $B; end` is the most obvious way to spell a rename, and it was
+the one spelling that got no account of what it missed.
+
+The designator path was unaffected, because it expands to call-shaped rules that do produce anchors --
+which is why this survived: the flagship path was covered and the hand-written one was not.
+
+`def $M($A); $B; end` still anchors on nothing, correctly: the name is a metavariable, so there is no
+one name the rule is about.

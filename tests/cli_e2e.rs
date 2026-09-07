@@ -483,6 +483,76 @@ fn a_reported_site_is_not_also_reported_as_residue() {
     );
 }
 
+/// The reported case. A matcher's own error message names it, and a rename that
+/// only touches code leaves that message pointing at a method nobody can call.
+/// The prose is reported, never rewritten.
+#[test]
+fn a_rename_reports_the_name_left_behind_in_prose() {
+    let source = [
+        "class Matchers",
+        "  # Example:",
+        "  #   expect(router).to have_fetched(\"accounts\")",
+        "  def have_fetched(*subgraphs) = subgraphs",
+        "",
+        "  def check!(router)",
+        "    raise ArgumentError, \"have_fetched reads a Router trace\" unless router",
+        "  end",
+        "end",
+        "",
+    ]
+    .join("\n");
+    let dir = fixture(&source);
+    let out = rwr(&[
+        "rewrite",
+        "Matchers#have_fetched",
+        "-r",
+        "have_fetched_subgraphs",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let account = stderr(&out);
+    assert!(account.contains("comment"), "{account}");
+    assert!(account.contains("prose"), "{account}");
+    assert!(account.contains("Prose:"), "{account}");
+
+    // Prose is reported, not rewritten: rwr cannot tell a reference from an
+    // ordinary word, so touching it would be a guess.
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    assert!(after.contains("def have_fetched_subgraphs"), "{after}");
+    assert!(
+        after.contains("\"have_fetched reads a Router trace\""),
+        "{after}"
+    );
+}
+
+/// A hand-written `def` rename claimed completeness and then had no anchor, so
+/// it searched for nothing and reported an empty residue list — which reads as
+/// "nothing left over" rather than "nothing was looked for".
+#[test]
+fn a_def_pattern_rename_still_accounts_for_what_it_missed() {
+    let dir = fixture("class A\n  # display_name is the label\n  def display_name = 1\nend\n");
+    let out = rwr(&[
+        "check",
+        "def display_name = $B",
+        "-r",
+        "def full_name = $B",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let account = stderr(&out);
+    assert!(account.contains("could not account for"), "{account}");
+    assert!(account.contains("display_name is the label"), "{account}");
+}
+
+/// `$$$A` is another tool's spelling for a run of nodes. Prism's own error names
+/// the symptom, not the cause, so the pattern error carries the rwr spelling.
+#[test]
+fn another_tools_metavariable_spelling_is_named() {
+    let out = rwr(&["find", "foo($$$A)"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(stderr(&out).contains("*$NAME"), "{}", stderr(&out));
+}
+
 /// A pattern that is not valid Ruby gets its own code, distinct from an I/O or
 /// internal failure -- the caller must fix the rule, not the invocation.
 #[test]

@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+**A rename now reports the name left behind in strings.** A method's doc comment was already
+accounted for; the error message it raises was not. `raise ArgumentError, "display_name needs a
+Router"` names a method a rename has moved, and it is the text a developer sees when they get the
+call wrong — so it is now reported as `Prose`, alongside the comments. Reported, never rewritten:
+prose containing an identifier may be naming it or using an ordinary word, and rwr cannot tell (D96).
+
+`Prose` is deliberately not `String`. A string that *is* the name may be a live dispatch and will
+break; a name mentioned inside one is documentation and will go stale. Only standalone mentions
+count — `t("accounts.display_name")` is an i18n key, not prose about a method.
+
+Prose is scoped to the class like a comment, so a rename of a common name does not report every
+string containing that word. For the wide net, use the classless form: `rwr find '#display_name'`
+has no class to scope by and reports mentions everywhere.
+
+**Fixed: a `def` rename reported an empty residue list instead of what it missed.** A pattern whose
+root is a `def` produced no search anchors, while still claiming to account for the rename — so it
+printed `residue: []`, which reads as "nothing left over" and meant "nothing was looked for". Rerun
+any rename written as a bare `def …` pattern; the designator and `method:`/`rename:` forms were not
+affected (D97).
+
+**A `$$$A` pattern now names the rwr spelling.** Prism reports "unexpected constant", which describes
+the symptom; the error now adds that a run of nodes is `*$NAME` — `foo(*$A)` matches any argument
+list.
+
 ## 0.6.7 — 2026-09-04
 
 **Fixed: a malformed `rename:` silently did nothing.** A rename target that is not a Ruby method

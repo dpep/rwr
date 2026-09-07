@@ -140,6 +140,22 @@ resolve, a doc comment still naming the old method — is listed with its file,
 line, and classification. Those are the sites that will break or go stale, and
 handling them is part of finishing the rename.
 
+**A rename has a prose half, and rwr reports it but never rewrites it.** The
+places a parser must ignore are exactly where a public method documents itself:
+its doc comment, its spec descriptions, and the error message it raises at its
+own caller. Those come back as `comment` and `prose`, and on a well-documented
+method they can outnumber the code sites. `prose` is a mention inside a longer
+string — `raise ArgumentError, "display_name needs a Router"` — as against
+`string`, which is a string that *is* the name and may be a live dispatch.
+
+Prose is scoped to the class, so a rename of a common name does not report every
+string containing that word. For the wide net, ask the classless form, which has
+no class to scope by:
+
+```sh
+rwr find '#display_name' app/     # every mention, prose included
+```
+
 ## Applying the built-in rules
 
 The pack is compiled into the binary and works from any directory:

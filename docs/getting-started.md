@@ -115,7 +115,8 @@ what to triage on:
 | `call` | a call by that name whose receiver rwr could not resolve | maybe — it may be a different class's method |
 | `symbol` | a symbol handed to something that dispatches (`delegate`, `send`, a serializer) | usually |
 | `definition` | another definition of the name | depends — an override breaks, an unrelated class's method does not |
-| `string` | the name as a string literal | maybe — `send("x")` breaks, a SQL column or a message does not |
+| `string` | a string that *is* the name | maybe — `send("x")` breaks, a SQL column does not |
+| `prose` | the name mentioned inside a longer string — an error message, a spec description | no, but it is now stale |
 | `comment` | the name in prose | no, but it is now stale |
 | `text` | found by text search in a template rwr cannot parse | weaker evidence than anything above |
 | `dynamic` | a dispatch on a *computed* name, in this class | unknowable — this is rwr saying it is blind here |
