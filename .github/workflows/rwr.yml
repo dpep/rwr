@@ -62,7 +62,7 @@ jobs:
         continue-on-error: true
         run: ./target/release/rwr check all testbed --sarif > rwr.sarif
 
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@v4
         if: env.MODE == 'annotate'
         with:
           sarif_file: rwr.sarif
