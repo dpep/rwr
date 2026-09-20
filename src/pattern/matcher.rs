@@ -73,11 +73,21 @@ pub(crate) struct Match<'pr> {
 /// Prism parses an unassigned lowercase identifier as a `CallNode` with no
 /// receiver and no arguments rather than a local-variable read, so all three
 /// shapes have to be recognised.
+///
+/// "Bare" is Prism's `VARIABLE_CALL` flag rather than this module's own reading
+/// of the call, because the two disagreed on `a()` and the flag is the one that
+/// answers the question actually being asked (D116).
 fn bare_name<'a>(node: &Node<'a>) -> Option<Vec<u8>> {
     match node {
         Node::CallNode { .. } => {
             let call = node.as_call_node()?;
-            (call.receiver().is_none() && call.arguments().is_none() && call.block().is_none())
+            // Asking Prism rather than re-deriving: the hand-rolled test wanted
+            // no receiver, no arguments and no block, all three of which `a()`
+            // satisfies -- its parens live in `opening_loc`, which the test
+            // never read. So `a()` passed as a *read* of `a` while meaning the
+            // opposite, since explicit parens are precisely how Ruby says "the
+            // method, not the local".
+            call.is_variable_call()
                 .then(|| call.name().as_slice().to_vec())
         }
         Node::ConstantReadNode { .. } => {
@@ -340,6 +350,14 @@ fn has_receiver(node: &Node<'_>) -> Option<bool> {
     Some(node.as_call_node()?.receiver().is_some())
 }
 
+/// Whether a call is safe-navigated (`&.`) rather than plain (`.`).
+///
+/// `None` for anything that is not a call, so non-calls compare equal here and
+/// the distinction costs nothing everywhere it does not apply.
+fn safe_navigation(node: &Node<'_>) -> Option<bool> {
+    Some(node.as_call_node()?.is_safe_navigation())
+}
+
 /// Atoms match pairwise, except that a name atom which *is* a placeholder acts
 /// as a wildcard over the corresponding target name (`x.$M`, `def $M`).
 fn match_atoms<'pr>(
@@ -442,13 +460,40 @@ fn match_children<'pr>(
             .iter()
             .all(|p| vanishes(p, prepared, env, forbidden));
     };
+    // Placeholders are wildcards and must stay ones: `$X` is spelled as a bare
+    // call, so every check below that reads a call has to let it past first.
+    let head_is_placeholder = placeholder(head, &prepared.bindings).is_some();
+
+    // Below the root, `.` and `&.` are two operators rather than two spellings
+    // of one. `&.` decides whether the rest of the expression runs at all, so a
+    // pattern that matched across the difference let a rewrite reinterpret a
+    // short-circuit it could not see: `!xs&.any? { |i| i.ok? }` is true on nil
+    // and `xs&.none? { |i| i.ok? }` is nil, so `style/inverse-any` flipped a
+    // guard. At the *root* the match is the guarded call itself and a rewrite
+    // swaps one call for another inside the same guard, which is why a rename
+    // still reaches `&.` and preserves it (B8). Nested, the pattern has matched
+    // an expression that *consumes* the guarded value, and what the template
+    // does with it is not visible from here -- so refuse rather than guess
+    // (D115).
+    //
+    // Both sides must be calls. A bare identifier is a call on one side and a
+    // `LocalVariableReadNode` on the other, which is the whole reason
+    // `same_identifier` exists -- reading "not a call" as "not safe-navigated"
+    // made this refuse every cross-kind pair in the codebase.
+    if !head_is_placeholder
+        && let (Some(pattern_nav), Some(target_nav)) =
+            (safe_navigation(head), safe_navigation(t_head))
+        && pattern_nav != target_nav
+    {
+        return false;
+    }
+
     let mut trial = env.clone();
     // Child position is what restricts `same_identifier` to below the pattern
     // root; see its doc for why the root must not get it. Tried first because
     // `match_node` binds into `trial` as it goes, so it cannot be fallen back
     // from -- and placeholders are excluded, being bare names themselves.
-    let head_corresponds =
-        placeholder(head, &prepared.bindings).is_none() && same_identifier(head, t_head);
+    let head_corresponds = !head_is_placeholder && same_identifier(head, t_head);
     if (head_corresponds || match_node(head, t_head, prepared, &mut trial, forbidden))
         && match_children(rest, t_rest, prepared, &mut trial, forbidden)
     {
@@ -1726,9 +1771,27 @@ fn walk<'pr>(
             criteria.sigs,
         ) {
             Verdict::Ok => {
-                state.out.push(candidate);
                 attempts.clear();
-                break;
+                // A flanking sequence metavariable makes the split point a real
+                // choice, and each choice is a distinct match on the same node:
+                // every pair of `{name: name, value: value}` matches
+                // `{**$B, $K: $V, **$A}`. Forbidding the split just taken makes
+                // the next iteration pick another, and terminates because a list
+                // has finitely many splits. Nothing to re-choose without one, so
+                // a pattern carrying no sequence stops here and pays nothing.
+                let splits: Vec<(String, String)> = candidate
+                    .env
+                    .iter()
+                    .filter(|(_, bound)| matches!(bound, Bound::Many(_)))
+                    .map(|(key, bound)| (key.clone(), fingerprint(bound)))
+                    .collect();
+                state.out.push(candidate);
+                if splits.is_empty() {
+                    break;
+                }
+                for (key, taken) in splits {
+                    forbidden.entry(key).or_default().push(taken);
+                }
             }
             // Wrong place, not wrong binding -- no rebinding can fix it.
             verdict @ (Verdict::WrongScope(_) | Verdict::Bug(_)) => {
@@ -1941,6 +2004,52 @@ mod tests {
         let t_result = ruby_prism::parse(source.as_bytes());
         assert_eq!(t_result.errors().count(), 0, "target does not parse");
         search(&p_root, &t_result.node(), &prepared, &Criteria::none()).len()
+    }
+
+    /// D115. At the root the match *is* the guarded call, so a rename reaches
+    /// `&.` and the splice preserves it -- B8's case, and the common one.
+    #[test]
+    fn safe_navigation_matches_a_plain_dot_at_the_pattern_root() {
+        assert_eq!(matches("$R.foo(*$A)", "a&.foo"), 1);
+        assert_eq!(matches("$R.foo(*$A)", "a.foo"), 1);
+    }
+
+    /// Below the root the pattern has matched an expression that *consumes* the
+    /// short-circuited value, and the matcher cannot see what the template does
+    /// with it. `!xs&.any?` and `xs&.none?` disagree on nil.
+    #[test]
+    fn safe_navigation_does_not_match_a_plain_dot_below_the_root() {
+        assert_eq!(matches("!$X.any?", "!xs&.any?"), 0);
+        assert_eq!(matches("!$X.any?", "!xs.any?"), 1);
+    }
+
+    /// Writing `&.` in the pattern is how a rule asks for it, at any depth.
+    #[test]
+    fn a_pattern_may_ask_for_safe_navigation_outright() {
+        assert_eq!(matches("!$X&.any?", "!xs&.any?"), 1);
+        assert_eq!(matches("!$X&.any?", "!xs.any?"), 0);
+    }
+
+    /// The narrowing must not reach a metavariable: `$X` is spelled as a bare
+    /// call, and reading that spelling as "an ordinary dot" would stop every
+    /// wildcard from binding a safe-navigated receiver.
+    #[test]
+    fn a_metavariable_still_binds_a_safe_navigated_call() {
+        assert_eq!(matches("foo($X)", "foo(a&.b)"), 1);
+    }
+
+    /// D115's premise about Prism: explicit parens are what tell `a()` apart
+    /// from `a`, and they live in `opening_loc` rather than in `arguments`.
+    #[test]
+    fn an_empty_argument_list_is_not_a_variable_call() {
+        let result = ruby_prism::parse(b"a()");
+        let node = result.node();
+        let program = node.as_program_node().expect("program");
+        let stmt = program.statements().body().iter().next().expect("one");
+        let call = stmt.as_call_node().expect("call");
+        assert!(call.arguments().is_none(), "no arguments node");
+        assert!(call.opening_loc().is_some(), "parens are the opening loc");
+        assert!(!call.is_variable_call(), "so it is not a bare name");
     }
 
     #[test]
@@ -2369,6 +2478,65 @@ end
         // search must move on to `size: size` rather than reporting nothing.
         let src = "x = {name:, size: size}\n";
         let parsed = ruby_prism::parse(src.as_bytes());
+        assert_eq!(
+            search(&p_root, &parsed.node(), &prepared, &criteria).len(),
+            1
+        );
+    }
+
+    /// Q13 settled that a *rejected* binding is retried. It also asserted that
+    /// several *valid* bindings on one node are reported once and need a second
+    /// pass -- which made a hash of same-name pairs convert one pair per run
+    /// while the run reported success. The split point of a flanking sequence
+    /// metavariable is a real choice, and each choice is a distinct match.
+    #[test]
+    fn every_valid_binding_on_one_node_is_a_match() {
+        let prepared = prepare("{**$B, $K: $V, **$A}").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let p_root = pattern_root(&p_node).expect("single expression");
+
+        let mut constraints = HashMap::new();
+        constraints.insert(
+            "$K".to_string(),
+            Constraint {
+                same_name_as: Some("$V".into()),
+                ..Default::default()
+            },
+        );
+        let scope = Scope::default();
+        let hierarchy = Hierarchy::default();
+        let sigs = crate::sigs::Signatures::default();
+        let contained = std::collections::HashMap::new();
+        let criteria = Criteria {
+            explain: false,
+            constraints: &constraints,
+            contained: &contained,
+            scope: &scope,
+            hierarchy: &hierarchy,
+            sigs: &sigs,
+        };
+
+        let src = "x = {name: name, value: value, verified_at: verified_at}\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = search(&p_root, &parsed.node(), &prepared, &criteria);
+        assert_eq!(hits.len(), 3, "one match per convertible pair");
+
+        // Distinct pairs, not the same one reported three times.
+        let mut keys: Vec<String> = hits
+            .iter()
+            .map(|m| match m.env.get("K") {
+                Some(Bound::Name(n)) => String::from_utf8_lossy(n).into_owned(),
+                other => panic!("$K should bind an identifier, got {other:?}"),
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["name", "value", "verified_at"]);
+
+        // A pair the constraint declines is still declined, so enumeration has
+        // not turned into "report every split".
+        let mixed = "x = {name: name, value: other}\n";
+        let parsed = ruby_prism::parse(mixed.as_bytes());
         assert_eq!(
             search(&p_root, &parsed.node(), &prepared, &criteria).len(),
             1

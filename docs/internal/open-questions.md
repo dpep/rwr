@@ -97,13 +97,14 @@ look alike:
   `same_name_as` because an implicit value has no identifier. This is what the retry fixes,
   and without it the second pass over a partly-shortened hash found nothing at all.
 - *Several **valid** bindings on one node.* `{name: name, size: size}` -- both pairs satisfy
-  the constraint, and `search` reports one match per node by design. That still needs a second
-  pass, and correctly so: rwr does not iterate internally because `foo($A) -> foo(bar($A))`
-  matches its own output and diverges (D15). The caller loops; the corpus runner applies to a
-  fixpoint, as a real consumer does.
+  the constraint, and `search` reported one match per node. **This half was wrong and D118
+  reverses it**: each split of a flanking sequence metavariable binds a different pair, so each
+  is a match, and the hash converts in one pass. The divergence argument cited here does not
+  reach it -- `foo($A) -> foo(bar($A))` diverges by re-matching its own *output*, where bindings
+  are enumerated against the original tree from a finite set computed once.
 
-Pinned by `matcher::tests::a_rejected_binding_is_retried_not_abandoned` and by corpus 003,
-whose two-pair hash converges in two passes.
+Pinned by `matcher::tests::a_rejected_binding_is_retried_not_abandoned` for the rejection half,
+and by `every_valid_binding_on_one_node_is_a_match` for the half D118 reverses.
 
 ### Q5 — Heredoc-safe rewriting → **D14**
 A general rule *is* derivable: `effective_range()` = transitive closure over descendants

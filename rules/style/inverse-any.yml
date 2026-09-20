@@ -24,6 +24,24 @@
     - input: |
         a = !xs.any?
       unchanged: true
+    # RED, and left red on purpose: the engine matches `.` against `&.`, so this
+    # rewrites today. `&.` is there because the receiver may be nil, and on nil
+    # the two sides disagree -- `!nil&.any? {}` is true, `nil&.none? {}` is nil.
+    # A guard flips, silently, and the output parses. No `where:` predicate can
+    # say "an ordinary dot", so the fix is in the matcher, not here.
+    - input: |
+        a = !xs&.any? { |i| i.ok? }
+      unchanged: true
+    # An argument *and* a block is `any?(pattern)`, which ignores the block. Its
+    # inverse is not this rewrite, and the pattern must keep declining it.
+    - input: |
+        a = !xs.any?(Integer) { |i| i.ok? }
+      unchanged: true
+    # The `!` has to apply to the call, not to something containing it. Here it
+    # negates a comparison, and `none?` answers a different question.
+    - input: |
+        a = !(xs.any? { |i| i.ok? } == want)
+      unchanged: true
 
 - description: '`!x.any?(&:ok?)` is `x.none?(&:ok?)` said forwards.'
   match: '!$X.any?(&$S)'
@@ -33,3 +51,22 @@
         a = !xs.any?(&:ok?)
       output: |
         a = xs.none?(&:ok?)
+    # The block-pass need not be a symbol. Pinned because `&$S` reads as if it
+    # meant `&:sym`, and narrowing it to that would quietly drop these sites.
+    - input: |
+        a = !xs.any?(&blk)
+      output: |
+        a = xs.none?(&blk)
+    # Safe navigation declines here for the same reason it declines the block
+    # form: `!nil&.any?(&:ok?)` is true and `nil&.none?(&:ok?)` is nil, so the
+    # guard would flip. One mechanism, both spellings (D115).
+    - input: |
+        a = !xs&.any?(&:ok?)
+      unchanged: true
+    # No block-pass at all. Bare, the two *are* inverses on Enumerable -- this
+    # declines for reach, not for correctness. Widening it would be the real
+    # risk: a bare `any?` is the spelling on objects that define one without a
+    # matching `none?`, and there the rewrite is a NoMethodError.
+    - input: |
+        a = !xs.any?
+      unchanged: true

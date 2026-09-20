@@ -17,11 +17,17 @@
 # `Boolean` is listed beside the two real classes because `T::Boolean` is a
 # constant path and resolves by its last segment, so a signature returning one
 # arrives under that name rather than as the classes it aliases.
+#
+# `Object` and `BasicObject` are there because naming the leaf classes is not
+# enough: `sig { returns(Object) }` resolves, passes a list of leaves, and
+# rewrites -- yet `false` is an Object, so the guard moves. They cost nothing,
+# because the hierarchy is built from `class X < Y` in scope and an ordinary
+# class never declares `Object` as its parent.
 description: '`return if x.nil?` is `return unless x`, without the double negative.'
 match: return if $X.nil?
 where:
   $X:
-    type_not: [TrueClass, FalseClass, Boolean]
+    type_not: [TrueClass, FalseClass, Boolean, Object, BasicObject]
 rewrite: return unless $X
 tests:
   # Resolves to String, so `false` is not among its values.
@@ -92,5 +98,55 @@ tests:
       def m(x)
         return if x.nil?
         x
+      end
+    unchanged: true
+  # A supertype that *contains* the excluded classes. `false` is an Object, so a
+  # leaves-only list lets exactly the case the rule exists to refuse through --
+  # and it resolves, so it is not caught by the unresolved path either.
+  - input: |
+      class Account
+        sig { returns(Object) }
+        def thing; end
+
+        def a
+          return if thing.nil?
+          1
+        end
+      end
+    unchanged: true
+  # `T.untyped` says nothing about the value, so it must not resolve. The pair
+  # with the `Object` case above: both are "the signature told us nothing", and
+  # they have to decline for different reasons.
+  - input: |
+      class Account
+        sig { returns(T.untyped) }
+        def thing; end
+
+        def a
+          return if thing.nil?
+          1
+        end
+      end
+    unchanged: true
+  # The condition must be the whole `.nil?` test. `x.nil? || y` guards on more
+  # than nil, and `return unless x || y` is a different question.
+  - input: |
+      class Account
+        sig { params(name: T.nilable(String)).void }
+        def a(name)
+          return if name.nil? || name.empty?
+          puts name
+        end
+      end
+    unchanged: true
+  # The inverse. `return if !x.nil?` is `return if x`, not `return unless x` --
+  # matching it would invert the guard on every input.
+  - input: |
+      class Account
+        sig { params(name: T.nilable(String)).void }
+        def a(name)
+          return if !name.nil?
+          puts name
+        end
       end
     unchanged: true

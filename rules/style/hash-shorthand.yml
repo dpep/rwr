@@ -24,3 +24,72 @@ tests:
   - input: |
       h = { :name => :name }
     unchanged: true
+  # The same trap one node kind over: `a()` names the *method* outright, while
+  # `a:` prefers a local of that name. With both in scope they are different
+  # programs -- `{a: a()}` is 99, `{a:}` is 1 -- and both parse.
+  - input: |
+      def a = 99
+      a = 1
+      h = { a: a() }
+    unchanged: true
+  # The rest of the family, which the same predicate has to decline for the same
+  # reason: each carries something that makes it a call outright, and the
+  # shorthand would resolve a local first.
+  - input: |
+      h = { a: a(&blk) }
+    unchanged: true
+  - input: |
+      h = { a: a(*args) }
+    unchanged: true
+  - input: |
+      h = { a: a.() }
+    unchanged: true
+  # An ivar is not the identifier the shorthand would read; `{name:}` would find
+  # the method or local instead.
+  - input: |
+      h = { name: @name }
+    unchanged: true
+  # Nor is an explicit receiver. `self.name` names one method; `name:` resolves a
+  # local first and reaches a private method where `self.` cannot.
+  - input: |
+      h = { name: self.name }
+    unchanged: true
+  # A keyword parameter's *default*, which wears the same shape and is not a
+  # hash. `def m(name:)` makes the keyword required -- a different signature, and
+  # a TypeError at every existing call site that omitted it.
+  - input: |
+      def m(name: name)
+        name
+      end
+    unchanged: true
+  # A constant reads its identifier like any other name, and Ruby's shorthand
+  # resolves it the same way, so this one must *not* be declined -- the fix that
+  # closed `{a: :a}` had to stop at literals, not at every non-local.
+  - input: |
+      h = { Name: Name }
+    output: |
+      h = { Name: }
+  # The double splats are not decoration: they let the pair sit anywhere in the
+  # hash. A splat either side must survive untouched.
+  - input: |
+      h = { **before, name: name, **after }
+    output: |
+      h = { **before, name:, **after }
+  # Every pair of one hash converts in a single pass. Each is its own match --
+  # the splat's split point is a real choice, and each choice binds a different
+  # pair -- and their edits touch disjoint bytes, so D15 lets them all through.
+  # This converted one pair per run until D115, while reporting success.
+  - input: |
+      h = { name: name, value: value }
+    output: |
+      h = { name:, value: }
+  - input: |
+      h = { name: name, value: value, verified_at: verified_at }
+    output: |
+      h = { name:, value:, verified_at: }
+  # A pair the predicate declines does not stop its neighbours converting, and
+  # does not convert itself.
+  - input: |
+      h = { name: name, value: other, verified_at: verified_at }
+    output: |
+      h = { name:, value: other, verified_at: }
