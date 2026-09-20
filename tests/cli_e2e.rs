@@ -3653,3 +3653,70 @@ fn a_rename_reaches_a_call_that_passes_arguments() {
     );
     assert_eq!(out.status.code(), Some(0), "nothing left over: {after}");
 }
+
+/// A namespaced class-method designator runs, in every verb.
+///
+/// `expand`'s third definition spelling was `def {class}.{name}(*$P)`, which
+/// for a constant path is `def Foo::Bar.connection` -- a **syntax error**;
+/// Ruby's singleton receiver is a variable reference, and a path has to be
+/// parenthesised. So all three verbs died at exit 3 with "pattern is not valid
+/// Ruby", after announcing the correct reading, about an interpretation rwr
+/// had already rejected -- the misdirection D99 set out to remove.
+///
+/// It pairs with the instance form: D100's remedy for an ambiguous short name
+/// is "qualify it", and for a class method qualifying it refused to run.
+#[test]
+fn a_namespaced_class_method_designator_runs() {
+    let source = "module Foo\n  class Bar\n    def self.connection\n      1\n    end\n  \
+                  end\nend\n\nFoo::Bar.connection\n";
+    let dir = fixture(source);
+    let path = dir.path().to_str().expect("utf8");
+
+    for args in [
+        vec!["find", "Foo::Bar.connection", path],
+        vec!["check", "Foo::Bar.connection", "-r", "link", path],
+        vec!["rewrite", "Foo::Bar.connection", "-r", "link", "-d", path],
+    ] {
+        let out = rwr(&args);
+        let said = stderr(&out);
+        assert_ne!(out.status.code(), Some(3), "{args:?}: {}", said.trim());
+        assert!(!said.contains("not valid Ruby"), "{args:?}: {said}");
+    }
+    // And it answers about the class, rather than merely surviving.
+    let out = rwr(&["find", "Foo::Bar.connection", path]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("def self.connection") && text.contains("Foo::Bar.connection"),
+        "the definition and the call: {text}"
+    );
+
+    let out = rwr(&["rewrite", "Foo::Bar.connection", "-r", "link", path]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    assert_eq!(after, source.replace("connection", "link"), "{after}");
+}
+
+/// And the spelling that names a namespaced class outright still reaches it.
+///
+/// `def (Foo::Bar).connection` is how Ruby writes the receiver this rule is
+/// for when the receiver is a path -- rare (zero occurrences across rails,
+/// discourse and mastodon) but legal, and dropping the rule rather than fixing
+/// its spelling would have quietly given up a reach.
+#[test]
+fn a_parenthesised_singleton_def_is_reached() {
+    let source = "module Foo\n  class Bar\n  end\nend\n\ndef (Foo::Bar).connection\n  1\nend\n";
+    let dir = fixture(source);
+    let out = rwr(&[
+        "rewrite",
+        "Foo::Bar.connection",
+        "-r",
+        "link",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    assert!(
+        after.contains("def (Foo::Bar).link"),
+        "{after} ({})",
+        stderr(&out)
+    );
+}

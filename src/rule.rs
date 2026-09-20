@@ -505,6 +505,19 @@ fn is_method_name(s: &str) -> bool {
         && s.matches(['?', '!']).count() <= 1
 }
 
+/// A class name as it may be written as a `def`'s singleton receiver.
+///
+/// Ruby's grammar takes a *variable reference* there, which a bare constant is
+/// and a constant path is not: `def Foo::Bar.connection` is a syntax error and
+/// `def (Foo::Bar).connection` is not.
+fn singleton_receiver(class: &str) -> String {
+    if class.contains("::") {
+        format!("({class})")
+    } else {
+        class.to_string()
+    }
+}
+
 /// `Foo`, or `Foo::Bar`.
 fn is_class_path(s: &str) -> bool {
     !s.is_empty()
@@ -736,10 +749,19 @@ impl MethodRename {
             //
             // Reported rather than rewritten until now, so the one occurrence
             // guaranteed to break was the one left for a human.
-            .chain(class.map(|class| Rule {
-                pattern: format!("def {class}.{name}(*$P); $B; end"),
-                rewrite: Some(format!("def {class}.{new}(*$P); $B; end")),
-                ..Default::default()
+            //
+            // A namespaced receiver has to be parenthesised: Ruby's singleton
+            // receiver is a variable reference, so `def Foo::Bar.connection` is
+            // a *syntax error* and every verb died at exit 3 on a designator
+            // nobody had mis-typed. `def (Foo::Bar).connection` is how the
+            // receiver is spelled when it is a path.
+            .chain(class.map(|class| {
+                let receiver = singleton_receiver(class);
+                Rule {
+                    pattern: format!("def {receiver}.{name}(*$P); $B; end"),
+                    rewrite: Some(format!("def {receiver}.{new}(*$P); $B; end")),
+                    ..Default::default()
+                }
             }))
             .collect(),
         };
@@ -1679,6 +1701,41 @@ mod tests {
             Some(true),
             "a class-method rename reaches implicit self only in singleton context"
         );
+    }
+
+    /// Every pattern the notation builds has to be Ruby, whatever the class is
+    /// called.
+    ///
+    /// `def {class}.{name}` is a syntax error for a constant path -- Ruby's
+    /// singleton receiver is a variable reference -- so a namespaced `.`
+    /// designator killed all three verbs at exit 3, after announcing the right
+    /// reading. Asserted over every rule rather than the one that was wrong,
+    /// since "the patterns parse" is the property, not "this index parses".
+    #[test]
+    fn every_pattern_the_notation_builds_is_ruby() {
+        for method in [
+            "Bar.connection",
+            "Foo::Bar.connection",
+            "Foo::Bar#connection",
+        ] {
+            let rules = MethodRename {
+                method: method.into(),
+                rename: Some("link".into()),
+            }
+            .expand();
+            for rule in &rules {
+                for source in [&rule.pattern].into_iter().chain(rule.rewrite.as_ref()) {
+                    // Through `prepare`, which is the only form the engine ever
+                    // parses: metavariables become placeholder identifiers, and
+                    // anything still unparseable is unparseable Ruby.
+                    let prepared =
+                        crate::pattern::prepare::prepare_with(source, &rule.constant_captures())
+                            .unwrap_or_else(|e| panic!("{method}: `{source}`: {e}"));
+                    let parsed = ruby_prism::parse(prepared.source.as_bytes());
+                    assert_eq!(parsed.errors().count(), 0, "{method}: `{source}`");
+                }
+            }
+        }
     }
 
     /// The `#` form must not reach a definition inside `class << self`.

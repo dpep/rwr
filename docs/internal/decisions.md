@@ -2716,3 +2716,32 @@ silent.
 **Why the suite was green.** The rule's own fixtures had `{name: name}` and `{name: other}` -- the
 match and the plain non-match. Neither is the case where two captures agree on *text* and disagree
 on *meaning*, which is the only case the constraint can get wrong. Both spellings are fixtures now.
+
+## D103 - A singleton receiver is parenthesised when the class is namespaced
+**Decided.** Fixes an exit-3 refusal D99 was meant to have removed; the other half of D100's remedy.
+
+`expand`'s third definition spelling is `def {class}.{name}(*$P)`, which reaches a class method
+defined from outside its own body. For a constant path that is `def Foo::Bar.connection`, and **Ruby
+rejects it**: the singleton receiver in `def` is a variable reference, and a path has to be written
+`def (Foo::Bar).connection`. So `find`, `check` and `rewrite` all died at exit 3 with "pattern is not
+valid Ruby: expected a delimiter to close the parameters" -- a true statement about an
+interpretation rwr had already rejected, printed *after* announcing the correct reading. That is
+exactly the misdirection D99 removed for operators, arriving in a new place.
+
+**It pairs with D100's amendment, and the pair is the point.** This decision's remedy for an
+ambiguous short class name is "qualify it and it works". For an instance method the qualified form
+silently retargeted to a sibling namespace; for a class method it refused to run at all. Both halves
+of the naming story were broken, in opposite directions, and a caller following the documentation
+hit one or the other. Measured: 84% of rails classes are namespaced, and rails has 1,039
+`def self.x` definitions across 468 files.
+
+**The rule is kept rather than dropped.** The parenthesised spelling occurs **zero** times across
+rails, discourse and mastodon -- as does the unqualified `def Konstant.method` in mastodon, with 4
+each in rails and discourse -- so this rule is rare either way. It is still the only pattern that
+names the class outright in a definition, and dropping it for namespaced classes would have traded a
+crash for a silent gap, which is the wrong direction. Fixing the spelling costs one rule that
+usually does not fire; the prefilter admits files on the method name, which is required anyway.
+
+**The test is the property, not the case.** `every_pattern_the_notation_builds_is_ruby` prepares and
+parses every pattern and template the notation produces, for a bare class, a namespaced class and
+both notations -- because the bug was not "this index is wrong" but "a spelling nobody parsed".
