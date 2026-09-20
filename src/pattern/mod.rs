@@ -8,26 +8,15 @@
 //! single, optional, sequence and must-not-appear under one mechanism, and a
 //! repeated metavariable requires *AST* equality, never textual equality.
 
-// Reachable only from its own tests until the matcher consumes it. The scanner
-// is the ground truth for D32's syntax, so it is worth having pinned by tests
-// before anything depends on it. Drop this allow when the matcher lands.
-#[allow(dead_code)]
 pub(crate) mod metavar;
-
-#[allow(dead_code)]
 pub(crate) mod prefilter;
-
-#[allow(dead_code)]
 pub(crate) mod prepare;
 
+// The whole module is a drift guard: its table exists to be checked against
+// Prism's vendored schema by its own tests, not to be called.
 #[allow(dead_code)]
 pub(crate) mod schema;
 
-#[allow(dead_code)]
 pub(crate) mod compare;
-
-#[allow(dead_code)]
 pub(crate) mod generated;
-
-#[allow(dead_code)]
 pub(crate) mod matcher;

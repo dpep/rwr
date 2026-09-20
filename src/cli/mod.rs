@@ -23,10 +23,6 @@ use std::process::ExitCode;
 /// The split that matters is [`Exit::Retryable`] vs [`Exit::Refused`]: an agent
 /// branches on the exit code before it parses any JSON, and collapsing the two
 /// would make it either abandon recoverable work or spin on unrecoverable work.
-// Variants land as the verbs are implemented; the numeric map is already a
-// public contract and is pinned by `exit_codes_are_stable`. Drop this allow
-// once every verb constructs its own statuses.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exit {
     /// Verb-dependent success. `find`: matched. `check`: clean. `rewrite`:

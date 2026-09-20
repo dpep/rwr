@@ -6,18 +6,14 @@
 //! implement and `docs/internal/decisions.md` for why each piece is shaped as it is.
 
 pub mod cli;
-#[allow(dead_code)]
 pub(crate) mod diff;
 pub(crate) mod engine;
 pub(crate) mod erb;
 pub(crate) mod hierarchy;
 pub(crate) mod pattern;
-#[allow(dead_code)]
 pub(crate) mod profile;
-#[allow(dead_code)]
 pub(crate) mod residue;
 pub(crate) mod rewrite;
-#[allow(dead_code)]
 pub(crate) mod ruby;
 pub(crate) mod rule;
 pub(crate) mod sigs;

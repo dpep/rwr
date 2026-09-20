@@ -35,10 +35,6 @@ impl Changed {
         self.by_file.contains_key(file)
     }
 
-    pub(crate) fn files(&self) -> usize {
-        self.by_file.len()
-    }
-
     /// Restrict to lines named on the command line, as `file.rb:3` or
     /// `file.rb:3-15`.
     ///
@@ -337,6 +333,6 @@ mod tests {
     #[test]
     fn a_deletion_contributes_nothing() {
         let diff = "+++ /dev/null\n@@ -1,5 +0,0 @@\n-x\n";
-        assert_eq!(parse(diff, Path::new("/repo")).files(), 0);
+        assert!(parse(diff, Path::new("/repo")).by_file.is_empty());
     }
 }

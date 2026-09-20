@@ -571,16 +571,6 @@ pub(crate) enum ConstraintMiss {
     },
 }
 
-pub(crate) fn satisfies(
-    found: &Match<'_>,
-    constraints: &HashMap<String, Constraint>,
-    scope: &Scope,
-    hierarchy: &Hierarchy,
-    sigs: &crate::sigs::Signatures,
-) -> bool {
-    verdict(found, constraints, &HashMap::new(), scope, hierarchy, sigs) == Verdict::Ok
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verdict(
     found: &Match<'_>,
@@ -1696,6 +1686,21 @@ fn walk<'pr>(
 mod tests {
 
     use super::*;
+
+    /// Verdict as a yes/no, for the cases that assert only acceptance.
+    ///
+    /// Test-only, and deliberately so: it passes no sub-patterns, so a
+    /// `contains:` constraint would read as satisfied. Production assembles
+    /// criteria through `Engine::criteria`, which cannot omit one.
+    fn satisfies(
+        found: &Match<'_>,
+        constraints: &HashMap<String, Constraint>,
+        scope: &Scope,
+        hierarchy: &Hierarchy,
+        sigs: &crate::sigs::Signatures,
+    ) -> bool {
+        verdict(found, constraints, &HashMap::new(), scope, hierarchy, sigs) == Verdict::Ok
+    }
     use crate::pattern::prepare::prepare;
     use crate::rule::Kind;
 

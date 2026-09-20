@@ -39,17 +39,6 @@ pub(crate) fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
-/// Time a phase, recording it only when profiling is on.
-pub(crate) fn span<T>(name: &'static str, body: impl FnOnce() -> T) -> T {
-    if !enabled() {
-        return body();
-    }
-    let started = Instant::now();
-    let out = body();
-    record(name, started.elapsed(), None);
-    out
-}
-
 /// Record a phase timed by the caller.
 ///
 /// The closure form does not fit a long parallel chain without contorting it,
@@ -129,6 +118,6 @@ mod tests {
     #[test]
     fn a_span_is_transparent_when_disabled() {
         ENABLED.store(false, Ordering::Relaxed);
-        assert_eq!(span("noop", || 41 + 1), 42);
+        assert_eq!(span_noted("noop", || 41 + 1, |n| n.to_string()), 42);
     }
 }
