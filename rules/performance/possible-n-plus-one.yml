@@ -5,63 +5,137 @@
 #
 # So this finds candidates, not defects. It is worth having anyway: the shape is
 # rare enough per file to skim, and every real N+1 is in here somewhere.
-id: performance/possible-n-plus-one
-description: >-
-  A block reaching through its own element to a further association -- the N+1
-  shape. rwr cannot see whether the relation was eager-loaded, so this is a
-  candidate to check, not a defect.
-unsafe: >-
-  Flags the shape only. A preloaded association is indistinguishable from a
-  lazy one without knowing what the caller did.
-match: $R.$ITER { |$X| $B }
-where:
-  $ITER:
-    name: [each, map, flat_map, select, filter_map, each_with_object, sum]
-  $B: { contains: $X.$ASSOC.$FIELD }
-tests:
-  # Reaching through the block's own element to a further association.
-  - input: |
-      orders.each { |o| puts o.customer.name }
-    finds: 1
-  # Reaching through something else is somebody else's object, not an N+1.
-  - input: |
-      orders.each { |o| puts other.customer.name }
-    finds: 0
-  # One hop is a plain attribute read.
-  - input: |
-      orders.each { |o| puts o.name }
-    finds: 0
-  # A non-iterating method is not the shape at all.
-  - input: |
-      orders.tap { |o| puts o.customer.name }
-    finds: 0
-  # The hop may be conditional or nested; it is still a hop per element.
-  - input: |
-      orders.each { |o| puts o.customer.name if o.active? }
-    finds: 1
-  # Iterators the `name:` list does not carry. `detect` stops early, which
-  # bounds the damage, but `each_with_index` does not -- it is the same N+1
-  # with a counter, and it goes unreported.
-  - input: |
-      orders.detect { |o| o.customer.name }
-      orders.each_with_index { |o, i| puts o.customer.name }
-    finds: 0
-  # RED, deliberately -- the rule's own third case says a plain attribute read
-  # is not an N+1, and a coercion of one is still a plain attribute read.
-  # `$ASSOC.$FIELD` counts hops, not associations, so `id` + `to_s` reads as a
-  # chain through an association. This is the single largest source of noise:
-  # 26 of 91 findings on a real app are a two-hop chain ending in `to_s`,
-  # `to_i`, `strip` or `downcase`, and 36 of the 91 are in spec files. A
-  # candidate list is only worth skimming if skimming it is cheaper than
-  # skimming the code.
-  - input: |
-      ids = accounts.map { |a| a.id.to_s }
-    finds: 0
-  # RED, deliberately -- the `unsafe:` note's justification is that rwr
-  # "cannot see whether the relation was eager-loaded". Here it can: the
-  # `includes` names the very association the block reaches through, in the
-  # same expression, inside the matched receiver. Four findings on a real app
-  # are this shape.
-  - input: |
-      orders.includes(:customer).each { |o| puts o.customer.name }
-    finds: 0
+#
+# **Two known false-positive classes it cannot yet decline**, both measured on a
+# real app and both blocked on the rule language rather than on the shape:
+#
+#   * `a.id.to_s` -- `$ASSOC.$FIELD` counts hops, not associations, and a
+#     coercion of a plain attribute is two hops. Declining it means constraining
+#     `$ASSOC`, which `where:` refuses because `match:` never captures it: a
+#     metavariable that appears only inside a `contains:` sub-pattern is not
+#     addressable.
+#   * `orders.includes(:customer).each { |o| o.customer.name }` -- the eager
+#     load is right there in the matched receiver. Declining it needs a negative
+#     containment (`$R` must *not* contain `includes(:$ASSOC)`), and every
+#     predicate here is positive. `name_not:` does not reach it either: it reads
+#     a *bare* identifier, and a chained `includes(:customer)` has a receiver
+#     and arguments, so it presents no name to exclude and passes.
+#
+# Both are pinned below as what the rule does today, not as what it should do.
+#
+# Two rules, because a block's arity is part of its shape: `{ |$X| $B }` binds
+# one parameter and nothing else, so `each_with_index` needs the two-element
+# spelling.
+#
+# The lists only carry iterators whose call takes no arguments.
+# `each_with_object({})` is the same N+1 and is not reported: `$R.$ITER(*$A)
+# { ... }` matches nothing at all -- a sequence in the argument list and a
+# metavariable in the method-name position do not combine -- so each argument
+# arity would need a near-identical rule of its own. Pinned below.
+#
+# **`find_each` is left out deliberately, and measured.** Adding it took
+# mastodon from 91 findings to 133, and 35 of the 42 new ones carry an
+# `includes(...)` in the same expression -- the one false positive rwr can
+# actually see and still cannot decline. It would have taken that class from
+# 4/91 to 39/133. `find_each` is what someone reaches for *because* they are
+# batching a large relation, so it correlates with having eager-loaded already.
+# It goes back in when the receiver can be excluded, not before.
+- id: performance/possible-n-plus-one
+  description: >-
+    A block reaching through its own element to a further association -- the N+1
+    shape. rwr cannot see whether the relation was eager-loaded, so this is a
+    candidate to check, not a defect.
+  unsafe: >-
+    Flags the shape only. A preloaded association is indistinguishable from a
+    lazy one without knowing what the caller did, and a coercion of a plain
+    attribute (`a.id.to_s`) has the same two-hop shape as a real association.
+  match: $R.$ITER { |$X| $B }
+  where:
+    $ITER:
+      name:
+        - each
+        - map
+        - flat_map
+        - select
+        - filter_map
+        - sum
+        - detect
+        - group_by
+        - partition
+        - sort_by
+        - min_by
+        - max_by
+    $B: { contains: $X.$ASSOC.$FIELD }
+  tests:
+    # Reaching through the block's own element to a further association.
+    - input: |
+        orders.each { |o| puts o.customer.name }
+      finds: 1
+    # Reaching through something else is somebody else's object, not an N+1.
+    - input: |
+        orders.each { |o| puts other.customer.name }
+      finds: 0
+    # One hop is a plain attribute read.
+    - input: |
+        orders.each { |o| puts o.name }
+      finds: 0
+    # A non-iterating method is not the shape at all.
+    - input: |
+        orders.tap { |o| puts o.customer.name }
+      finds: 0
+    # The hop may be conditional or nested; it is still a hop per element.
+    - input: |
+        orders.each { |o| puts o.customer.name if o.active? }
+      finds: 1
+    # `detect` stops early, which bounds the damage but does not remove it, and
+    # a reduction reaches through every element the same way `each` does.
+    - input: |
+        orders.detect { |o| o.customer.name }
+        orders.sort_by { |o| o.customer.name }
+      finds: 2
+    # `each_with_index` is the same N+1 with a counter, and needs the two-element
+    # rule to be seen at all.
+    - input: |
+        orders.each_with_index { |o, i| puts o.customer.name }
+      finds: 1
+    # PINNED, not endorsed -- an iterator whose call takes an argument. The
+    # shape is identical and the rule is blind to it; see the header.
+    - input: |
+        orders.each_with_object({}) { |o, memo| memo[o.customer.name] = o }
+      finds: 0
+    # Left out on measured grounds, not missed. See the header.
+    - input: |
+        orders.find_each { |o| puts o.customer.name }
+      finds: 0
+    # PINNED, not endorsed -- a coercion of a plain attribute read. The rule's
+    # own third case says one hop is not an N+1, and `a.id` is one hop; `to_s`
+    # makes it two. 26 of 91 findings on a real app are this shape (a chain
+    # ending in `to_s`, `to_i`, `strip` or `downcase`), and 36 of the 91 are in
+    # spec files. Declining it needs `where:` to reach a capture that lives only
+    # in a `contains:` sub-pattern; today that is refused at load.
+    - input: |
+        ids = accounts.map { |a| a.id.to_s }
+      finds: 1
+    # PINNED, not endorsed -- the eager load names the very association the
+    # block reaches through, inside the matched receiver, so this is one of the
+    # few places rwr *could* see what the caller did. Four findings on a real
+    # app are this shape. Declining it needs a negative containment on `$R`,
+    # which the rule language does not have.
+    - input: |
+        orders.includes(:customer).each { |o| puts o.customer.name }
+      finds: 1
+
+- id: performance/possible-n-plus-one
+  description: >-
+    A block reaching through its own element to a further association -- the N+1
+    shape. rwr cannot see whether the relation was eager-loaded, so this is a
+    candidate to check, not a defect.
+  unsafe: >-
+    Flags the shape only. A preloaded association is indistinguishable from a
+    lazy one without knowing what the caller did, and a coercion of a plain
+    attribute (`a.id.to_s`) has the same two-hop shape as a real association.
+  match: $R.$ITER { |$X, $Y| $B }
+  where:
+    $ITER:
+      name: [each, each_with_index]
+    $B: { contains: $X.$ASSOC.$FIELD }
