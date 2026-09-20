@@ -3378,3 +3378,32 @@ fn a_singleton_macro_belongs_to_the_class_method() {
         "the three singleton macros are the class method's: {text}"
     );
 }
+
+/// A designator naming a method rwr has no rule set for is refused, not quietly
+/// demoted to a pattern.
+///
+/// `#` opens a comment in Ruby, so as a pattern `Account#==` is the bare
+/// constant `Account` -- a different question, answered at exit 0. `rewrite`
+/// used to get further and fail `verify` with "unexpected constant path after
+/// `class`", a true report of a symptom three steps from the cause (B1).
+#[test]
+fn an_operator_or_writer_designator_is_refused() {
+    let source = "class Account\n  def ==(other)\n    true\n  end\n\n  def name=(v)\n    \
+                  @name = v\n  end\nend\n";
+    let dir = fixture(source);
+    let path = dir.path().to_str().expect("utf8");
+
+    for (arg, offender) in [("Account#==", "`==`"), ("Account#name=", "`name=`")] {
+        for verb in ["check", "rewrite"] {
+            let out = rwr(&[verb, arg, "-r", "renamed", path]);
+            let text = stderr(&out);
+            assert!(
+                text.contains("cannot build a rename for") && text.contains(offender),
+                "{verb} {arg}: {text}"
+            );
+            assert_ne!(out.status.code(), Some(0), "{verb} {arg}: {text}");
+        }
+    }
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    assert_eq!(after, source, "a refusal writes nothing");
+}

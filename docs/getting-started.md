@@ -50,6 +50,11 @@ A pattern is Ruby and `#` starts a comment, so the notation is the only way to
 say this. Going the other way, the two-part form always means the method, so
 write `Account.display_name()` when you want the literal call shape.
 
+Operator and writer methods — `==`, `<=>`, `[]`, `display_name=` — are not
+supported through the notation yet. rwr names the offending method and refuses,
+rather than reading `Account#==` as a pattern, where it would silently have
+meant the bare constant `Account`.
+
 ## Change something
 
 ```sh

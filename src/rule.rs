@@ -405,6 +405,14 @@ pub(crate) enum RuleError {
         name: String,
         known: Vec<String>,
     },
+    /// Ruby's method notation, naming a method rwr has no rule set for.
+    ///
+    /// Distinct from `NoSuchRule`, which used to swallow it and answer with a
+    /// list of built-in rule ids -- a true statement about the wrong thing.
+    Unsupported {
+        method: String,
+        name: String,
+    },
 }
 
 impl std::fmt::Display for RuleError {
@@ -437,6 +445,21 @@ impl std::fmt::Display for RuleError {
                 f,
                 "a replacement is required — pass -r/--replace, or give a rule file with a `rewrite:` key"
             ),
+            RuleError::Unsupported { method, name } => {
+                let named = if name.is_empty() {
+                    "no method".to_string()
+                } else {
+                    format!("`{name}`")
+                };
+                write!(
+                    f,
+                    "`{method}` names {named}, which rwr cannot build a rename for\n  \
+                     operator and writer methods (`==`, `<=>`, `[]`, `name=`) are not \
+                     supported yet\n  \
+                     refused rather than read as a pattern, which would silently answer a \
+                     different question"
+                )
+            }
         }
     }
 }
@@ -491,6 +514,39 @@ fn is_class_path(s: &str) -> bool {
         })
 }
 
+/// Ruby's operator methods: a closed set, listed rather than inferred.
+///
+/// "Not an identifier" would be the shorter rule and the wrong one -- it would
+/// swallow `Account.new.display_name`, which is a pattern.
+const OPERATOR_METHODS: &[&str] = &[
+    "[]", "[]=", "==", "===", "!=", "<=>", "=~", "!~", "<", "<=", ">", ">=", "+", "-", "*", "/",
+    "%", "**", "<<", ">>", "&", "|", "^", "~", "!", "+@", "-@",
+];
+
+/// A method name Ruby allows that rwr has no rule set for: an operator, or a
+/// writer like `display_name=`.
+fn is_unsupported_method_name(s: &str) -> bool {
+    OPERATOR_METHODS.contains(&s) || s.strip_suffix('=').is_some_and(is_method_name)
+}
+
+/// How an argument reads when held against Ruby's method notation.
+#[derive(Debug)]
+pub(crate) enum Designator {
+    /// Not the notation: a pattern, a path, or a rule id.
+    NotOne,
+    /// A method rwr can build the whole rule set for.
+    Method(MethodRename),
+    /// The notation, naming a method rwr cannot build a rule set for.
+    ///
+    /// Its own answer rather than `NotOne`, because the fallback is silent and
+    /// wrong: read as a *pattern*, `Account#==` is the constant `Account`
+    /// followed by a comment, so `find 'Account#=='` returned byte-identical
+    /// JSON to `find 'Account'` at exit 0 -- 120 lines of unrelated constant
+    /// mentions on a real repo (B1). Refusing costs a round trip; that answered
+    /// a different question and looked clean doing it.
+    Unsupported { name: String },
+}
+
 /// A method named in Ruby's own notation, given where a rule is expected.
 ///
 /// The notation already means something exact in a rule file's `method:` key,
@@ -502,21 +558,45 @@ fn is_class_path(s: &str) -> bool {
 /// `#name`. Anything richer -- arguments, a chain, a metavariable -- is a
 /// pattern and stays one. That matters most for `.`, which is valid Ruby: the
 /// notation claims the two-part form and nothing else.
-pub(crate) fn method_notation(arg: &str) -> Option<MethodRename> {
+pub(crate) fn designator(arg: &str) -> Designator {
     let arg = arg.trim();
-    let (class, name) = arg.split_once(['#', '.'])?;
-    if !is_method_name(name) {
-        return None;
-    }
+    let Some(cut) = arg.find(['#', '.']) else {
+        return Designator::NotOne;
+    };
+    // The delimiter that actually split it, not merely one that appears
+    // somewhere: `Account.foo#bar` is a real pattern with a trailing comment.
+    let by_hash = arg.as_bytes()[cut] == b'#';
+    let (class, name) = (&arg[..cut], &arg[cut + 1..]);
     // An empty class means "any class", which only `#` can spell: a leading
     // `.` is not notation anyone writes.
-    if !(is_class_path(class) || (class.is_empty() && arg.starts_with('#'))) {
-        return None;
+    if !(is_class_path(class) || (class.is_empty() && by_hash)) {
+        return Designator::NotOne;
     }
-    Some(MethodRename {
-        method: arg.to_string(),
-        rename: None,
-    })
+    if is_method_name(name) {
+        return Designator::Method(MethodRename {
+            method: arg.to_string(),
+            rename: None,
+        });
+    }
+    // `#` opens a comment in Ruby, so `Konstant#<anything>` can never be a
+    // useful pattern -- whatever follows, the notation is what was meant. After
+    // a `.`, which is ordinary Ruby, only a spelling that is unmistakably a
+    // method name counts, or `Account.new.display_name` would stop being a
+    // pattern.
+    if by_hash || is_unsupported_method_name(name) {
+        return Designator::Unsupported {
+            name: name.to_string(),
+        };
+    }
+    Designator::NotOne
+}
+
+/// The designator's rule set, when rwr has one.
+pub(crate) fn method_notation(arg: &str) -> Option<MethodRename> {
+    match designator(arg) {
+        Designator::Method(m) => Some(m),
+        Designator::NotOne | Designator::Unsupported { .. } => None,
+    }
 }
 
 impl MethodRename {
@@ -1013,13 +1093,26 @@ pub(crate) fn load_all(rule: &str, replace: Option<&str>) -> Result<Vec<Rule>, R
         // not a pattern and a template: a method is renamed by the whole rule
         // set -- definition, dispatchers, macros, implicit self -- and
         // rewriting the one call shape would leave every other spelling behind.
-        if let Some(mut method) = method_notation(rule) {
-            method.rename = Some(template.to_string());
-            method.validate().map_err(|message| RuleError::Malformed {
-                path: rule.to_string(),
-                message,
-            })?;
-            return Ok(identified(method.expand(), rule));
+        match designator(rule) {
+            Designator::Method(mut method) => {
+                method.rename = Some(template.to_string());
+                method.validate().map_err(|message| RuleError::Malformed {
+                    path: rule.to_string(),
+                    message,
+                })?;
+                return Ok(identified(method.expand(), rule));
+            }
+            // Falling through to the pattern path is how `rewrite 'User#name='
+            // -r full_name=' got as far as splicing and then failed `verify`
+            // with "unexpected constant path after `class`" -- a true report of
+            // a symptom three steps downstream of the cause.
+            Designator::Unsupported { name } => {
+                return Err(RuleError::Unsupported {
+                    method: rule.to_string(),
+                    name,
+                });
+            }
+            Designator::NotOne => {}
         }
         return Ok(vec![Rule {
             pattern: rule.to_string(),
@@ -1036,8 +1129,15 @@ pub(crate) fn load_all(rule: &str, replace: Option<&str>) -> Result<Vec<Rule>, R
         // Ruby's own notation, as an argument rather than a file. Checked after
         // the path so a file always wins, and before the pack because no
         // built-in id can hold a `#` or a capitalised `.`.
-        if let Some(method) = method_notation(rule) {
-            return Ok(identified(method.expand(), rule));
+        match designator(rule) {
+            Designator::Method(method) => return Ok(identified(method.expand(), rule)),
+            Designator::Unsupported { name } => {
+                return Err(RuleError::Unsupported {
+                    method: rule.to_string(),
+                    name,
+                });
+            }
+            Designator::NotOne => {}
         }
         // Not a path, so it may name part of the built-in pack. A real path
         // always wins: resolving the other way round would mean a rule shipped
@@ -1332,11 +1432,59 @@ mod tests {
             "Account",
             "foo.bar",
             // Neither half is what it would have to be.
-            "Account#Display",
             ".display_name",
-            "Account#",
         ] {
             assert!(method_notation(not).is_none(), "{not}");
+        }
+    }
+
+    /// A designator naming a method rwr has no rule set for is refused, not
+    /// quietly demoted to a pattern.
+    ///
+    /// As a pattern, `Account#==` is the constant `Account` followed by a
+    /// comment, so the run answered "where is the constant" at exit 0 --
+    /// byte-identical to `find 'Account'`, with none of the `read ... as`
+    /// announcement to give it away.
+    #[test]
+    fn a_designator_rwr_cannot_rename_is_refused_rather_than_read_as_a_pattern() {
+        for (arg, name) in [
+            ("Account#==", "=="),
+            ("Account#<=>", "<=>"),
+            ("Account#[]", "[]"),
+            ("Account#[]=", "[]="),
+            ("User#name=", "name="),
+            ("#==", "=="),
+            ("Billing::Account#==", "=="),
+            // `#` opens a comment, so nothing after it can have been a pattern.
+            ("Account#Display", "Display"),
+            ("Account#", ""),
+            // After a `.` only an unmistakable method spelling counts.
+            ("User.name=", "name="),
+        ] {
+            match designator(arg) {
+                Designator::Unsupported { name: got } => assert_eq!(got, name, "{arg}"),
+                other => panic!("{arg} read as {other:?}"),
+            }
+        }
+    }
+
+    /// And the refusal must not swallow real patterns, which is what a plain
+    /// "the name is not an identifier" rule would have done.
+    #[test]
+    fn a_pattern_that_merely_contains_a_dot_is_still_a_pattern() {
+        for pattern in [
+            "Account.new.display_name",
+            "Account.display_name(1)",
+            "$R.display_name",
+            "foo.bar",
+            // A trailing comment on a real pattern: the `.` split it, not the `#`.
+            "Account.foo#bar",
+            ".display_name",
+        ] {
+            assert!(
+                matches!(designator(pattern), Designator::NotOne),
+                "{pattern}"
+            );
         }
     }
 

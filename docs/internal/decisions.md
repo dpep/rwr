@@ -2525,3 +2525,34 @@ unguarded rules were 5-9. And the identity/round-trip property test passes byte-
 wrong output, because renaming the wrong method is perfectly reversible. An assertion that a wrong
 behaviour also satisfies is worth nothing -- both tests now loop over every scoped rule, and the
 e2e fixture asserts the site *count* each direction.
+
+## D99 - The method notation refuses the methods it cannot rename
+**Decided.** Closes a hole D94/D95 left open; defers operator support.
+
+`is_method_name` accepts `[a-z_][a-zA-Z0-9_]*[?!]?`, so `==`, `[]`, `[]=`, `<=>` and `display_name=`
+made the notation parser return "not a designator". The caller then took the only other reading
+available -- a **pattern** -- and in a pattern `#` opens a comment, so `Account#==` is the bare
+constant `Account`. `find 'Account#=='` returned byte-identical JSON to `find 'Account'`, exit 0,
+without the `read ... as` line that would have given it away; on a real repo `find 'User#name='`
+returned 120 lines, every mention of the constant. Measured: `def foo=` appears 202 times in rails,
+110 in discourse, 25 in mastodon; operator definitions 183/38/6.
+
+**The parser now has three answers, not two.** "Not the notation", "the notation" and "the notation,
+naming a method rwr has no rule set for". Only the third is new, and it refuses by name. Collapsing
+it into the first is what made the failure silent -- the caller cannot refuse what it was told is a
+pattern.
+
+**Where the line falls.** After a `#` the argument is a designator whatever follows, because `#`
+opens a comment and `Konstant#<anything>` can never be a useful pattern. After a `.`, which is
+ordinary Ruby, only Ruby's closed set of operator methods and the `name=` writer suffix count --
+anything else stays a pattern, or `Account.new.display_name` would stop being one.
+
+**Refusal, not support.** Operator and writer renames are a feature with their own design: `[]=` and
+`+@` are not spelled like identifiers anywhere in a pattern, the macro allowlist has no entry for
+them, and `-r '<=>'` has to be accepted as a *target* as well. None of that is needed to close the
+hole, and the hole is the part that ships a wrong answer.
+
+**It also removes a misdirection.** `rewrite 'User#name=' -r full_name` used to reach `verify` and
+fail with "the rewritten source did not verify: unexpected constant path after `class`" -- a true
+statement about a symptom three steps downstream. `check` answered with "no such file, directory, or
+built-in rule" and a list of twenty built-in rule ids. Both now name the method.
