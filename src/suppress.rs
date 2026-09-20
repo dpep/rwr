@@ -177,12 +177,25 @@ pub(crate) fn directives(
         // rule nothing has -- neither honoured nor reported stale, because an
         // unknown id is assumed to belong to another pack.
         let named = rest.split(" -- ").next().unwrap_or(rest);
-        let rules: Vec<String> = named
+        let mut rules: Vec<String> = named
             .split([',', ' ', '\t'])
             .map(str::trim)
             .filter(|r| !r.is_empty())
             .map(str::to_string)
             .collect();
+        // A name written twice is one name. Staleness and the unknown-id
+        // report each walk `rules` once per entry, so a repeat printed one
+        // comment's `file:line` twice and counted it twice. Deduplicated here
+        // rather than at either report, so the two cannot disagree; the list
+        // is a handful of names, so order is kept by scanning it.
+        let mut seen = Vec::with_capacity(rules.len());
+        rules.retain(|r| {
+            let fresh = !seen.contains(r);
+            if fresh {
+                seen.push(r.clone());
+            }
+            fresh
+        });
         if rules.is_empty() {
             // A blanket ignore is a blind spot nothing can audit, so it is an
             // error rather than a very effective directive.
@@ -500,6 +513,25 @@ mod tests {
         let (found, bad) = read("=begin\nrwr:ignore a/b\n=end\nsleep 1\n");
         assert!(found.is_empty(), "{found:?}");
         assert!(bad.is_empty());
+    }
+
+    /// A name written twice is one name. Staleness and the unknown-id report
+    /// both walk `rules` once per entry, so a repeat printed the same
+    /// `file:line` twice and counted it twice -- "2 stale directives" for one
+    /// comment, which reads as two places to go and fix.
+    #[test]
+    fn a_name_repeated_on_one_directive_is_one_name() {
+        let (found, _) = read("sleep 1 # rwr:ignore a/b, a/b\n");
+        assert_eq!(found[0].rules, vec!["a/b"]);
+        assert_eq!(unrecognised(&found, &[], "a.rb").len(), 1);
+    }
+
+    /// Deduplicating keeps the order they were written in, so a report reads
+    /// back the way the comment does.
+    #[test]
+    fn deduplicating_names_keeps_the_written_order() {
+        let (found, _) = read("sleep 1 # rwr:ignore c/d a/b c/d\n");
+        assert_eq!(found[0].rules, vec!["c/d", "a/b"]);
     }
 
     #[test]
