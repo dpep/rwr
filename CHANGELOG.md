@@ -29,6 +29,39 @@ only calls and symbols, so it pointed you at symbols while a `definition` — th
 means the rewrite you just applied does not hold together — went unnamed and could fall inside the
 "and N more".
 
+**`--sarif` and the SARIF 2.1.0 output are removed.** Nothing was consuming them, and a second
+structured format had to be kept in step with `-j` by hand — which is how `rwr find '<pattern>'
+--sarif` came to write zero bytes at exit 0. `rwr check -j` carries the same data, and
+`script/pr-suggest.sh` builds the pull-request comments and suggestions from it. The shipped
+workflow's `annotate` mode goes with it (D107).
+
+**A Sorbet signature now names the class it actually says.** `sig { returns(Helpers::Thing) }` means
+`Helpers::Thing`, not the top-level `Thing`, and a bare `returns(Thing)` inside `module App` means
+`App::Thing` when there is one — the lexical rule every other constant already followed. Before, a
+rename of the namesake rewrote the call and left the definition alone, for a `NoMethodError` at exit
+0 with nothing in either report. The same reading reached `T::Struct` fields, `params(...)`,
+`T.class_of(...)` and `type:` in a hand-written rule, so a `check` in CI carried it. `T::Array[X]`
+still resolves to `Array`.
+
+**Two classes sharing a short name no longer share a signature.** The index was keyed on the bare
+last segment, so `Alpha::Parser` and `Beta::Parser` overwrote each other and a call's answer depended
+on which *unrelated* files were in the run's path set — a `spec/` double sharing a class name with
+app code was enough.
+
+**A block parameter now shadows the name it reuses.** `[Gadget.new].each { |t| … }` inside a method
+whose `t` is a Widget read the block's `t` as a Widget, and a rename moved a call on an object that
+never had the method. The site is reported rather than rewritten now, for a signature-typed parameter
+and an assigned local alike.
+
+**`self` inside `class << self` resolves.** It was read as the `class << self` marker rather than a
+class name, so `self.display_name` there was reported as unaccounted-for while the identical call
+written without `self.` was rewritten.
+
+**A match that rests on a Sorbet signature now says so** — a paragraph on stderr naming the sites,
+and `via: "signature"` per match in `-j`. rwr believes a `sig` over what the code plainly does, which
+is the right call and `srb tc` owns the disagreement; the point is that you can now see which line to
+check. Absent when no signature contributed, so an untyped repo's document is unchanged.
+
 **Columns are counted in characters, not bytes.** On a line carrying a non-ASCII character before
 the match — an accented name, an i18n string, a curly quote pasted from a word processor — every
 column was reported past where it is, in the text report and in `-j` alike. Anything storing rwr

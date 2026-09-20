@@ -48,6 +48,11 @@ pub(crate) struct Finding {
     pub(crate) rule: String,
     pub(crate) note: String,
     pub(crate) text: String,
+    /// What resolved the receiver, when it was not the visible code. Present
+    /// only as `"signature"`, because a signature is the one source rwr trusts
+    /// over what the body plainly does and cannot itself check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) via: Option<&'static str>,
 }
 
 /// A site a rule would rewrite, with somewhere to point.
@@ -740,6 +745,12 @@ impl Engine {
                                             rule: rule.id.clone().unwrap_or_default(),
                                             note: rule.description.clone().unwrap_or_default(),
                                             text: source::line_at(&current, start),
+                                            via: matcher::rests_on_signature(
+                                                hit,
+                                                &ctx.hierarchy,
+                                                &ctx.sigs,
+                                            )
+                                            .then_some("signature"),
                                         });
                                     }
                                     Ok(None)

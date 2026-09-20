@@ -15,7 +15,7 @@ use super::prepare::{Binding, Prepared};
 use crate::hierarchy::Hierarchy;
 use crate::rule::{Constraint, NodeKind, Scope};
 use ruby_prism::Node;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What a metavariable captured.
 #[derive(Debug)]
@@ -62,6 +62,10 @@ pub(crate) struct Match<'pr> {
     /// Locals are 17.9% of rails call receivers -- the second-largest bucket --
     /// and `x = Foo.new` pins most of them without any type inference.
     pub locals: HashMap<String, String>,
+    /// Which of those locals a Sorbet signature's `params` typed, rather than a
+    /// visible assignment. Provenance, not resolution: it is what lets a report
+    /// say the match rested on a declared contract rwr cannot check.
+    pub sig_locals: HashSet<String>,
 }
 
 /// The identifier a node reads, when it is a bare name reference.
@@ -1227,6 +1231,45 @@ pub(crate) fn receiver_class(
     resolve_type(&receiver, &at).map(|r| r.class_name().to_string())
 }
 
+/// Whether this match's receiver needed a Sorbet signature to resolve.
+///
+/// rwr believes a `sig` over the return type plainly visible in the body, and
+/// that is the right call -- a declared contract beats an inferred one, and
+/// `srb tc` owns the disagreement. But a stale signature then produces a match
+/// that looks exactly like any other, so a reviewer needs to know which sites
+/// rest on one.
+///
+/// Asked of the resolver twice rather than restated: once as the match was
+/// judged, once with the signature index emptied and every signature-derived
+/// local removed. A cheap check that restates an expensive one drifts from it.
+pub(crate) fn rests_on_signature(
+    found: &Match<'_>,
+    hierarchy: &Hierarchy,
+    sigs: &crate::sigs::Signatures,
+) -> bool {
+    let Some(receiver) = found.node.as_call_node().and_then(|c| c.receiver()) else {
+        return false;
+    };
+    let at = |locals, sigs| Where {
+        scope: &found.scope,
+        singleton: found.singleton,
+        locals,
+        sigs,
+        hierarchy,
+    };
+    if resolve_type(&receiver, &at(&found.locals, sigs)).is_none() {
+        return false;
+    }
+    let visible: HashMap<String, String> = found
+        .locals
+        .iter()
+        .filter(|(name, _)| !found.sig_locals.contains(*name))
+        .map(|(name, class)| (name.clone(), class.clone()))
+        .collect();
+    let none = crate::sigs::Signatures::default();
+    resolve_type(&receiver, &at(&visible, &none)).is_none()
+}
+
 /// The class or module a node introduces, if any.
 pub(crate) fn scope_name_of(node: &Node<'_>) -> Option<String> {
     match node {
@@ -1459,6 +1502,7 @@ pub(crate) fn search_explaining<'pr>(
     let mut state = WalkState {
         scope: Vec::new(),
         locals: HashMap::new(),
+        sig_locals: HashSet::new(),
         singleton: false,
         out: Vec::new(),
         rejections: Vec::new(),
@@ -1631,6 +1675,8 @@ struct WalkState<'pr> {
     scope: Vec<String>,
     /// Variables whose class is known from an assignment.
     locals: HashMap<String, String>,
+    /// Which of those came from a signature rather than from visible code.
+    sig_locals: HashSet<String>,
     /// Inside `def self.x` or `class << self`, which decides what `self` means.
     singleton: bool,
     out: Vec<Match<'pr>>,
@@ -1669,6 +1715,7 @@ fn walk<'pr>(
             scope: state.scope.clone(),
             singleton: state.singleton,
             locals: state.locals.clone(),
+            sig_locals: state.sig_locals.clone(),
         };
         match verdict(
             &candidate,
@@ -1738,6 +1785,7 @@ fn walk<'pr>(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let outer = std::mem::replace(&mut state.locals, carried);
+        let outer_sig = std::mem::take(&mut state.sig_locals);
         // A signature's parameter types, entering the body they describe. This
         // is the only thing that makes a bare *parameter* resolve: an assignment
         // can name a class and a chain can be followed, but `def m(x)` says
@@ -1762,11 +1810,12 @@ fn walk<'pr>(
                         state
                             .locals
                             .insert(name.clone(), receiver.class_name().to_string());
+                        state.sig_locals.insert(name.clone());
                     }
                 }
             }
         }
-        outer
+        (outer, outer_sig)
     });
 
     // A block parameter is a fresh binding for the length of the block, so the
@@ -1811,7 +1860,8 @@ fn walk<'pr>(
     }
     state.locals.extend(displaced);
 
-    if let Some(saved) = shadowed {
+    if let Some((saved, saved_sig)) = shadowed {
+        state.sig_locals = saved_sig;
         // Locals are discarded with the method that declared them, but an
         // instance variable belongs to the class -- typically assigned in
         // `initialize` and read from every other method -- so bindings learned

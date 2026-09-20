@@ -881,6 +881,34 @@ fn report_unsafe(changed: &[Changed], rules: &[rule::Rule]) {
     }
 }
 
+/// Say which sites rest on a Sorbet signature rather than on visible code.
+///
+/// rwr believes a `sig` over the return type the body plainly has. That is the
+/// right call -- a declared contract beats an inferred one, and `srb tc` owns
+/// the disagreement -- but it means a stale signature yields a match that reads
+/// like every other, so these are the sites a reviewer most needs pointed at.
+/// `Verdict::detail` already appends "and no Sorbet signatures were found in
+/// scope at all" to a *rejection*; this is that sentence's missing mirror.
+///
+/// On stderr and as its own paragraph, so the `file:line:col: text` columns
+/// stay exactly what a pipe expects. `-j` carries it per match, as `via`.
+fn report_signatures(findings: &[crate::engine::Finding]) {
+    let resting: Vec<&crate::engine::Finding> =
+        findings.iter().filter(|f| f.via.is_some()).collect();
+    if resting.is_empty() {
+        return;
+    }
+    eprintln!(
+        "\n{} of {} site(s) matched because a Sorbet signature said so, not because the \
+         code does (rwr believes the `sig`; `srb tc` owns the disagreement):",
+        resting.len(),
+        findings.len()
+    );
+    for f in resting {
+        eprintln!("  {}:{}:{}: {}", f.file, f.line, f.col, f.text.trim_end());
+    }
+}
+
 /// Print the account of what the rule could not see, grouped by class.
 ///
 /// Grouping matters as much as the total: the classes mean different things.
@@ -1098,6 +1126,7 @@ impl From<&Finding> for Found {
             byte_start: f.byte_start,
             byte_end: f.byte_end,
             text: f.text.clone(),
+            via: f.via,
         }
     }
 }
@@ -1110,6 +1139,16 @@ struct Found {
     byte_start: usize,
     byte_end: usize,
     text: String,
+    /// What resolved this site's receiver, when the visible code did not.
+    ///
+    /// Only ever `"signature"`. rwr believes a `sig` over the return type the
+    /// body plainly has, which is the right call and unverifiable here -- so
+    /// the site a reviewer most needs flagged is exactly this one, and nothing
+    /// used to say which it was. `Verdict::detail` already tells a *rejection*
+    /// that no signatures were found in scope; this is that sentence's mirror
+    /// on the accept side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via: Option<&'static str>,
 }
 
 fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> ExitCode {
@@ -1300,6 +1339,9 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                         byte_start: loc.start_offset(),
                         byte_end: loc.end_offset(),
                         text: source::line_at(&src, loc.start_offset()),
+                        // A bare pattern runs with `Criteria::none()`, so no
+                        // signature can have contributed to it.
+                        via: None,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -2136,6 +2178,7 @@ fn cmd_apply(
                 report_findings(&findings);
             }
             report_by_rule(&changed);
+            report_signatures(&findings);
             report_spread(
                 &outcomes
                     .iter()

@@ -2900,6 +2900,43 @@ fn namesake_classes_do_not_share_a_signature() {
     );
 }
 
+/// A match that rested on a Sorbet signature says which one it was.
+///
+/// rwr believes a `sig` over the return type the body plainly has, which is
+/// the right call and one it cannot check -- so a stale signature yields a
+/// match that reads like every other. `find -e` explains only rejections and
+/// `--profile` prints an aggregate, so nothing used to name the site.
+#[test]
+fn a_match_resting_on_a_signature_says_so() {
+    let dir = fixture(
+        "class Widget\n  def display_name\n    \"w\"\n  end\nend\n\n\
+         class Gadget\n  def display_name\n    \"g\"\n  end\nend\n\n\
+         class P\n  extend T::Sig\n\n  # The signature is a lie: this returns a Gadget.\n  \
+         sig { returns(Widget) }\n  def thing\n    Gadget.new\n  end\n\n  \
+         sig { params(w: Widget).void }\n  def taking(w)\n    w.display_name\n  end\n\n  \
+         def go\n    thing.display_name\n  end\nend\n",
+    );
+    let at = dir.path().to_str().expect("utf8");
+
+    // Both the return type and the parameter type count as resting on one.
+    let out = rwr(&["find", "Widget#display_name", at, "-j"]);
+    let flagged: Vec<&str> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains("\"via\""))
+        .map(|_| "signature")
+        .collect();
+    assert_eq!(flagged.len(), 2, "{}", String::from_utf8_lossy(&out.stdout));
+
+    // The definition itself rests on nothing, and the text report names the
+    // sites rather than merely counting them.
+    let out = rwr(&["find", "Widget#display_name", at]);
+    assert!(
+        stderr(&out).contains("2 of 3 site(s) matched because a Sorbet signature"),
+        "{}",
+        stderr(&out)
+    );
+}
+
 /// A block parameter is a fresh binding, whatever its name meant outside.
 ///
 /// The outer binding was carried straight into the block, so
