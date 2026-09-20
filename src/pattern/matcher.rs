@@ -621,8 +621,16 @@ pub(crate) fn verdict(
             let Some(other_bound) = found.env.get(other.trim_start_matches('$')) else {
                 return Verdict::Bug("`same_name_as:` names a capture the pattern never binds");
             };
+            // Across node kinds, and only across them: the correspondence this
+            // constraint exists for is a name against a **read** of it, as
+            // `{foo: foo}` pairs a symbol key with a variable. Where neither
+            // side reads anything the two are just equal literals, and calling
+            // that "the same name" made the shipped shorthand rule rewrite
+            // `{a: :a}` to `{a:}` -- a different program that still parses, so
+            // no `ruby -c` oracle would have caught it.
+            let a_read = reads_identifier(bound) || reads_identifier(other_bound);
             match (identifier_of(bound), identifier_of(other_bound)) {
-                (Some(a), Some(b)) if a == b => {}
+                (Some(a), Some(b)) if a == b && a_read => {}
                 _ => {
                     return Verdict::BadBinding {
                         capture: short,
@@ -886,6 +894,15 @@ fn literal_content(bound: &Bound<'_>) -> Option<String> {
         Bound::Many(_) => return None,
     };
     String::from_utf8(bytes).ok()
+}
+
+/// Whether a binding is an expression that **reads** an identifier, as opposed
+/// to text that merely names one.
+///
+/// `foo` is a read; `:foo`, and a bare name carried as an atom on its parent,
+/// are not. The difference is the whole of `{foo: foo}` against `{foo: :foo}`.
+fn reads_identifier(bound: &Bound<'_>) -> bool {
+    matches!(bound, Bound::One(node) if bare_name(node).is_some())
 }
 
 /// The identifier a binding names, across node kinds.
@@ -2236,6 +2253,28 @@ end
             1,
             "only the pair naming the same identifier"
         );
+    }
+
+    /// And a symbol *value* is not a read of the key.
+    ///
+    /// `same_name_as` matched `{a: :a}`, so the shipped `style/hash-shorthand`
+    /// rule -- part of `rwr rewrite all`, the set the docs call safe for
+    /// unattended use -- rewrote it to `{a:}`, which calls a method `a` instead
+    /// of holding the symbol. The output still parses, so a `ruby -c` oracle
+    /// could not see it. Measured: 113 such pairs in discourse, 16 in rails,
+    /// 2 in mastodon.
+    #[test]
+    fn a_symbol_value_is_not_a_read_of_the_key() {
+        let rule = "match: '{**$BEFORE, $K: $V, **$AFTER}'\nwhere:\n  $K:\n    \
+                    same_name_as: $V\nrewrite: '{**$BEFORE, $K:, **$AFTER}'\n";
+        assert_eq!(
+            applied(rule, "h = { name: name }\n"),
+            1,
+            "the real shorthand"
+        );
+        assert_eq!(applied(rule, "h = { name: :name }\n"), 0);
+        assert_eq!(applied(rule, "h = { :name => :name }\n"), 0);
+        assert_eq!(applied(rule, "h = { name: \"name\" }\n"), 0);
     }
 
     /// D51: a rename must reach subclass call sites, or it ships a

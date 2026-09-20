@@ -72,7 +72,7 @@ residue, and the run would exit 0 looking clean.
 | `type: Klass` | the receiver resolves to that class |
 | `kind: instance\|class` | which method table `type:` means |
 | `subclasses: true` | admit descendants of `type:` |
-| `same_name_as: $V` | two captures name the same identifier, across node kinds |
+| `same_name_as: $V` | one capture names an identifier the other *reads* — across node kinds, never two literals |
 | `is: constant\|symbol\|string\|integer\|array\|hash` | the capture's node kind |
 | `length: N` | a string/symbol literal's content, in characters |
 | `contains: <pattern>` | a sub-pattern holds somewhere inside the capture |

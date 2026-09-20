@@ -15,3 +15,12 @@ tests:
   - input: |
       h = { name: other }
     unchanged: true
+  # `{name: :name}` is a symbol value, not a read of `name`. The shorthand
+  # would make it call the method instead -- a different program, and one that
+  # still parses, so no `ruby -c` oracle catches it.
+  - input: |
+      h = { name: :name }
+    unchanged: true
+  - input: |
+      h = { :name => :name }
+    unchanged: true

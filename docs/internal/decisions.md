@@ -2687,3 +2687,32 @@ time on discourse, median of three: 1,720ms before, 1,525ms after.
 `w.label("y") { ... }`), a call passing a block argument (`w.label(&:to_s)`), and a *receiverless*
 dispatcher (`send(:label)` inside the class). Each is a different node shape rather than a different
 argument list, so each needs its own rule; left open deliberately rather than bundled in here.
+
+## D102 - `same_name_as` relates a name to a read of it, never two literals
+**Decided.** Fixes a wrong rewrite in the shipped safe pack; narrows one constraint, changes nothing else.
+
+`style/hash-shorthand` turns `{name: name}` into `{name:}`, and the correspondence it needs is a
+*symbol key* against a *variable read* -- the same name under two node kinds, which is why
+`same_name_as` exists at all. `identifier_of` answered for a symbol as readily as for a read, so
+`{a: :a}` satisfied the constraint and the rule rewrote it to `{a:}`.
+
+That is a **different program**: `{a:}` calls a method `a`, where `{a: :a}` holds the symbol. With a
+method of that name in scope it silently returns something else; without one it raises
+`NoMethodError`. Either way the output parses, so `verify` and a `ruby -c` oracle both pass it -- it
+took a human reading diffs. And it ships in `rwr rewrite all`, no flags, the set the docs present as
+safe to run unattended.
+
+**The rule, in one sentence: at least one side must be an expression that *reads* the identifier.**
+Two literals naming the same text are equal literals, not a name correspondence, and
+`same_name_as` is not the constraint for that -- `is:` and `length:` are. This leaves the only
+shipped user intact and narrows nothing else: `same_name_as` has exactly one caller in `verdict`,
+and `identifier_of`'s other caller (`agree`, for `contains:`) is untouched, because sequence
+correspondence is a different question.
+
+Measured, `check style/hash-shorthand` sites before and after: discourse 1,781 -> 1,765, rails
+141 -> 130, mastodon 107 -> 106. Twenty-eight wrong rewrites across three repos, every one of them
+silent.
+
+**Why the suite was green.** The rule's own fixtures had `{name: name}` and `{name: other}` -- the
+match and the plain non-match. Neither is the case where two captures agree on *text* and disagree
+on *meaning*, which is the only case the constraint can get wrong. Both spellings are fixtures now.
