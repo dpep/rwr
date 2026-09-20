@@ -235,6 +235,30 @@ rwr check all --since main --diff             # both
 rwr check all app/x.rb:3-15                   # or name the lines yourself
 ```
 
+A scope names lines, and a site is in it when the **bytes the rule would write**
+fall on one of them — not when the code it matched happens to span one. A rename
+matches a whole `def … end` and writes only the signature, so editing line 40 of
+a method does not put its signature on line 12 in scope.
+
+The other direction is not free. A site is rewritten whole or not at all, so
+naming one line of an expression that spans three writes all three:
+
+```ruby
+result = things
+  .select { |t| t.active? }    # name this line
+  .first                       # and this one is rewritten too
+```
+
+rwr says so rather than leaving it to the diff — one line per site on stderr,
+and `wrote_beyond_scope` in `-j`, present only when it happened.
+
+**Residue is not scoped.** The sites are; the account of what rwr could not tie
+to the rule is computed over each whole file it read. An occurrence it could not
+resolve — a `public_send`, a name in prose, a template it cannot parse — has no
+reliable relationship to the lines your change touched, and hiding one because
+it sits ten lines away would defeat the point of reporting it. Residue does not
+move the exit code, so it never fails the gate on its own.
+
 ## Exit codes
 
 | Code | Means |

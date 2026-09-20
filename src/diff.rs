@@ -35,6 +35,22 @@ impl Changed {
         self.by_file.contains_key(file)
     }
 
+    /// Whether *every* line in `start..=end` was named.
+    ///
+    /// The containment test `touches` deliberately is not, and the two answer
+    /// different questions: `touches` decides what is in scope, `holds` decides
+    /// whether staying in scope was possible. A site rwr cannot rewrite in half
+    /// writes lines the scope never named, which is correct and is not silent.
+    pub(crate) fn holds(&self, file: &Path, start: usize, end: usize) -> bool {
+        self.by_file.get(file).is_some_and(|ranges| {
+            (start..=end).all(|line| {
+                ranges
+                    .iter()
+                    .any(|(a, b)| line >= *a as usize && line <= *b as usize)
+            })
+        })
+    }
+
     /// Restrict to lines named on the command line, as `file.rb:3` or
     /// `file.rb:3-15`.
     ///
@@ -359,6 +375,21 @@ mod tests {
         let file = Path::new("/repo/x.rb");
         assert!(changed.touches(file, 3, 7), "spans the changed line");
         assert!(!changed.touches(file, 6, 9), "sits entirely below it");
+    }
+
+    /// `touches` says what is in scope; `holds` says whether a site could stay
+    /// inside it. A site spanning a changed line and an unchanged one is in
+    /// scope and is not held.
+    #[test]
+    fn holding_a_span_is_containment_where_touching_is_overlap() {
+        let file = PathBuf::from("/repo/x.rb");
+        let changed = Changed::from_lines(vec![(file.clone(), (3, 4)), (file.clone(), (5, 6))]);
+        assert!(changed.touches(&file, 3, 9));
+        assert!(!changed.holds(&file, 3, 9));
+        assert!(changed.holds(&file, 3, 4));
+        // Adjacent ranges cover the span between them.
+        assert!(changed.holds(&file, 4, 5));
+        assert!(!changed.holds(Path::new("/repo/other.rb"), 1, 1));
     }
 
     /// A file's last line counts whether or not it ends in a newline, or

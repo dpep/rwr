@@ -593,6 +593,29 @@ fn report_by_rule(changed: &[Changed]) {
     }
 }
 
+/// Say where a scoped run wrote past the lines it was given.
+///
+/// Unconditional, like the suppression audit below and for the same reason: a
+/// scope is a promise about which lines a run may touch, and a site rwr cannot
+/// rewrite in half breaks it legitimately. Finding that out from the diff
+/// afterwards is finding out too late.
+fn report_widened(widened: &[crate::engine::Widened]) {
+    if widened.is_empty() {
+        return;
+    }
+    eprintln!(
+        "rwr: {} site(s) span lines the scope did not name -- a site is rewritten \
+         whole or not at all:",
+        widened.len()
+    );
+    for w in widened.iter().take(RESIDUE_DETAIL_CAP) {
+        eprintln!("  {}:{}-{}", w.file, w.line, w.last);
+    }
+    if widened.len() > RESIDUE_DETAIL_CAP {
+        eprintln!("  ... and {} more", widened.len() - RESIDUE_DETAIL_CAP);
+    }
+}
+
 /// Say what a suppression accepted, and what it no longer accepts.
 ///
 /// Unconditional, unlike rejections. A mechanism that can silence a run must
@@ -1453,6 +1476,12 @@ struct Report<'a> {
     /// nobody asked, not that nothing was declined.
     #[serde(skip_serializing_if = "Option::is_none")]
     rejections: Option<&'a [Rejection]>,
+    /// Sites whose write reached past the lines the scope named. Absent when
+    /// none did, which is every unscoped run -- additive, so the schema number
+    /// is unchanged and a consumer that has never seen the field reads the same
+    /// document it always did.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    wrote_beyond_scope: &'a [crate::engine::Widened],
     #[serde(flatten)]
     audit: Audit<'a>,
     #[serde(flatten)]
@@ -2069,6 +2098,12 @@ fn cmd_apply(
         .flat_map(|o| o.scanned.malformed.iter().cloned())
         .collect();
 
+    let mut widened: Vec<crate::engine::Widened> = outcomes
+        .iter()
+        .flat_map(|o| o.scanned.widened.iter().cloned())
+        .collect();
+    widened.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+
     let mut rejections: Vec<Rejection> = outcomes
         .iter()
         .flat_map(|o| o.scanned.rejections.iter().cloned())
@@ -2116,6 +2151,7 @@ fn cmd_apply(
                     .collect::<Vec<_>>(),
             );
             report_unsafe(&changed, rules);
+            report_widened(&widened);
             report_rejections(&rejections);
             report_suppressions(&suppressed, &stale, &unknown, &malformed);
             report_unread(&unparsed, &unreadable);
@@ -2200,6 +2236,13 @@ fn cmd_apply(
                      text-searched"
                 ));
             }
+            if !widened.is_empty() {
+                notes.push(format!(
+                    "{} site(s) span lines the scope did not name -- a site is rewritten \
+                     whole or not at all",
+                    widened.len()
+                ));
+            }
 
             let doc = sarif::Sarif::new(entries, notes);
             match serde_json::to_string_pretty(&doc) {
@@ -2254,6 +2297,7 @@ fn cmd_apply(
                 findings: &findings,
                 residue: engine.claims_completeness().then_some(left_over.as_slice()),
                 rejections: common.explain.then_some(rejections.as_slice()),
+                wrote_beyond_scope: &widened,
                 audit: Audit {
                     suppressed: &suppressed,
                     stale_suppressions: &stale,

@@ -219,6 +219,22 @@ pub(crate) struct Only<'a> {
     pub(crate) absolute: &'a std::path::Path,
 }
 
+/// A site whose write reached past the lines the scope named.
+///
+/// Not a mistake -- you cannot rewrite half an expression, so an atomic site
+/// named on one of its lines is written on all of them. Not silent either: a
+/// run told to stay inside a diff, that then edits a line the diff never
+/// carried, has to say so, or "restricted to the lines this change touched" is
+/// not literally true. Principle 3 -- the account of what rwr did beyond what
+/// was asked is the product, not a diagnostic -- so it is never behind a flag.
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct Widened {
+    pub(crate) file: String,
+    pub(crate) line: usize,
+    /// The last line the write reaches.
+    pub(crate) last: usize,
+}
+
 /// The bytes rwr is accountable for at one site -- the unit a scope decides on.
 ///
 /// D15 settled that the *conflict* unit is the edit range rather than the match
@@ -305,6 +321,9 @@ pub(crate) struct Scanned {
     /// Matches a wider edit covered. Non-zero means a rerun makes further
     /// progress, which is the retryable outcome rather than a failure (D15).
     pub(crate) deferred: usize,
+    /// Sites whose write reached past the lines the scope named. Empty unless
+    /// the run was scoped at all.
+    pub(crate) widened: Vec<Widened>,
 }
 
 impl Engine {
@@ -503,6 +522,7 @@ impl Engine {
         let mut flagged: Vec<Finding> = Vec::new();
         let mut rewrites: Vec<Rewrite> = Vec::new();
         let mut rejections: Vec<Rejection> = Vec::new();
+        let mut widened: Vec<Widened> = Vec::new();
         let mut suppressed: Vec<crate::suppress::Suppressed> = Vec::new();
         // Keyed by document order, which survives the rewrites of a run where a
         // line number does not.
@@ -657,6 +677,7 @@ impl Engine {
                                 }
                                 if let Some(only) = only {
                                     let constants = rule.constant_captures();
+                                    let mut wider: Vec<(usize, usize)> = Vec::new();
                                     hits.retain(|m| {
                                         let span = accountable_span(
                                             m,
@@ -671,8 +692,25 @@ impl Engine {
                                         };
                                         let (first, _) = source::line_col(&current, start);
                                         let (last, _) = source::line_col(&current, end);
-                                        only.changed.touches(only.absolute, first, last)
+                                        if !only.changed.touches(only.absolute, first, last) {
+                                            return false;
+                                        }
+                                        // A site that cannot be rewritten in
+                                        // half writes lines the scope never
+                                        // named. Correct, and not something to
+                                        // discover afterwards from a diff.
+                                        if rule.rewrite.is_some()
+                                            && !only.changed.holds(only.absolute, first, last)
+                                        {
+                                            wider.push((first, last));
+                                        }
+                                        true
                                     });
+                                    widened.extend(wider.into_iter().map(|(line, last)| Widened {
+                                        file: label.to_string(),
+                                        line,
+                                        last,
+                                    }));
                                 }
                                 // A rule that does not say which class it means
                                 // may be renaming across several. Recorded here,
@@ -855,6 +893,7 @@ impl Engine {
             rewritten: (total > 0).then(|| String::from_utf8_lossy(&current).into_owned()),
             residue,
             deferred,
+            widened,
         }))
     }
 

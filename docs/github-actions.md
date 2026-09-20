@@ -105,6 +105,21 @@ If findings should block rather than annotate, the exit code already says so:
 Exit 1 means there is work to do. Decide which of the two is the gate, though —
 a build that goes red for advisory findings gets ignored.
 
+**What `--since` scopes, and what it does not.** It scopes the *sites*, by the
+bytes a rule would write rather than by the span it matched — so a pull request
+that edits a method body does not inherit a finding about its signature. The
+exit code follows those sites, so that is what gates the build.
+
+It does **not** scope the residue: the account of what rwr could not tie to the
+rule is computed over each whole file it read, because an occurrence it could
+not resolve has no reliable relationship to the lines your branch touched. That
+account never fails the build on its own — residue does not move the exit code —
+so a red build always points at a site, and the residue beside it is context.
+
+And where a site spans lines the change did not touch, the run says so: one line
+per site on stderr, `wrote_beyond_scope` in `-j`, and a note on the SARIF run.
+A site is rewritten whole or not at all.
+
 ## SARIF, if you want Code Scanning
 
 `--sarif` emits SARIF 2.1.0, which `github/codeql-action/upload-sarif` ingests:

@@ -2855,3 +2855,36 @@ build, and the sites it filters out skip the real plan entirely.
 
 *Reverses if:* a rewrite is ever computed as a structural diff with no single byte range per site,
 in which case the unit becomes the set of ranges rather than their union.
+
+## D106 - A write past the scope is disclosed; residue is never scoped
+**Decided.** The two halves of "what does a scoped run still owe you".
+
+**A site is rewritten whole or not at all**, so a scope named on one of its lines gets the others
+written too. That is correct and it is not silent: `wrote_beyond_scope` lists each such site in
+`-j`, an unconditional stderr paragraph lists them in text, and the SARIF run carries the count as
+a note. Unconditional for the reason the suppression audit is -- a scope is a promise about which
+lines may be touched, and a run that breaks it legitimately still has to say so. It is not an `-e`
+detail: `-e` answers "why was this candidate declined", and this is the opposite question.
+
+`holds` is containment where `touches` is overlap; the two answer different questions and both are
+derived from the same ranges, so neither can drift from the other.
+
+The field is additive and absent when nothing widened, so `REPORT_SCHEMA` stays at 6 and a consumer
+that has never seen it reads the document it always did. `find` needs no such field: under D105 it
+scopes on the span it reports, so by construction it cannot widen.
+
+**Residue stays unscoped, and the docs now say so.** Residue is the account of what rwr could not
+tie to the rule: dynamic dispatch, prose, a template it could not parse. Those occurrences have no
+reliable relationship to the lines a change touched -- the `public_send` that defeats a rename
+usually lives in a file the change never opened -- so a scoped residue list would answer "of the
+things I could not see, here are the ones near your change", which is not a claim worth making.
+Scoping it would also make a blind spot disappear from a scoped run, which principle 3 forbids
+outright.
+
+It costs nothing in the gate it might have threatened: **residue does not move the exit code.** A
+scoped run's sites are scoped, its exit code follows the sites, and the residue beside them is
+information about the whole file. A reader will assume otherwise, so `getting-started.md` and
+`github-actions.md` now say it in a sentence each.
+
+*Reverses if:* residue ever gains receiver resolution good enough that an entry's location means
+something about the rule's sites, at which point "near the change" becomes a claim rwr can make.

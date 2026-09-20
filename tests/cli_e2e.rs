@@ -3979,6 +3979,54 @@ fn a_multi_line_site_is_in_scope_from_any_line_it_writes() {
     assert_eq!(after, source, "no bytes written on line 2: {after}");
 }
 
+/// A scoped run that writes past its scope says so, on stderr and in `-j`.
+///
+/// The write is correct -- a site is rewritten whole or not at all -- and the
+/// account of what rwr did beyond what was asked is the product, so it is
+/// neither behind `-e` nor left for the reader to spot in the diff.
+#[test]
+fn writing_past_the_scope_is_reported() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    let source = "result = things\n  .select { |t| t.active? }\n  .first\n";
+    let run = |args: &[&str]| {
+        std::fs::write(path.join("app.rb"), source).expect("write");
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+    let rule = ["$R.select { |$X| $B }.first", "-r", "$R.find { |$X| $B }"];
+
+    // Naming line 2 rewrites line 3 as well; nothing else can be done.
+    let out = run(&[&["rewrite"], &rule[..], &["app.rb:2"]].concat());
+    assert!(
+        stderr(&out).contains("app.rb:2-3"),
+        "the lines it wrote past the scope: {}",
+        stderr(&out)
+    );
+
+    let json = run(&[&["rewrite"], &rule[..], &["app.rb:2", "-j"]].concat());
+    let text = String::from_utf8_lossy(&json.stdout);
+    assert!(text.contains("wrote_beyond_scope"), "{text}");
+
+    // Naming both lines asks for exactly what gets written, so there is
+    // nothing to disclose.
+    let held = run(&[&["rewrite"], &rule[..], &["app.rb:2-3"]].concat());
+    assert!(
+        !stderr(&held).contains("did not name"),
+        "nothing widened: {}",
+        stderr(&held)
+    );
+    let json = run(&[&["rewrite"], &rule[..], &["app.rb:2-3", "-j"]].concat());
+    assert!(
+        !String::from_utf8_lossy(&json.stdout).contains("wrote_beyond_scope"),
+        "{}",
+        String::from_utf8_lossy(&json.stdout)
+    );
+}
+
 /// A line past the end of the file is a mistake, not a clean "no match".
 ///
 /// `0` and `10-5` both refuse and say why; `999` on a five-line file scoped the
