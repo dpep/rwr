@@ -777,7 +777,11 @@ fn text_residue(
             here.into_iter()
         })
         .collect();
-    found.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+    // Sort on the same key the dedup uses: `dedup_by_key` drops only *adjacent*
+    // duplicates, so without `col` two occurrences on one line interleave and
+    // every per-sub-rule copy survives. One designator once gave 14 entries for
+    // 2 distinct sites.
+    found.sort_by(|a, b| (&a.file, a.line, a.col).cmp(&(&b.file, b.line, b.col)));
     found.dedup_by_key(|r| (r.file.clone(), r.line, r.col));
     found
 }
@@ -939,15 +943,30 @@ fn report_residue(residues: &[Residue]) {
 /// a polite failure, and "here are 8,074 more, try scoping" was the latter.
 fn degradation(residues: &[Residue]) {
     let count = |c: residue::Context| residues.iter().filter(|r| r.context == c).count();
-    let (calls, symbols) = (
+    let (calls, symbols, definitions, dynamic) = (
         count(residue::Context::Call),
         count(residue::Context::Symbol),
+        count(residue::Context::Definition),
+        count(residue::Context::Dynamic),
     );
 
     eprintln!(
         "\n  This identifier is too common here for that account to be reviewed \
          one line at a time. Where to start:"
     );
+    if definitions > 0 {
+        eprintln!(
+            "    - {definitions} definition(s): another definition of this name that \
+             the rewrite did not move. Read these first -- one left behind means the \
+             rewrite you just applied does not hold together."
+        );
+    }
+    if dynamic > 0 {
+        eprintln!(
+            "    - {dynamic} dynamic: the name is computed at run time, so no rewrite \
+             can reach it."
+        );
+    }
     if symbols > 0 {
         eprintln!(
             "    - {symbols} symbol(s): a method name handed to something that will \

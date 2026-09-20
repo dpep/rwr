@@ -7,6 +7,28 @@ a fixture repo, and must produce the effect their verb promises rather than mere
 shipped broken: a `-d` deletion that deleted nothing, and a residue illustration the engine could not
 produce. An example that is illustrative rather than runnable marks its fence ```sh ignore.
 
+**A receiver written without its namespace now means what Ruby means by it.**
+`Account.new.display_name` inside `module Billing` is a call on `Billing::Account`: a rename of the
+top-level `Account` no longer rewrites it — it is reported instead — and a rename of
+`Billing::Account` now does. The same applies to a receiver inferred from an assignment,
+`a = Account.new`. A `type:` constraint in a hand-written rule narrows the same way.
+
+**A concern mixed in by a relative constant path is part of the blind-spot report again.**
+`include Helpers::Numeric` inside `module App` had its `def` and the implicit-self calls in its body
+dropped with nothing said; only the fully-qualified spelling was reported. On rails that was
+`ActiveModel::Type::Helpers::Numeric#cast`, an override on three numeric types, missing from every
+report.
+
+**Template residue is no longer multiplied by the number of sub-rules.** A name occurring twice on
+one template line was reported up to nine times per site — 457 entries for 115 distinct sites on a
+real repository. The template account is the weakest evidence rwr produces and the most likely to be
+skimmed; inflating it was the wrong direction.
+
+**A truncated residue report now names a definition it could not move.** The triage footer counted
+only calls and symbols, so it pointed you at symbols while a `definition` — the one context that
+means the rewrite you just applied does not hold together — went unnamed and could fall inside the
+"and N more".
+
 **Fixed: a qualified designator answered about a class in a different namespace.**
 `rwr check 'Sales::Account#display_name' -r full_name app/billing` reported a rewrite in
 `Billing::Account` — the class the path scope had explicitly excluded. Widening a short name to the

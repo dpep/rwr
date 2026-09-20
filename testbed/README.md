@@ -88,6 +88,7 @@ exotic. So what is here is what a ten-year-old Rails monolith actually holds.
 | namespaced classes, nested and compact | `app/models/account/row.rb`, `account/exporter.rb` |
 | a second class with the same last segment, and a subclass of it | `lib/billing_account.rb` |
 | a concern's contribution to its includer | `app/models/concerns/nameable.rb` |
+| a concern mixed in by a *relative* constant path | `lib/account_naming.rb` |
 | dynamic dispatch at both ends | `app/models/account_presenter.rb` |
 | Rails DSLs taking symbols | `app/serializers/account_serializer.rb` |
 | ordinary controller and job control flow | `app/controllers/`, `app/jobs/` |

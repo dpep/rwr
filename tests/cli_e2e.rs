@@ -3799,3 +3799,85 @@ fn a_parenthesised_singleton_def_is_reached() {
         stderr(&out)
     );
 }
+
+/// Template residue is deduplicated even when a name occurs twice on one line.
+///
+/// `dedup_by_key` drops only *adjacent* duplicates, so the sort key has to be
+/// the dedup key. Sorting on `(file, line)` while deduping on
+/// `(file, line, col)` let the per-sub-rule copies interleave: one occurrence
+/// per line collapsed correctly and two survived seven times over. The
+/// designator's sub-rule count is what multiplies it, so this got worse the
+/// moment the call rules grew an argument list (D101).
+#[test]
+fn a_name_twice_on_one_template_line_is_reported_once_per_site() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("widget.rb"),
+        "class Widget\n  def key(x); x; end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(dir.path().join("p.html.haml"), "-# p\n= key + key\n").expect("write");
+
+    let out = rwr(&[
+        "check",
+        "Widget#key",
+        "-r",
+        "feed_key",
+        dir.path().to_str().expect("utf8"),
+        "-j",
+    ]);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("json document on stdout");
+    let entries = doc["template_residue"]
+        .as_array()
+        .expect("template_residue");
+
+    let distinct: std::collections::HashSet<_> = entries
+        .iter()
+        .map(|e| (e["file"].to_string(), e["line"].clone(), e["col"].clone()))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        distinct.len(),
+        "one entry per site, not one per sub-rule: {entries:#?}"
+    );
+    assert_eq!(distinct.len(), 2, "both occurrences reported: {entries:#?}");
+}
+
+/// The triage footer names a definition it could not move.
+///
+/// `degradation` counted only calls and symbols, so a truncated report told you
+/// to start with symbols while a `definition` -- the one context meaning the
+/// rewrite just applied does not hold together -- went unnamed, and could fall
+/// inside the "and N more".
+#[test]
+fn the_triage_footer_names_a_definition_left_behind() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("main.rb"),
+        "module Naming\n  def display_name; \"concern\"; end\nend\n\n\
+         class Account\n  include Naming\n  def display_name; \"x\"; end\n\
+           \x20 def dyn(f); public_send(\"display_#{f}\"); end\nend\n",
+    )
+    .expect("write");
+    let mut calls = String::from("class Caller\n  def run\n");
+    for i in 0..50 {
+        calls.push_str(&format!("    o{i}.display_name\n"));
+    }
+    calls.push_str("  end\nend\n");
+    std::fs::write(dir.path().join("calls.rb"), calls).expect("write");
+
+    let out = rwr(&[
+        "check",
+        "Account#display_name",
+        "-r",
+        "full_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let text = stderr(&out);
+    assert!(text.contains("too common here"), "footer expected: {text}");
+    assert!(
+        text.contains("1 definition(s)"),
+        "the definition must be named, not left in `and N more`: {text}"
+    );
+}
