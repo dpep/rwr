@@ -142,9 +142,19 @@ pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepar
         }
     }
 
-    Err(PrepareError::Unparseable {
-        message: last_message,
-    })
+    // `$$$A` is another tool's spelling for "any argument list", and Prism's
+    // report of it ("unexpected constant") describes the symptom without naming
+    // the cause. rwr spells a run of nodes `*$A`, which is real Ruby -- the
+    // point of the metavariable syntax -- so say so rather than leaving the
+    // caller to guess from a parser error.
+    let message = if pattern.contains("$$") {
+        format!(
+            "{last_message}\n  `$$` is not rwr syntax. A run of nodes is `*$NAME` -- `foo(*$A)` matches any argument list, and `**$NAME` does the same inside a hash."
+        )
+    } else {
+        last_message
+    };
+    Err(PrepareError::Unparseable { message })
 }
 
 /// Build the substituted source, returning each placeholder's span within it.

@@ -941,7 +941,13 @@ fn structural_diff(
         return Some(Vec::new());
     }
 
-    if std::mem::discriminant(pattern) != std::mem::discriminant(target) {
+    // The pattern's bare `widget` and the target's local-variable `widget` are
+    // the same identifier under two node kinds (see `matcher::same_identifier`).
+    // They correspond, so a rename reaches them and an untouched one emits
+    // nothing; without this the receiver was re-rendered on every such site.
+    if std::mem::discriminant(pattern) != std::mem::discriminant(target)
+        && !matcher::same_identifier(pattern, target)
+    {
         return None;
     }
 
@@ -1348,6 +1354,26 @@ mod tests {
     fn a_prefix_operator_kept_on_both_sides_stays_minimal() {
         let out = rewrite("!$X.empty?", "!$X.any?", "a = !xs.empty?\n").unwrap();
         assert_eq!(out, "a = !xs.any?\n");
+    }
+
+    /// A literal receiver that the target declares as a local: the two node
+    /// kinds correspond, so the rename reaches the site and edits only the
+    /// method name -- the receiver's own bytes are carried across untouched.
+    #[test]
+    fn a_local_variable_receiver_is_renamed_minimally() {
+        let src = "def check(widget:)\n  widget.status\nend\n";
+        let out = rewrite("widget.status", "widget.state", src).unwrap();
+        assert_eq!(out, "def check(widget:)\n  widget.state\nend\n");
+    }
+
+    /// The receiver itself renamed, where the target spells it as a local.
+    /// There is no name slot to edit in a local read, so the identifier is
+    /// re-rendered whole -- which for a leaf is still the minimal edit.
+    #[test]
+    fn a_local_variable_receiver_can_itself_be_renamed() {
+        let src = "[1].each { |widget| widget.status }\n";
+        let out = rewrite("widget.status", "gadget.state", src).unwrap();
+        assert_eq!(out, "[1].each { |widget| gadget.state }\n");
     }
 
     #[test]
