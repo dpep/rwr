@@ -2019,6 +2019,52 @@ fn explain_says_which_constraint_declined_a_site() {
     assert!(!text.contains("declined"), "{text}");
 }
 
+/// A comment *about* the convention must not silence the site it describes.
+///
+/// Read end to end because the alarming half was not the parse: the finding was
+/// accepted and vanished from the run, while the words after the id became rule
+/// names the run then reported as unknown. A suppression that silences
+/// something nobody asked it to is the one outcome this mechanism may not have.
+#[test]
+fn prose_mentioning_a_directive_does_not_suppress() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("rule.yml"),
+        "id: style/return-nil\nmatch: return nil\nrewrite: return\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("app.rb"),
+        "def a\n  return nil # We do not use rwr:ignore style/return-nil in this repo\nend\n",
+    )
+    .expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "rule.yml", "app.rb", "-j"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+
+    assert!(
+        !doc["changed"].as_array().expect("changed").is_empty(),
+        "the site is still a finding: {doc}"
+    );
+    assert!(
+        doc["suppressed"].as_array().expect("suppressed").is_empty(),
+        "nothing accepted it: {doc}"
+    );
+    // `in`, `this`, `repo` were reported as rules nothing has.
+    assert!(
+        doc["unknown_suppressions"]
+            .as_array()
+            .expect("unknown_suppressions")
+            .is_empty(),
+        "prose is not a list of rule names: {doc}"
+    );
+}
+
 /// Machine consumers get the same account, with stable field names.
 #[test]
 fn rejections_are_structured_and_opt_in() {
