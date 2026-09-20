@@ -96,6 +96,7 @@ exotic. So what is here is what a ten-year-old Rails monolith actually holds.
 | modules that extend themselves: `extend self`, `module_function` | `lib/account_formatting.rb` |
 | `prepend` and `refine` | `lib/account_patches.rb` |
 | a legacy script: shebang, encoding, multibyte, `__END__` | `script/backfill_names.rb` |
+| a dispatcher alone in its file, naming no part of the method | `lib/account_dispatch.rb` |
 | templates, stitched and not | `app/views/accounts/` |
 | the spec suite | `spec/` |
 | a `.rake` file and a YAML config | `lib/tasks/`, `config/` |

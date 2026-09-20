@@ -9,3 +9,6 @@
 # Local release config: machine-specific paths, and it names a private
 # marketplace. `release` sources it from the repo root; it is not shipped.
 .release.conf
+
+# Agent worktrees; `script/commit.sh` does `git add -A` and would commit these as gitlinks.
+.claude/worktrees/
