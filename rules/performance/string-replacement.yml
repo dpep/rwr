@@ -2,9 +2,16 @@
 # are one-character string literals -- `gsub("ab", "cd")` is a different
 # operation. `length: 1` is what makes the rule safe rather than plausible, and
 # `is: string` keeps an interpolated `"#{x}"` out.
+#
+# The `unsafe:` note used to warn that `tr` gives `^` and `\` special meaning.
+# It does -- but not at `length: 1`, where negation has no character to negate
+# and a lone backslash has nothing to escape. Every single-character pair over
+# printable ASCII plus `\n`, `\t` and `\0` agrees between `gsub` and `tr`: zero
+# divergent pairs. The fixtures at the bottom hold the two the old note named.
+# What is left unpinned is the receiver, which is what the note says now.
 description: '`gsub` with single-character literals is `tr`, which needs no regex engine.'
 unsafe: >-
-  `tr` gives `^` and `\` special meaning, so a one-character `^` or backslash is not a literal there as it is in `gsub`.
+  `tr` is a String method and nothing here pins the receiver to a String, so a receiver that defines `gsub` without `tr` starts raising `NoMethodError`.
 match: $R.gsub($FROM, $TO)
 where:
   $FROM:
@@ -63,10 +70,9 @@ tests:
     output: |
       a = s&.tr("-", "_")
 
-  # The `unsafe:` note above says `^` and `\` are not literals in `tr`. At
-  # `length: 1` they are: negation needs a character after the `^`, and a
-  # trailing backslash has nothing to escape. Checked against every
-  # single-character pair in ASCII -- none of them make `gsub` and `tr` differ.
+  # The two characters the old `unsafe:` note warned about. At `length: 1` both
+  # are literals in `tr` as well: negation needs a character after the `^`, and
+  # a trailing backslash has nothing to escape.
   - input: |
       a = s.gsub("^", "*")
     output: |

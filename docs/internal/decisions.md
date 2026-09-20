@@ -3303,3 +3303,21 @@ over generality that fails open.
 *Reverses if:* rspec-mocks' chain API becomes enumerable from the gem rather than from memory,
 at which point a denylist derives from the original instead of restating it.
 
+
+## D114 - `string-replacement` keeps its gate and loses its reason
+
+**Decided.** The `unsafe:` note warned that `tr` gives `^` and `\` special meaning. It does --
+but not at `length: 1`, where negation has no character to negate and a lone backslash has
+nothing to escape. Every single-character pair over printable ASCII plus `\n`, `\t` and `\0`
+agrees between `gsub` and `tr`: **zero divergent pairs**. Both characters now have fixtures.
+
+The note names what is actually unpinned: the receiver. `tr` is a String method and nothing in
+the rule pins `$R` to a String.
+
+*Why the gate stays.* The measurement arguably ungates the rule entirely -- `be-empty`'s own
+reasoning is that `unsafe:` must name a way the program behaves differently, and a receiver
+that is not a String is exactly that. It is thin, though, and every rule in the pack has an
+unconstrained receiver. Left gated and written down here rather than changed quietly.
+
+*Reverses if:* `type:` on `$R` becomes cheap enough to require, which pins the receiver and
+leaves the rule with no hazard to name at all.
