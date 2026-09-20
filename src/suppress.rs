@@ -152,9 +152,24 @@ pub(crate) fn directives(
             &source[location.start_offset()..location.end_offset().min(source.len())],
         )
         .into_owned();
-        let Some(rest) = text.split_once(MARKER).map(|(_, r)| r) else {
+        // The marker opens the comment or it is not an instruction. Accepting
+        // it anywhere meant a comment documenting the convention -- or a
+        // `# TODO: add rwr:ignore style/x here` -- silenced the very site it
+        // described, and spent its remaining words as rule names. RuboCop,
+        // ESLint and Semgrep all draw the line here. An embdoc body starts
+        // `=begin` rather than `#`, so this excludes those too.
+        let Some(rest) = text
+            .strip_prefix('#')
+            .map(str::trim_start)
+            .and_then(|body| body.strip_prefix(MARKER))
+        else {
             continue;
         };
+        // ...and it is a whole word: `rwr:ignored` is English, and reading it
+        // as the marker left `d` behind as a rule name.
+        if !rest.is_empty() && !rest.starts_with(|c: char| c.is_whitespace() || c == ',') {
+            continue;
+        }
         let line = crate::source::line_col(source, location.start_offset()).0;
 
         // A reason is the natural thing to write next to a suppression, and
@@ -424,6 +439,46 @@ mod tests {
         assert_eq!(unknown.len(), 1);
         assert_eq!(unknown[0].rule, "no-sleep");
         assert_eq!(unknown[0].did_you_mean.as_deref(), Some("no_sleep"));
+    }
+
+    /// Prose *about* the convention is not an instruction. A comment saying
+    /// the team does not use directives, or a `# TODO: add rwr:ignore ...`,
+    /// silenced the very site it was describing -- and spent the rest of its
+    /// words as rule names, so the run also reported three rules nothing has.
+    /// RuboCop, ESLint and Semgrep all require the marker to open the comment.
+    #[test]
+    fn prose_mentioning_the_marker_is_not_a_directive() {
+        for text in [
+            "return nil  # We do not use rwr:ignore style/return-nil in this repo\n",
+            "return nil  # TODO: add rwr:ignore style/return-nil here\n",
+            "return nil  # see rwr:ignore\n",
+        ] {
+            let (found, bad) = read(text);
+            assert!(found.is_empty(), "read a directive out of prose: {text}");
+            assert!(
+                bad.is_empty(),
+                "and did not report it malformed either: {text}"
+            );
+        }
+    }
+
+    /// The marker has to be the whole word. `rwr:ignored` is English, and
+    /// taking it as the marker left `d` behind as a rule name.
+    #[test]
+    fn a_longer_word_starting_with_the_marker_is_not_a_directive() {
+        let (found, bad) = read("return nil # rwr:ignored by policy\n");
+        assert!(found.is_empty());
+        assert!(bad.is_empty());
+    }
+
+    /// Written without a space, which is how a fair number of people write
+    /// them, and how they worked before the marker had to open the comment.
+    #[test]
+    fn the_marker_needs_no_space_after_the_hash() {
+        let src = "sleep 1 #rwr:ignore a/b\n";
+        let (found, _) = read(src);
+        assert_eq!(found[0].rules, vec!["a/b"]);
+        assert!(found[0].covers(Some("a/b"), at(src, "sleep 1")));
     }
 
     #[test]
