@@ -243,6 +243,9 @@ pub(crate) struct Scanned {
     pub(crate) suppressed: Vec<crate::suppress::Suppressed>,
     /// Directives that accepted nothing -- stale debt, reported unconditionally.
     pub(crate) stale: Vec<crate::suppress::Stale>,
+    /// Directives naming a rule this run does not have, so they silenced
+    /// nothing and rwr cannot say whether the finding is still live.
+    pub(crate) unknown: Vec<crate::suppress::Unknown>,
     /// Directives naming no rule, which cannot be audited.
     pub(crate) malformed: Vec<crate::suppress::Malformed>,
     /// Classes this source's matched receivers resolved to, for the
@@ -747,6 +750,10 @@ impl Engine {
                     })
             })
             .collect();
+        // Left alone above because an unknown id might belong to another pack.
+        // It might equally be a typo, and being unable to tell the two apart is
+        // a reason to report the directive, not to say nothing about it.
+        let unknown = crate::suppress::unrecognised(&directives, &mine, label);
 
         // Only when nothing was rewritten are the findings' spans still offsets
         // into `current`. A set that rewrote is already covered by reporting
@@ -764,6 +771,7 @@ impl Engine {
             && rejections.is_empty()
             && suppressed.is_empty()
             && stale.is_empty()
+            && unknown.is_empty()
             && malformed.is_empty()
         {
             return ScanOutcome::Quiet;
@@ -774,6 +782,7 @@ impl Engine {
             rejections,
             suppressed,
             stale,
+            unknown,
             malformed,
             spread,
             flagged,

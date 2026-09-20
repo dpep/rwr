@@ -601,6 +601,7 @@ fn report_by_rule(changed: &[Changed]) {
 fn report_suppressions(
     suppressed: &[crate::suppress::Suppressed],
     stale: &[crate::suppress::Stale],
+    unknown: &[crate::suppress::Unknown],
     malformed: &[crate::suppress::Malformed],
 ) {
     if !suppressed.is_empty() {
@@ -619,6 +620,28 @@ fn report_suppressions(
         );
         for d in stale.iter().take(RESIDUE_DETAIL_CAP) {
             eprintln!("  {}:{}: {} -- delete the comment", d.file, d.line, d.rule);
+        }
+    }
+    if !unknown.is_empty() {
+        // Said plainly, because the directive is not doing what its author
+        // thinks: it silenced nothing, and whatever it meant to accept is
+        // still live. A suppression's one forbidden outcome is silence.
+        eprintln!(
+            "rwr: {} rwr:ignore directive(s) name a rule this run does not have, \
+             so they suppressed nothing:",
+            unknown.len()
+        );
+        for d in unknown.iter().take(RESIDUE_DETAIL_CAP) {
+            match &d.did_you_mean {
+                Some(id) => eprintln!(
+                    "  {}:{}: {} -- did you mean `{id}`?",
+                    d.file, d.line, d.rule
+                ),
+                None => eprintln!(
+                    "  {}:{}: {} -- no rule of that name was loaded",
+                    d.file, d.line, d.rule
+                ),
+            }
         }
     }
     for d in malformed {
@@ -1392,6 +1415,10 @@ struct Report<'a> {
     suppressed: &'a [crate::suppress::Suppressed],
     /// Suppressions with nothing left to accept.
     stale_suppressions: &'a [crate::suppress::Stale],
+    /// Suppressions naming a rule this run does not have. Apart from
+    /// `stale_suppressions` because rwr established nothing about the finding
+    /// they meant to accept -- only that they accepted it nowhere.
+    unknown_suppressions: &'a [crate::suppress::Unknown],
     /// Directives naming no rule.
     malformed_directives: &'a [crate::suppress::Malformed],
     #[serde(flatten)]
@@ -1961,6 +1988,10 @@ fn cmd_apply(
         .iter()
         .flat_map(|o| o.scanned.stale.iter().cloned())
         .collect();
+    let unknown: Vec<crate::suppress::Unknown> = outcomes
+        .iter()
+        .flat_map(|o| o.scanned.unknown.iter().cloned())
+        .collect();
     let malformed: Vec<crate::suppress::Malformed> = outcomes
         .iter()
         .flat_map(|o| o.scanned.malformed.iter().cloned())
@@ -2014,7 +2045,7 @@ fn cmd_apply(
             );
             report_unsafe(&changed, rules);
             report_rejections(&rejections);
-            report_suppressions(&suppressed, &stale, &malformed);
+            report_suppressions(&suppressed, &stale, &unknown, &malformed);
             report_unread(&unparsed, &unreadable);
             report_residue(&left_over);
             // Only the templates that fell back: one rwr parsed has real
@@ -2148,6 +2179,7 @@ fn cmd_apply(
                 rejections: common.explain.then_some(rejections.as_slice()),
                 suppressed: &suppressed,
                 stale_suppressions: &stale,
+                unknown_suppressions: &unknown,
                 malformed_directives: &malformed,
                 unseen: Unseen {
                     template_residue: &left_over_text,

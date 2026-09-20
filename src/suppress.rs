@@ -60,6 +60,70 @@ pub(crate) struct Malformed {
     pub(crate) why: &'static str,
 }
 
+/// A directive naming a rule this run does not have.
+///
+/// Its own category rather than a stale one. `Stale` is a fact rwr established:
+/// it evaluated that rule over that range and the rule found nothing, so the
+/// directive is dead debt to delete. This is the opposite -- rwr never
+/// evaluated the rule, so it cannot say whether the finding is still live, only
+/// that the directive silenced nothing. The two also want opposite actions, and
+/// a gate failing on dead debt must not start failing on another pack's
+/// directives.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct Unknown {
+    pub(crate) file: String,
+    pub(crate) line: usize,
+    pub(crate) rule: String,
+    /// A rule this run *does* have whose id differs only in namespace, case or
+    /// separator. Present means a typo rather than another pack's id, which is
+    /// the difference between a warning worth acting on and one worth ignoring.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) did_you_mean: Option<String>,
+    pub(crate) source: &'static str,
+}
+
+/// Directives naming rules this run does not have.
+///
+/// The one user error that fell through every net: a real id on a non-firing
+/// line reports stale, a bare directive reports malformed, and a typo'd id was
+/// silent -- while being the likeliest mistake of the three, because
+/// `docs/suppressing.md`'s only two examples are pack-namespaced and a
+/// standalone rule file's id is its bare stem.
+pub(crate) fn unrecognised(directives: &[Directive], known: &[&str], file: &str) -> Vec<Unknown> {
+    directives
+        .iter()
+        .flat_map(|d| {
+            d.rules
+                .iter()
+                .filter(|r| !known.contains(&r.as_str()))
+                .map(|r| Unknown {
+                    file: file.to_string(),
+                    line: d.line,
+                    rule: r.clone(),
+                    did_you_mean: known
+                        .iter()
+                        .find(|id| stem(id) == stem(r))
+                        .map(|id| (*id).to_string()),
+                    source: "directive",
+                })
+        })
+        .collect()
+}
+
+/// The part of an id a near-match compares: the bare stem, case-folded, with
+/// `-` and `_` alike.
+///
+/// Exactly the three ways a pack-namespaced id differs from the same rule's
+/// bare stem, and nothing else -- not an edit distance, so it can name a
+/// suggestion without ever guessing at one.
+fn stem(id: &str) -> String {
+    id.rsplit('/')
+        .next()
+        .unwrap_or(id)
+        .to_ascii_lowercase()
+        .replace('-', "_")
+}
+
 const MARKER: &str = "rwr:ignore";
 
 /// Read every directive in a source.
@@ -326,6 +390,40 @@ mod tests {
         let (found, bad) = read("sleep 1 # rwr:ignore\n");
         assert!(found.is_empty());
         assert_eq!(bad.len(), 1);
+    }
+
+    /// The typo that was silent: neither honoured, nor stale, nor malformed.
+    #[test]
+    fn a_directive_naming_a_rule_this_run_lacks_is_reported() {
+        let (found, _) = read("puts 1 # rwr:ignore style/no-puts\n");
+        let unknown = unrecognised(&found, &["no_puts"], "a.rb");
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].rule, "style/no-puts");
+        // Namespace, case and separator are the three ways the docs' examples
+        // differ from a standalone rule file's id, so this one is a typo and
+        // the report can say which rule was meant.
+        assert_eq!(unknown[0].did_you_mean.as_deref(), Some("no_puts"));
+    }
+
+    /// A rule from a pack this run did not load is still reported -- the
+    /// directive silenced nothing either way -- but with no suggestion, since
+    /// there is nothing it resembles.
+    #[test]
+    fn an_unrelated_id_is_reported_without_a_guess() {
+        let (found, _) = read("sleep 1 # rwr:ignore other/no-sleep\n");
+        let unknown = unrecognised(&found, &["no_puts"], "a.rb");
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].did_you_mean, None);
+    }
+
+    /// A directive naming one good id and one typo reports only the typo.
+    #[test]
+    fn a_recognised_id_beside_a_typo_is_left_alone() {
+        let (found, _) = read("puts 1 # rwr:ignore no_puts, no-sleep\n");
+        let unknown = unrecognised(&found, &["no_puts", "no_sleep"], "a.rb");
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].rule, "no-sleep");
+        assert_eq!(unknown[0].did_you_mean.as_deref(), Some("no_sleep"));
     }
 
     #[test]

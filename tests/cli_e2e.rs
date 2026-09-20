@@ -3182,3 +3182,57 @@ fn ndjson_is_the_same_document_on_one_line() {
         assert!(streamed["unparsed"].is_array(), "{args:?}: {streamed}");
     }
 }
+
+/// A suppression naming a rule that does not exist must not be silent.
+///
+/// `docs/suppressing.md` promises in bold that silence is the one thing a
+/// suppression can never do, and this was the hole: a real id on a non-firing
+/// line reports stale, a bare directive reports malformed, and a typo'd id --
+/// the likeliest of the three, since the docs' examples are pack-namespaced
+/// while a standalone rule file's id is its bare stem -- reported nothing at
+/// all while the finding stayed live.
+#[test]
+fn a_suppression_naming_no_known_rule_is_reported() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("no_puts.yml"),
+        "match: puts($A)\ndescription: no puts in production code\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("app.rb"),
+        "puts 1 # rwr:ignore style/no-puts\nputs 2 # rwr:ignore other/thing\n",
+    )
+    .expect("write");
+
+    let out = run_in(path, &["check", "no_puts.yml", "app.rb", "-j"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let unknown = doc["unknown_suppressions"]
+        .as_array()
+        .expect("always present");
+    assert_eq!(unknown.len(), 2, "{doc}");
+
+    // The typo carries the rule it meant; the other pack's id carries no guess.
+    assert_eq!(unknown[0]["rule"], "style/no-puts", "{doc}");
+    assert_eq!(unknown[0]["did_you_mean"], "no_puts", "{doc}");
+    assert!(unknown[1]["did_you_mean"].is_null(), "{doc}");
+
+    // Neither is claimed as stale: rwr never evaluated those rules, so it
+    // established nothing about what they would have accepted.
+    assert!(
+        doc["stale_suppressions"]
+            .as_array()
+            .expect("present")
+            .is_empty(),
+        "{doc}"
+    );
+
+    // And the findings are still live -- the directives silenced nothing.
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+
+    let out = run_in(path, &["check", "no_puts.yml", "app.rb"]);
+    let err = stderr(&out);
+    assert!(err.contains("does not have"), "{err}");
+    assert!(err.contains("did you mean `no_puts`"), "{err}");
+}
