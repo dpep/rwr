@@ -11,3 +11,27 @@ tests:
       a = xs.inject(:+)
     output: |
       a = xs.sum
+  - input: |
+      a = xs.reduce(:+)
+    output: |
+      a = xs.sum
+  # An explicit initial value already says what the empty case returns, and
+  # `sum` takes it in a different position -- a different rewrite, not this one.
+  - input: |
+      a = xs.inject(0, :+)
+    unchanged: true
+  # Any other operator, and the long-hand block, are other reductions.
+  - input: |
+      a = xs.inject(:*)
+      b = xs.inject { |acc, x| acc + x }
+    unchanged: true
+  # RED, deliberately -- the `unsafe:` note covers only the empty collection.
+  # For a *non-empty* one of anything but numerics the rewrite raises, and the
+  # receiver here says so on its own line: `["a", "b"].inject(:+)` is "ab",
+  # while `sum` starts its accumulator at 0 and dies with `TypeError: String
+  # can't be coerced into Integer`. Arrays of arrays fail the same way, and
+  # arrays of floats return a different number, because `sum` compensates for
+  # rounding and `inject` does not. Verified on Ruby 3.4.
+  - input: |
+      a = ['a', 'b'].inject(:+)
+    unchanged: true

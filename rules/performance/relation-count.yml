@@ -15,3 +15,27 @@ tests:
       a = Model.all.to_a.size
     output: |
       a = Model.all.count
+  # `length` is the other spelling of the same mistake.
+  - input: |
+      a = Model.all.to_a.length
+    output: |
+      a = Model.all.count
+  # `to_a.count` already asks for a count; rewriting it would only move the
+  # load, and `to_a.first` is not a measurement at all.
+  - input: |
+      a = Model.all.to_a.count
+      b = Model.all.to_a.first
+    unchanged: true
+  # Without `to_a` there is nothing being materialised to measure.
+  - input: |
+      a = Model.all.size
+    unchanged: true
+  # RED, deliberately -- the rewrite changes the *type* of the result, which
+  # no clause of the `unsafe:` note covers. `group(...).to_a.size` is an
+  # Integer; `group(...).count` is a Hash keyed by the grouped column. Nothing
+  # raises and the file still parses, so the caller gets a Hash where a number
+  # used to be. Four sites of exactly this shape in a real framework's own
+  # suite, each one feeding the number straight into an equality assertion.
+  - input: |
+      a = Model.group(:kind).to_a.size
+    unchanged: true

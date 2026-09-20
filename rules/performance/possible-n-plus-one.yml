@@ -35,3 +35,33 @@ tests:
   - input: |
       orders.tap { |o| puts o.customer.name }
     finds: 0
+  # The hop may be conditional or nested; it is still a hop per element.
+  - input: |
+      orders.each { |o| puts o.customer.name if o.active? }
+    finds: 1
+  # Iterators the `name:` list does not carry. `detect` stops early, which
+  # bounds the damage, but `each_with_index` does not -- it is the same N+1
+  # with a counter, and it goes unreported.
+  - input: |
+      orders.detect { |o| o.customer.name }
+      orders.each_with_index { |o, i| puts o.customer.name }
+    finds: 0
+  # RED, deliberately -- the rule's own third case says a plain attribute read
+  # is not an N+1, and a coercion of one is still a plain attribute read.
+  # `$ASSOC.$FIELD` counts hops, not associations, so `id` + `to_s` reads as a
+  # chain through an association. This is the single largest source of noise:
+  # 26 of 91 findings on a real app are a two-hop chain ending in `to_s`,
+  # `to_i`, `strip` or `downcase`, and 36 of the 91 are in spec files. A
+  # candidate list is only worth skimming if skimming it is cheaper than
+  # skimming the code.
+  - input: |
+      ids = accounts.map { |a| a.id.to_s }
+    finds: 0
+  # RED, deliberately -- the `unsafe:` note's justification is that rwr
+  # "cannot see whether the relation was eager-loaded". Here it can: the
+  # `includes` names the very association the block reaches through, in the
+  # same expression, inside the matched receiver. Four findings on a real app
+  # are this shape.
+  - input: |
+      orders.includes(:customer).each { |o| puts o.customer.name }
+    finds: 0

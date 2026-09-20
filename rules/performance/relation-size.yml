@@ -18,3 +18,27 @@ tests:
   - input: |
       n = [1, 2].size
     finds: 0
+  # A hash condition with several keys is still one argument.
+  - input: |
+      n = Model.where(x: 1, y: 2).size
+    finds: 1
+  # `where` is not a relation, only a hint of one: any receiver with a one-arg
+  # `where` matches, and rwr has no way to tell them apart. Pinned so the
+  # over-match is on the record next to the under-match below.
+  - input: |
+      n = config.where(x: 1).size
+    finds: 1
+  # Anything chained after `where` hides the site: the shape anchors `.size`
+  # directly to the `where` call, and real relations rarely end there.
+  - input: |
+      n = Model.where(x: 1).order(:id).size
+      m = Model.where(x: 1).includes(:parts).size
+    finds: 0
+  # RED, deliberately -- string conditions are the other half of `where`, and
+  # they take two arguments, so `$C` never binds and the rule is blind to them.
+  # This is the same question about the same relation as the passing case
+  # above. Measured: the rule finds nothing at all across a whole real Rails
+  # app, which has hundreds of `where` calls and over a hundred `.size` calls.
+  - input: |
+      n = Model.where('x = ?', 1).size
+    finds: 1

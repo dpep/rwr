@@ -12,3 +12,50 @@ tests:
       a = Model.all.map(&:name)
     output: |
       a = Model.all.pluck(:name)
+  # Safe navigation is part of the receiver, so it survives the rewrite.
+  - input: |
+      a = relation&.map(&:name)
+    output: |
+      a = relation&.pluck(:name)
+  # Only `map`. `flat_map` flattens and `each` returns the receiver; neither is
+  # what `pluck` does.
+  - input: |
+      a = relation.flat_map(&:name)
+      relation.each(&:name)
+    unchanged: true
+  # A block-pass that is not a symbol literal names no column.
+  - input: |
+      a = relation.map(&COLUMN)
+      b = relation.map(&blk)
+    unchanged: true
+  # The long-hand block is a different shape; only `&:sym` promises one send.
+  - input: |
+      a = relation.map { |x| x.name }
+    unchanged: true
+  # No receiver, no relation to pluck from.
+  - input: |
+      a = map(&:name)
+    unchanged: true
+  # RED, deliberately -- a defect the `unsafe:` note does not cover. The note
+  # is about the *receiver* (Array vs relation); nothing constrains the
+  # *symbol*. `&:save!` names a side effect, and `pluck` performs none of it:
+  # the records are never saved and the run still exits clean. Ten sites of
+  # this shape across two corpora (`map(&:delete)`, `map(&:join)`,
+  # `map(&:call)`, `map(&:create!)`).
+  - input: |
+      relation.map(&:save!)
+    unchanged: true
+  # RED, deliberately -- a genuine relation and a genuine column, and the
+  # rewrite still changes the values. A model that overrides its own attribute
+  # reader answers `map(&:col)` from Ruby and `pluck(:col)` from the raw
+  # column, so the two agree textually and differ in meaning. Found live in a
+  # real app, feeding a search index.
+  - input: |
+      class Account < ApplicationRecord
+        def display_name
+          attributes['display_name'] || name
+        end
+      end
+
+      names = Account.all.map(&:display_name)
+    unchanged: true
