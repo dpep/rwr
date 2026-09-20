@@ -2984,3 +2984,161 @@ fn sarif_points_at_real_lines_and_grades_honestly() {
         "the `send` reach is residue, which needs a human rather than a fix: {doc}"
     );
 }
+
+/// A directory holding a good file, a broken one, and a template, with a
+/// rename rule for the same name -- the shape every "what did the run not
+/// see" assertion below needs.
+fn blind_spot_fixture() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("app.rb"),
+        "class Account\n  def display_name\n    @n\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("broken.rb"),
+        "class Broken\n  def display_name(\n    @n\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(path.join("page.haml"), "%p= account.display_name\n").expect("write");
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+    dir
+}
+
+fn run_in(path: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(args)
+        .current_dir(path)
+        .output()
+        .expect("binary runs")
+}
+
+/// `find` must say what it could not read, on both of its paths.
+///
+/// A file with a syntax error was dropped with no signal at all on the pattern
+/// path, and named only in text on the designator path -- so `-j`, the flag the
+/// skill tells every agent to always use, reported a clean search over a
+/// repository it had not fully read.
+#[test]
+fn find_names_the_files_it_could_not_parse() {
+    let dir = blind_spot_fixture();
+    let path = dir.path();
+
+    for arg in ["$R.display_name", "Account#display_name"] {
+        let out = run_in(path, &["find", arg, ".", "-j"]);
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+        let unparsed = doc["unparsed"].as_array().expect("always present");
+        assert_eq!(unparsed.len(), 1, "{arg}: {doc}");
+        assert!(
+            unparsed[0]
+                .as_str()
+                .is_some_and(|f| f.ends_with("broken.rb")),
+            "{arg}: {doc}"
+        );
+
+        // Text mode says the same thing, on stderr where warnings go.
+        let out = run_in(path, &["find", arg, "."]);
+        assert!(
+            stderr(&out).contains("did not parse"),
+            "{arg}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+/// `find -j` must carry the template account `check -j` carries.
+///
+/// The Haml hit was printed in text mode and dropped from the JSON, which is
+/// worse than hiding it behind `--verbose`: the signal vanishes behind the flag
+/// a machine consumer is told to pass.
+#[test]
+fn find_carries_the_template_account_into_json() {
+    let dir = blind_spot_fixture();
+    let path = dir.path();
+
+    for arg in ["$R.display_name", "Account#display_name"] {
+        let out = run_in(path, &["find", arg, ".", "-j"]);
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+        assert_eq!(doc["templates_skipped"], 1, "{arg}: {doc}");
+        let found = doc["template_residue"].as_array().expect("always present");
+        assert_eq!(found.len(), 1, "{arg}: {doc}");
+        assert!(
+            found[0]["file"]
+                .as_str()
+                .is_some_and(|f| f.ends_with("page.haml")),
+            "{arg}: {doc}"
+        );
+    }
+}
+
+/// A file rwr cannot open answered byte-for-byte as an empty directory does.
+///
+/// Exit 1, `matches: []`, `residue: []` -- the same answer for "there is
+/// nothing here" and "I could not look", which is the blind spot the whole
+/// residue contract exists to prevent.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_file_is_never_silent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    let locked = path.join("app.rb");
+    std::fs::write(
+        &locked,
+        "class Account\n  def display_name\n    @n\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Account#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    // Root reads anything, so there would be nothing to observe.
+    if std::fs::read(&locked).is_ok() {
+        return;
+    }
+
+    for args in [
+        vec!["find", "$R.display_name", ".", "-j"],
+        vec!["find", "Account#display_name", ".", "-j"],
+        vec!["check", "rename.yml", ".", "-j"],
+    ] {
+        let out = run_in(path, &args);
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+        let files = doc["unreadable"].as_array().expect("always present");
+        assert_eq!(files.len(), 1, "{args:?}: {doc}");
+        assert!(
+            files[0].as_str().is_some_and(|f| f.ends_with("app.rb")),
+            "{args:?}: {doc}"
+        );
+    }
+
+    let out = run_in(path, &["find", "$R.display_name", "."]);
+    assert!(
+        stderr(&out).contains("could not be read"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// `--profile`'s `parsed` count is the surface an engineer reads to sanity-check
+/// a run, and it counted the files that never parsed as parsed.
+#[test]
+fn profile_does_not_count_an_unparsed_file_as_parsed() {
+    let dir = blind_spot_fixture();
+    let out = run_in(dir.path(), &["find", "$R.display_name", ".", "--profile"]);
+    let err = stderr(&out);
+    let line = err
+        .lines()
+        .find(|l| l.contains("scan"))
+        .unwrap_or_else(|| panic!("a scan line: {err}"));
+    assert!(line.contains("1 parsed"), "app.rb only: {line}");
+    assert!(line.contains("1 unparsed"), "broken.rb: {line}");
+}

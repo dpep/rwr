@@ -711,6 +711,82 @@ fn report_text_residue(found: &[Residue], templates: usize) {
     }
 }
 
+/// Record a path rwr could not use, from inside the parallel walk.
+fn note(sink: &std::sync::Mutex<Vec<String>>, path: &std::path::Path) {
+    if let Ok(mut sink) = sink.lock() {
+        sink.push(path.display().to_string());
+    }
+}
+
+/// Name the files rwr did not read.
+///
+/// Two lists rather than one: a syntax error and a permission error are the
+/// same blind spot with opposite fixes, and an unreadable file used to answer
+/// byte-for-byte as an empty directory does.
+fn report_unread(unparsed: &[String], unreadable: &[String]) {
+    for (files, what) in [
+        (unparsed, "Ruby file(s) did not parse and were not read"),
+        (unreadable, "file(s) could not be read"),
+    ] {
+        if files.is_empty() {
+            continue;
+        }
+        eprintln!("rwr: {} {what}:", files.len());
+        for file in files.iter().take(RESIDUE_DETAIL_CAP) {
+            eprintln!("  {file}");
+        }
+        if files.len() > RESIDUE_DETAIL_CAP {
+            eprintln!("  ... and {} more", files.len() - RESIDUE_DETAIL_CAP);
+        }
+    }
+}
+
+/// Text-search the templates that got no structural read.
+///
+/// This is what turns "356 files were not searched" into "here are the three
+/// views that mention the name" -- the difference between naming a blind spot
+/// and doing something about it. Shared by every verb, so `find` and `check`
+/// cannot answer differently about the same templates.
+fn text_residue(
+    templates: &[std::path::PathBuf],
+    anchors: &[(Option<String>, Vec<u8>)],
+    parsed: &std::collections::HashSet<&str>,
+) -> Vec<Residue> {
+    if anchors.is_empty() {
+        return Vec::new();
+    }
+    let mut found: Vec<Residue> = templates
+        .par_iter()
+        .flat_map_iter(|path| {
+            let file = path.display().to_string();
+            let mut here = Vec::new();
+            // One rwr parsed has real evidence and needs no guess.
+            if parsed.contains(file.as_str()) {
+                return here.into_iter();
+            }
+            let mapped = source::open(path);
+            let bytes = mapped.bytes();
+            for (rule, anchor) in anchors {
+                for at in source::identifier_offsets(bytes, anchor) {
+                    let (line, col) = source::line_col(bytes, at);
+                    here.push(Residue {
+                        file: file.clone(),
+                        line,
+                        col,
+                        context: residue::Context::Text,
+                        rule: rule.clone(),
+                        text: source::line_at(bytes, at),
+                    });
+                }
+            }
+            here.into_iter()
+        })
+        .collect();
+    found.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+    found.dedup_by_key(|r| (r.file.clone(), r.line, r.col));
+    found
+}
+
 /// Print what the finding rules flagged.
 ///
 /// Separate from the edit list because it is a different kind of answer: these
@@ -912,10 +988,37 @@ struct Matches<'a> {
     /// act -- so dropping these would remove a real call site from the answer to
     /// "where is this method", which is the one thing a search must not do.
     suppressed: &'a [crate::suppress::Suppressed],
+    /// The files this run did not read, in the same fields `check` uses.
+    #[serde(flatten)]
+    unseen: Unseen<'a>,
     /// Present when the argument named a method rather than a shape, saying
     /// which reading was taken.
     #[serde(skip_serializing_if = "Option::is_none")]
     interpreted: Option<Interpreted>,
+}
+
+/// What a run could not see, in whichever verb's report.
+///
+/// Flattened into both report shapes rather than spelled out in each: `find`'s
+/// document had drifted three fields behind `check`'s, and an agent reading the
+/// flag the skill tells it to always use got no account of the blind spots at
+/// all. Shared so the two cannot disagree again by construction.
+#[derive(Debug, Serialize)]
+struct Unseen<'a> {
+    /// Occurrences found by text search in template files rwr cannot parse.
+    /// Kept apart from `residue` because it is a weaker kind of evidence and
+    /// saying so is the point.
+    template_residue: &'a [Residue],
+    /// Template files that got no structural read.
+    templates_skipped: usize,
+    /// Ruby files that did not parse, so nothing was read from them. Always
+    /// present: a file rwr could not read is exactly what the account of blind
+    /// spots exists to name.
+    unparsed: &'a [String],
+    /// Paths rwr could not open -- permissions, a dangling symlink, a file that
+    /// vanished mid-walk. Apart from `unparsed` because the two are the same
+    /// blind spot with opposite fixes.
+    unreadable: &'a [String],
 }
 
 /// How a method designator was read, reported so the reading is never implicit.
@@ -1030,7 +1133,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
         },
     };
 
-    let (files, _templates) = profile::span_noted(
+    let (files, templates) = profile::span_noted(
         "walk",
         || {
             let (found, templates) = source::walk(&scoped, common.include_vendored);
@@ -1054,12 +1157,18 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
     };
     let filter = prefilter::Filter::new(&required_literals, &anchors_for_filter);
     let skipped = std::sync::atomic::AtomicUsize::new(0);
+    // A file rwr never read is a blind spot, and blind spots are reported
+    // unconditionally -- on this path they used to vanish with the run still
+    // exiting 0, which reads as "searched, nothing there".
+    let unparsed: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let unreadable: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     let scanning = profile::now();
     let mut found: Vec<Found> = files
         .par_iter()
         .flat_map_iter(|path| {
             let Ok(src) = std::fs::read(path) else {
+                note(&unreadable, path);
                 return Vec::new().into_iter();
             };
             if !filter.may_contribute(&src) {
@@ -1069,6 +1178,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
             let parsed = ruby_prism::parse(&src);
             // An unparseable file is reported and skipped, never guessed at.
             if parsed.errors().count() > 0 {
+                note(&unparsed, path);
                 return Vec::new().into_iter();
             }
             // Prism nodes are not Sync, so the pattern tree cannot be shared
@@ -1155,25 +1265,54 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
 
     found.sort_by(|a, b| (&a.file, a.line, a.col).cmp(&(&b.file, b.line, b.col)));
 
+    let mut unparsed = unparsed.into_inner().unwrap_or_default();
+    unparsed.sort();
+    let mut unreadable = unreadable.into_inner().unwrap_or_default();
+    unreadable.sort();
+
     profile::mark("scan", scanning, || {
         let skipped = skipped.load(std::sync::atomic::Ordering::Relaxed);
+        // `parsed` once counted every file the prefilter kept, including the
+        // ones that never parsed -- the one surface an engineer reads to
+        // sanity-check a run, asserting something false.
         format!(
-            "{} matches, {} parsed, {} skipped",
+            "{} matches, {} parsed, {} skipped, {} unparsed, {} unreadable",
             found.len(),
-            files.len() - skipped,
-            skipped
+            files.len() - skipped - unparsed.len() - unreadable.len(),
+            skipped,
+            unparsed.len(),
+            unreadable.len()
         )
     });
 
     let mut residues = residues.into_inner().unwrap_or_default();
     residues.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
 
+    // Templates embed Ruby this path does not parse, so they get the same text
+    // fallback `check` gives them: weaker evidence, marked as weaker. Counting
+    // them without searching them would name the blind spot and stop there.
+    let tagged: Vec<(Option<String>, Vec<u8>)> = anchors_for_filter
+        .iter()
+        // A bare pattern has no rule id to attribute an occurrence to.
+        .map(|a| (None, a.clone()))
+        .collect();
+    let template_residue = text_residue(&templates, &tagged, &std::collections::HashSet::new());
+    // A pattern with no literal name claims nothing about completeness, so it
+    // has no blind spot to report -- the same gate `check` applies.
+    let templates_skipped = if tagged.is_empty() {
+        0
+    } else {
+        templates.len()
+    };
+
     match out {
         Output::Text => {
             for f in &found {
                 println!("{}:{}:{}: {}", f.file, f.line, f.col, f.text);
             }
+            report_unread(&unparsed, &unreadable);
             report_residue(&residues);
+            report_text_residue(&template_residue, templates_skipped);
         }
         _ => {
             // `-j` is one document, so it carries what produced it. `-J` is a
@@ -1189,6 +1328,13 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                         residue: &residues,
                         // The pattern path has no rule to carry a directive.
                         suppressed: &[],
+                        unseen: Unseen {
+                            template_residue: &template_residue,
+                            // Every template: this path parses none of them.
+                            templates_skipped,
+                            unparsed: &unparsed,
+                            unreadable: &unreadable,
+                        },
                         // A bare pattern names a shape, so there is no reading
                         // to disclose.
                         interpreted: None,
@@ -1251,10 +1397,6 @@ struct Report<'a> {
     changed: &'a [Changed],
     /// Matches of rules that propose no edit -- lints rather than rewrites.
     findings: &'a [Finding],
-    /// Occurrences found by text search in files rwr cannot parse. Kept apart
-    /// from `residue` because it is a weaker kind of evidence and saying so is
-    /// the point.
-    template_residue: &'a [Residue],
     /// Occurrences the rule could not account for.
     ///
     /// Three states, because an empty list would otherwise mean two opposite
@@ -1268,8 +1410,6 @@ struct Report<'a> {
     /// difference, and that one checks.
     #[serde(skip_serializing_if = "Option::is_none")]
     residue: Option<&'a [Residue]>,
-    /// Template files not searched, since they embed Ruby rwr does not read.
-    templates_skipped: usize,
     /// Why candidates were declined. Present only under `-e` -- absent means
     /// nobody asked, not that nothing was declined.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1282,10 +1422,8 @@ struct Report<'a> {
     stale_suppressions: &'a [crate::suppress::Stale],
     /// Directives naming no rule.
     malformed_directives: &'a [crate::suppress::Malformed],
-    /// Ruby files that did not parse, so nothing was read from them. Always
-    /// present: a file rwr could not open is exactly what the account of blind
-    /// spots exists to name.
-    unparsed: &'a [String],
+    #[serde(flatten)]
+    unseen: Unseen<'a>,
 }
 
 /// What running the rules over one template produced.
@@ -1560,11 +1698,19 @@ fn cmd_apply(
 
     let skipped = std::sync::atomic::AtomicUsize::new(0);
     let unparsed: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let unreadable: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     let scanning = profile::now();
     let outcomes: Vec<Outcome> = files
         .par_iter()
         .zip(&sources)
         .filter_map(|(path, mapped)| {
+            // Before the prefilter, which would otherwise decline the empty
+            // bytes an unopenable file yields and count it as a file with
+            // nothing in it.
+            if mapped.unreadable() {
+                note(&unreadable, path);
+                return None;
+            }
             let mapped = mapped.bytes();
             if !engine.may_contribute(mapped) {
                 skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1794,35 +1940,13 @@ fn cmd_apply(
                     .collect::<Vec<_>>()
             })
             .collect();
-
-        left_over_text = templates
-            .par_iter()
-            .flat_map_iter(|path| {
-                let mut here = Vec::new();
-                if parsed_templates.contains(path.display().to_string().as_str()) {
-                    return here.into_iter();
-                }
-                let mapped = source::open(path);
-                let bytes = mapped.bytes();
-                for (rule, anchor) in &anchors {
-                    for at in source::identifier_offsets(bytes, anchor) {
-                        let (line, col) = source::line_col(bytes, at);
-                        here.push(Residue {
-                            file: path.display().to_string(),
-                            line,
-                            col,
-                            context: residue::Context::Text,
-                            rule: rule.clone(),
-                            text: source::line_at(bytes, at),
-                        });
-                    }
-                }
-                here.into_iter()
-            })
-            .collect();
-        left_over_text.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
-        left_over_text.dedup_by_key(|r| (r.file.clone(), r.line, r.col));
+        left_over_text = text_residue(&templates, &anchors, &parsed_templates);
     }
+    let templates_skipped = if engine.claims_completeness() {
+        templates.len() - parsed_templates.len()
+    } else {
+        0
+    };
 
     for outcome in &template_outcomes {
         // Same treatment as a `.rb` refusal: named on stderr, and it sets the
@@ -1854,6 +1978,8 @@ fn cmd_apply(
 
     let mut unparsed = unparsed.into_inner().unwrap_or_default();
     unparsed.sort();
+    let mut unreadable = unreadable.into_inner().unwrap_or_default();
+    unreadable.sort();
 
     let suppressed: Vec<crate::suppress::Suppressed> = outcomes
         .iter()
@@ -1917,19 +2043,11 @@ fn cmd_apply(
             report_unsafe(&changed, rules);
             report_rejections(&rejections);
             report_suppressions(&suppressed, &stale, &malformed);
-            if !unparsed.is_empty() {
-                eprintln!(
-                    "rwr: {} Ruby file(s) did not parse and were not read:",
-                    unparsed.len()
-                );
-                for file in unparsed.iter().take(RESIDUE_DETAIL_CAP) {
-                    eprintln!("  {file}");
-                }
-            }
+            report_unread(&unparsed, &unreadable);
             report_residue(&left_over);
             // Only the templates that fell back: one rwr parsed has real
             // evidence and does not belong in a paragraph about guesses.
-            report_text_residue(&left_over_text, templates.len() - parsed_templates.len());
+            report_text_residue(&left_over_text, templates_skipped);
         }
         Output::Sarif => {
             // Levels are a judgement about what a reader should do, and getting
@@ -1998,10 +2116,13 @@ fn cmd_apply(
             for file in &unparsed {
                 notes.push(format!("{file} did not parse, so it was not read"));
             }
-            let skipped = templates.len() - parsed_templates.len();
-            if skipped > 0 {
+            for file in &unreadable {
+                notes.push(format!("{file} could not be read, so it was not searched"));
+            }
+            if templates_skipped > 0 {
                 notes.push(format!(
-                    "{skipped} template(s) could not be parsed and were only text-searched"
+                    "{templates_skipped} template(s) could not be parsed and were only \
+                     text-searched"
                 ));
             }
 
@@ -2028,6 +2149,12 @@ fn cmd_apply(
                         matches: &rows,
                         residue: &left_over,
                         suppressed: &suppressed,
+                        unseen: Unseen {
+                            template_residue: &left_over_text,
+                            templates_skipped,
+                            unparsed: &unparsed,
+                            unreadable: &unreadable,
+                        },
                         interpreted: designator,
                     },
                 )
@@ -2048,21 +2175,20 @@ fn cmd_apply(
                 changed: &changed,
                 findings: &findings,
                 residue: engine.claims_completeness().then_some(left_over.as_slice()),
-                template_residue: &left_over_text,
-                // The templates that got *no* structural read, matching what
-                // the text report says. Counting every template here claimed a
-                // blind spot over files rwr had in fact parsed -- and claimed it
-                // in the machine-readable plane, where an agent acts on it.
-                templates_skipped: if engine.claims_completeness() {
-                    templates.len() - parsed_templates.len()
-                } else {
-                    0
-                },
                 rejections: common.explain.then_some(rejections.as_slice()),
                 suppressed: &suppressed,
                 stale_suppressions: &stale,
                 malformed_directives: &malformed,
-                unparsed: &unparsed,
+                unseen: Unseen {
+                    template_residue: &left_over_text,
+                    // The templates that got *no* structural read, matching
+                    // what the text report says. Counting every template here
+                    // claimed a blind spot over files rwr had in fact parsed --
+                    // and claimed it in the plane where an agent acts.
+                    templates_skipped,
+                    unparsed: &unparsed,
+                    unreadable: &unreadable,
+                },
             };
             if emit_document(out, &report).is_some() {
                 return Exit::Error.into();

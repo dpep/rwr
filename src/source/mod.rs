@@ -198,6 +198,10 @@ pub(crate) fn identifier_offsets(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
 pub(crate) enum Source {
     Mapped(memmap2::Mmap),
     Owned(Vec<u8>),
+    /// The file could not be opened or read. Distinct from an empty one: both
+    /// yield zero bytes and mean opposite things, and collapsing them made an
+    /// unreadable file answer exactly as a clean one does.
+    Unreadable,
 }
 
 impl Source {
@@ -205,7 +209,12 @@ impl Source {
         match self {
             Source::Mapped(m) => m,
             Source::Owned(v) => v,
+            Source::Unreadable => &[],
         }
+    }
+
+    pub(crate) fn unreadable(&self) -> bool {
+        matches!(self, Source::Unreadable)
     }
 }
 
@@ -216,14 +225,14 @@ impl Source {
 /// writes through the filesystem rather than the mapping.
 pub(crate) fn open(path: &Path) -> Source {
     let Ok(file) = std::fs::File::open(path) else {
-        return Source::Owned(Vec::new());
+        return Source::Unreadable;
     };
     if file.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
         return Source::Owned(Vec::new());
     }
     // SAFETY: read-only view, and rwr does not modify files during the scan.
     if std::env::var_os("RWR_NO_MMAP").is_some() {
-        return Source::Owned(std::fs::read(path).unwrap_or_default());
+        return read_owned(path);
     }
     match unsafe { memmap2::Mmap::map(&file) } {
         Ok(map) => {
@@ -232,8 +241,12 @@ pub(crate) fn open(path: &Path) -> Source {
             let _ = map.advise(memmap2::Advice::Sequential);
             Source::Mapped(map)
         }
-        Err(_) => Source::Owned(std::fs::read(path).unwrap_or_default()),
+        Err(_) => read_owned(path),
     }
+}
+
+fn read_owned(path: &Path) -> Source {
+    std::fs::read(path).map_or(Source::Unreadable, Source::Owned)
 }
 
 /// One-based line and column for a byte offset.
