@@ -124,7 +124,7 @@ the match *is* the guarded call and the rewrite swaps one call for another
 inside the same guard. A rename reaches `a&.foo` and keeps the `&.`, which is
 the common case and the one this note was written for.
 
-**Below the root, a pattern's `.` does not match `&.` at all** (D111). There the
+**Below the root, a pattern's `.` does not match `&.` at all** (D115). There the
 pattern has matched an expression that *consumes* the short-circuited value, and
 what the template does with it is not visible to the matcher: `!xs&.any? { |i|
 i.ok? }` is `true` on a nil receiver where `xs&.none? { |i| i.ok? }` is `nil`, so

@@ -3166,7 +3166,7 @@ the exit-0 behaviour.
 name, say -- at which point accepting one site has a meaning that runs, and the answer becomes
 that alias rather than a refusal.
 
-## D111 - A pattern's `.` matches `&.` only at the pattern root
+## D115 - A pattern's `.` matches `&.` only at the pattern root
 
 `style/inverse-any` rewrote `!xs&.any? { |i| i.ok? }` to `xs&.none? { |i| i.ok? }`. Verified on
 Ruby 3.4.9: `!nil&.any? { |i| i.ok? }` is `true` and `nil&.none? { |i| i.ok? }` is `nil`. **A guard
@@ -3217,7 +3217,7 @@ hole without costing a single legitimate conversion.
 becomes "does this template keep the guarded value in the same position", and the root is a proxy
 for it rather than the rule itself.
 
-## D112 - "A bare name" is Prism's `VARIABLE_CALL` flag, not our reading of the call
+## D116 - "A bare name" is Prism's `VARIABLE_CALL` flag, not our reading of the call
 
 `same_name_as` treated `a()` as a read of `a`, so `style/hash-shorthand` rewrote `p({ a: a() })` to
 `p({ a: })`. With `def a = 99` and a local `a = 1` both in scope those are different programs -- 99

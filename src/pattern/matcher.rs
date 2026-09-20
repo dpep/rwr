@@ -76,7 +76,7 @@ pub(crate) struct Match<'pr> {
 ///
 /// "Bare" is Prism's `VARIABLE_CALL` flag rather than this module's own reading
 /// of the call, because the two disagreed on `a()` and the flag is the one that
-/// answers the question actually being asked (D112).
+/// answers the question actually being asked (D116).
 fn bare_name<'a>(node: &Node<'a>) -> Option<Vec<u8>> {
     match node {
         Node::CallNode { .. } => {
@@ -474,7 +474,7 @@ fn match_children<'pr>(
     // still reaches `&.` and preserves it (B8). Nested, the pattern has matched
     // an expression that *consumes* the guarded value, and what the template
     // does with it is not visible from here -- so refuse rather than guess
-    // (D111).
+    // (D115).
     //
     // Both sides must be calls. A bare identifier is a call on one side and a
     // `LocalVariableReadNode` on the other, which is the whole reason
@@ -2006,7 +2006,7 @@ mod tests {
         search(&p_root, &t_result.node(), &prepared, &Criteria::none()).len()
     }
 
-    /// D111. At the root the match *is* the guarded call, so a rename reaches
+    /// D115. At the root the match *is* the guarded call, so a rename reaches
     /// `&.` and the splice preserves it -- B8's case, and the common one.
     #[test]
     fn safe_navigation_matches_a_plain_dot_at_the_pattern_root() {
@@ -2038,7 +2038,7 @@ mod tests {
         assert_eq!(matches("foo($X)", "foo(a&.b)"), 1);
     }
 
-    /// D111's premise about Prism: explicit parens are what tell `a()` apart
+    /// D115's premise about Prism: explicit parens are what tell `a()` apart
     /// from `a`, and they live in `opening_loc` rather than in `arguments`.
     #[test]
     fn an_empty_argument_list_is_not_a_variable_call() {

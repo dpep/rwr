@@ -59,7 +59,7 @@
         a = xs.none?(&blk)
     # Safe navigation declines here for the same reason it declines the block
     # form: `!nil&.any?(&:ok?)` is true and `nil&.none?(&:ok?)` is nil, so the
-    # guard would flip. One mechanism, both spellings (D111).
+    # guard would flip. One mechanism, both spellings (D115).
     - input: |
         a = !xs&.any?(&:ok?)
       unchanged: true
