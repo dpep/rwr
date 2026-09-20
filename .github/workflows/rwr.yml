@@ -36,7 +36,7 @@ jobs:
     env:
       MODE: ${{ inputs.mode || 'suggest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # `--since` diffs against the base branch, which a shallow clone does
           # not have.
