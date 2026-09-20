@@ -3489,3 +3489,65 @@ fn an_unqualified_designator_resolves_against_the_classes_it_can_see() {
         "only the top-level Account is named: {text}"
     );
 }
+
+/// A qualified designator never answers about a sibling namespace.
+///
+/// D100's widening is stated for an *unqualified* name; the code applied it to
+/// any name whose last segment had exactly one candidate. So a run that could
+/// not see `Sales::Account` -- because the path scope excluded it, or because
+/// its file did not parse -- read `Sales::Account#display_name` as
+/// `Billing::Account#display_name` and rewrote the class the caller had
+/// explicitly named around. Qualifying the name is the documented remedy for an
+/// ambiguous short one, which makes this the worst place to widen.
+#[test]
+fn a_qualified_designator_does_not_retarget_to_a_sibling() {
+    let sales = "module Sales\n  class Account\n    def display_name\n      \"s\"\n    end\n  \
+                 end\nend\n";
+    let billing = "module Billing\n  class Account\n    def display_name\n      \"b\"\n    end\n  \
+                   end\nend\n";
+
+    // (a) Path-scoped: the ordinary CI shape. The scope excludes the class
+    // named, so the answer is "no sites", not "a different Account's site".
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("billing")).expect("mkdir");
+    std::fs::create_dir_all(dir.path().join("sales")).expect("mkdir");
+    std::fs::write(dir.path().join("sales/account.rb"), sales).expect("write");
+    std::fs::write(dir.path().join("billing/account.rb"), billing).expect("write");
+    let out = rwr(&[
+        "check",
+        "Sales::Account#display_name",
+        "-r",
+        "full_name",
+        dir.path().join("billing").to_str().expect("utf8"),
+    ]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.contains("would rewrite"),
+        "Billing::Account is not Sales::Account: {text}"
+    );
+
+    // (b) And the same redirect arrived through a file that did not parse --
+    // the run reported the unreadable file and quietly renamed the other class
+    // at exit 0, which is two lanes' work combining into a wrong rewrite.
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("sales.rb"),
+        "module Sales\n  class Account\n    def(\n",
+    )
+    .expect("write");
+    std::fs::write(dir.path().join("billing.rb"), billing).expect("write");
+    let out = rwr(&[
+        "rewrite",
+        "Sales::Account#display_name",
+        "-r",
+        "full_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let after = std::fs::read_to_string(dir.path().join("billing.rb")).expect("read back");
+    assert_eq!(
+        after,
+        billing,
+        "an unparsed target does not redirect the rename: {}",
+        stderr(&out)
+    );
+}

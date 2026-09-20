@@ -347,6 +347,14 @@ impl Hierarchy {
             }
             outer = scope.rfind("::").map(|i| &scope[..i]);
         }
+        // Only an *unqualified* name widens. A written namespace is the caller
+        // saying which of the namesakes it means, and it is the documented
+        // remedy for an ambiguous short name -- so widening it retargets the
+        // one caller who was explicit, and does it whenever the run cannot see
+        // the class named (a path scope, a file that did not parse).
+        if r.written.contains("::") {
+            return r.written.clone();
+        }
         match candidates(&r.written) {
             Some(names) if names.iter().any(|n| n == &r.written) => r.written.clone(),
             // Exactly one class ends with it, so that is what it means.
@@ -701,6 +709,22 @@ mod tests {
             "Billing::Account is not the top-level Account"
         );
         assert!(!h.same_class("Account", "Billing::Account"));
+    }
+
+    /// A *qualified* name says which namespace it means, so it never widens.
+    ///
+    /// The widening rule is stated for an unqualified name only (D100), but the
+    /// code applied it to any name whose last segment had one candidate --
+    /// so `Sales::Account`, on a run that had seen only `Billing::Account`,
+    /// answered about Billing. Qualifying the name is the documented remedy for
+    /// an ambiguous short one, and it retargeted the rename instead.
+    #[test]
+    fn a_qualified_name_never_widens_to_a_sibling_namespace() {
+        let h = Hierarchy::from_source("module Billing\n  class Account; end\nend");
+        assert_eq!(h.canonical("Sales::Account"), "Sales::Account");
+        assert!(!h.same_class("Sales::Account", "Billing::Account"));
+        // The unqualified form still widens -- that is D100's rule, unchanged.
+        assert_eq!(h.canonical("Account"), "Billing::Account");
     }
 
     /// A reference written inside a module resolves the way Ruby resolves it:

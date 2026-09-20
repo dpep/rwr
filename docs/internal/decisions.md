@@ -2602,6 +2602,16 @@ dropping references would have made `Account` unable to reach `Premium` through 
 sibling in the namespace wins over the top-level namesake, as Ruby does it. Only the designator,
 which has no lexical position, gets the widening above.
 
+**Qualified means qualified** -- amended, because the first implementation did not check. `resolve`
+widened *any* name whose last segment had exactly one candidate, so on a run that could not see
+`Sales::Account` -- a path scope that excluded it, a file that failed to parse -- the designator
+`Sales::Account#display_name` resolved to `Billing::Account` and rewrote the class the caller had
+explicitly named around, at exit 0. The widening is what the rule sentence says it is: an escape for
+a name that did not say which namespace it meant. A written namespace is the caller being explicit,
+and it is the remedy this decision offers for ambiguity, which makes it the worst place to guess.
+The unit tests fed `resolve` only unqualified names, so they asserted the documented rule while the
+code implemented a wider one.
+
 **One spelling, not two.** `hierarchy::constant_name` is now `matcher::qualified` re-exported rather
 than a second implementation, and `links` names every class through the matcher's own
 `scope_name_of` / `enclosing_class`. Two modules that spell a class differently are talking about
