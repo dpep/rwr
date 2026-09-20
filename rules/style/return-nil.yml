@@ -10,3 +10,46 @@ tests:
       def a
         return
       end
+  # Two values, not one. `return nil, 1` returns `[nil, 1]`; dropping the `nil`
+  # would change the array, and `return, 1` is not even syntax.
+  - input: |
+      def a
+        return nil, 1
+      end
+    unchanged: true
+  # A splat is a different node and a different result -- `return *nil` is `[]`.
+  - input: |
+      def a
+        return *nil
+      end
+    unchanged: true
+  # Inside a block. `return` still returns from the enclosing method, and with
+  # nil either way, so the block is not the exception it looks like -- `next` and
+  # `break` are, and neither is what this pattern matches.
+  - input: |
+      def a
+        [1].each { return nil }
+      end
+    output: |
+      def a
+        [1].each { return }
+      end
+  # A lambda returns from itself rather than from `a`, which is the case where
+  # the two forms could have split. They do not: both yield nil.
+  - input: |
+      def a
+        -> { return nil }
+      end
+    output: |
+      def a
+        -> { return }
+      end
+  # The guard spelling, which is most of the real sites, with the modifier kept.
+  - input: |
+      def a
+        return nil if x
+      end
+    output: |
+      def a
+        return if x
+      end

@@ -6,3 +6,34 @@ tests:
       x = x + 1
     output: |
       x += 1
+  # The shape with a modifier, which is what the rule mostly meets in real code.
+  - input: |
+      d = d + options[:days] if options[:days]
+    output: |
+      d += options[:days] if options[:days]
+  # Two names that agree textually and are different storage. Matching across
+  # node kinds here would write the ivar from itself and drop the local -- the
+  # same confusion that made the shorthand rule rewrite `{a: :a}`.
+  - input: |
+      x = @x + 1
+    unchanged: true
+  - input: |
+      @x = x + 1
+    unchanged: true
+  # An explicit receiver is where `+=` stops being a spelling change: `foo.x +=
+  # 1` evaluates `foo` once where the long form evaluates it twice, so a
+  # receiver with side effects changes behaviour.
+  - input: |
+      foo.x = foo.x + 1
+    unchanged: true
+  # `x + 1 + 2` is `(x + 1) + 2`, whose receiver is not `x`. The pattern has to
+  # anchor at the top of the chain; matching inside it would re-associate the
+  # additions, which no custom `+` has to tolerate.
+  - input: |
+      x = x + 1 + 2
+    unchanged: true
+  # Modifier `rescue` binds tighter than `=`, so the original is
+  # `x = ((x + 1) rescue 0)` and `x += 1 rescue 0` is not the same guard.
+  - input: |
+      x = x + 1 rescue 0
+    unchanged: true
