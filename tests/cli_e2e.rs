@@ -2835,6 +2835,95 @@ fn a_signature_type_does_not_claim_a_namesakes_method() {
     assert!(helpers.contains("def label"), "{helpers}");
 }
 
+/// A signature belongs to the class that declares it, by its qualified name.
+///
+/// Keyed on the bare last segment, `Alpha::Parser` and `Beta::Parser` shared
+/// one entry and the last file read won -- so the same line of code got a
+/// different answer depending on which *other* files were in the run's path
+/// set, and a `spec/` double sharing a class name was enough to trigger it.
+/// The lookups were already qualified where the caller wrote a constant, so
+/// the two halves also disagreed within one file.
+#[test]
+fn namesake_classes_do_not_share_a_signature() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("base.rb"),
+        "class Widget\n  def display_name\n    \"w\"\n  end\nend\n\n\
+         class Gadget\n  def display_name\n    \"g\"\n  end\nend\n",
+    )
+    .expect("write");
+    let parser = |namespace: &str, returns: &str| {
+        format!(
+            "module {namespace}\n  class Parser\n    extend T::Sig\n\n    \
+             sig {{ returns({returns}) }}\n    def thing\n      @thing\n    end\n\n    \
+             def go\n      thing.display_name\n    end\n  end\nend\n"
+        )
+    };
+    std::fs::write(path.join("alpha.rb"), parser("Alpha", "Widget")).expect("write");
+    std::fs::write(path.join("beta.rb"), parser("Beta", "Gadget")).expect("write");
+    let find = |designator: &str, args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["find", designator])
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("binary runs");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // Each namespace's call answers to its own signature, and to no other.
+    let gadget = find("Gadget#display_name", &["."]);
+    assert!(gadget.contains("beta.rb"), "{gadget}");
+    assert!(
+        !gadget.contains("alpha.rb"),
+        "a namesake's signature was used: {gadget}"
+    );
+
+    // And the answer does not depend on what else the run happened to see:
+    // dropping the unrelated sibling file must not change beta's verdict.
+    let narrowed = find("Gadget#display_name", &["beta.rb", "base.rb"]);
+    assert!(narrowed.contains("beta.rb"), "{narrowed}");
+
+    // The other half of the same key: a receiver spelled as a constant is
+    // qualified, so a bare-keyed index resolved implicit self and declined the
+    // explicit call to the very same method.
+    std::fs::write(
+        path.join("runner.rb"),
+        "class Runner\n  def go\n    Alpha::Parser.new.thing.display_name\n  end\nend\n",
+    )
+    .expect("write");
+    let widget = find("Widget#display_name", &["."]);
+    assert!(
+        widget.contains("alpha.rb") && widget.contains("runner.rb"),
+        "one signature, two spellings of its class: {widget}"
+    );
+}
+
+/// `self` names the class it sits in, spelled in full.
+///
+/// Read as the innermost scope entry, it was the `class << self` marker inside
+/// a singleton body -- not a class name at all -- so `self.display_name` there
+/// was reported as unaccounted-for while the same call one line up, written
+/// without `self.`, was rewritten (FOLLOWUPS item 4).
+#[test]
+fn self_in_a_singleton_body_names_the_class() {
+    let dir = fixture(
+        "class Widget\n  class << self\n    def display_name\n      \"w\"\n    end\n\n    \
+         def go\n      self.display_name\n    end\n  end\nend\n",
+    );
+    let out = rwr(&[
+        "find",
+        "Widget.display_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.lines().count() == 2,
+        "the definition and its `self.` call: {text}"
+    );
+}
+
 /// `inside:` means one class, by its qualified name.
 ///
 /// Lexical nesting is *namespacing*, not membership: `class Account; class Row`

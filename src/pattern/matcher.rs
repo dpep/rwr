@@ -1071,8 +1071,11 @@ pub(crate) fn resolve_type(node: &Node<'_>, at: &Where<'_>) -> Option<Receiver> 
             })
             .map(Receiver::Class),
         // `self` is the class inside `def self.x` or `class << self`, and an
-        // instance inside an ordinary method body.
-        Node::SelfNode { .. } => scope.last().cloned().map(|n| {
+        // instance inside an ordinary method body. Named in full, the way a
+        // constant receiver is: the last segment alone is a different class
+        // from the one this code sits in whenever a namesake exists, and in a
+        // `class << self` body it is not a class name at all.
+        Node::SelfNode { .. } => enclosing_class(scope).map(|n| {
             if singleton {
                 Receiver::Class(n)
             } else {
@@ -1125,10 +1128,11 @@ pub(crate) fn resolve_type(node: &Node<'_>, at: &Where<'_>) -> Option<Receiver> 
                     let method = std::str::from_utf8(name.as_slice()).ok()?;
                     let on = match call.receiver() {
                         None => {
+                            let here = enclosing_class(scope)?;
                             if singleton {
-                                Receiver::Class(scope.last()?.clone())
+                                Receiver::Class(here)
                             } else {
-                                Receiver::Instance(scope.last()?.clone())
+                                Receiver::Instance(here)
                             }
                         }
                         Some(receiver) => resolve_type(&receiver, at)?,
@@ -1681,14 +1685,14 @@ fn walk<'pr>(
         // nothing about `x` on its own, and a parameter is what a guard usually
         // guards.
         if let Some(def) = target.as_def_node()
-            && let Some(class) = state.scope.last()
+            && let Some(class) = enclosing_class(&state.scope)
         {
             let singleton = def.receiver().is_some() || state.singleton;
             let method = String::from_utf8_lossy(def.name().as_slice()).into_owned();
             if let Some(params) =
                 criteria
                     .sigs
-                    .params(criteria.hierarchy, class, &method, singleton)
+                    .params(criteria.hierarchy, &class, &method, singleton)
             {
                 for (name, receiver) in params {
                     // Only instances. `locals` is read back as an instance

@@ -15,7 +15,7 @@
 
 use crate::hierarchy::Hierarchy;
 use crate::pattern::generated;
-use crate::pattern::matcher::{Receiver, enclosing_class};
+use crate::pattern::matcher::{Receiver, enclosing_class, scope_name_of};
 use crate::source::Source;
 use rayon::prelude::*;
 use ruby_prism::Node;
@@ -177,9 +177,10 @@ fn collect(
     // pairs are what has to be walked rather than nodes.
     if let Some(statements) = node.as_statements_node() {
         let body: Vec<Node<'_>> = statements.body().iter().collect();
-        // Where a type named here is written, which is what decides which
-        // class it names. Spelled by the matcher's own function so the two
-        // halves cannot drift into meaning different things by one name.
+        // The class these signatures are on, and the position their types are
+        // written at -- one and the same place. Spelled by the matcher's own
+        // functions, because the matcher is what looks this index up, and two
+        // spellings of one class is the split D100 exists to close.
         let here = enclosing_class(scope);
         let written = |receiver: Receiver| Written {
             receiver,
@@ -196,7 +197,7 @@ fn collect(
             if returns.is_none() && params.is_empty() {
                 continue;
             }
-            let Some(class) = scope.last() else { continue };
+            let Some(class) = &here else { continue };
             let returns = returns.clone().map(&written);
             let params: Vec<(String, Written)> = params
                 .iter()
@@ -213,7 +214,7 @@ fn collect(
         // `T::Struct` declares typed readers without a `sig`, in a single call:
         // `const :name, String`. Measured at 45,068 sites on a Sorbet monolith
         // against its 148,052 `sig` blocks -- far too many to leave unread.
-        if struct_body && let Some(class) = scope.last() {
+        if struct_body && let Some(class) = &here {
             for statement in &body {
                 if let Some((name, returns)) = struct_field(statement) {
                     out.push((
@@ -229,13 +230,16 @@ fn collect(
     let mut inner: Vec<String> = scope.to_vec();
     let mut inner_singleton = singleton;
     let mut inner_struct = struct_body;
+    // The matcher's own naming, not a second implementation of it: `class
+    // Account::Exporter` names `Account::Exporter`, and a `class << Foo` body
+    // belongs to Foo however it is nested.
+    if let Some(name) = scope_name_of(node) {
+        inner.push(name);
+    }
     match node {
         Node::ClassNode { .. } => {
             if let Some(class) = node.as_class_node() {
-                if let Ok(name) = String::from_utf8(class.name().as_slice().to_vec()) {
-                    inner.push(name);
-                    inner_singleton = false;
-                }
+                inner_singleton = false;
                 // Only a `T::Struct` and its kin declare fields this way, and
                 // `const` is an ordinary enough word that reading it anywhere
                 // else would invent types rather than narrow by them.
@@ -249,13 +253,6 @@ fn collect(
                             .map(|c| c.name().as_slice() == b"T")
                     })
                     .unwrap_or(false);
-            }
-        }
-        Node::ModuleNode { .. } => {
-            if let Some(module) = node.as_module_node()
-                && let Ok(name) = String::from_utf8(module.name().as_slice().to_vec())
-            {
-                inner.push(name);
             }
         }
         // Everything inside `class << self` defines singleton methods.
@@ -596,7 +593,7 @@ mod tests {
                       sig { returns(Thing) }\n    def thing; end\n  end\nend\n\nclass Thing; end\n";
         let (sigs, hierarchy) = looked_up(nested);
         assert_eq!(
-            sigs.returns(&hierarchy, "Parser", "thing", false),
+            sigs.returns(&hierarchy, "App::Parser", "thing", false),
             Some(Receiver::Instance("App::Thing".to_string()))
         );
 
@@ -607,6 +604,29 @@ mod tests {
             sigs.returns(&hierarchy, "Parser", "thing", false),
             Some(Receiver::Instance("Helpers::Thing".to_string()))
         );
+    }
+
+    /// Two classes with one short name are two classes. Keyed on the bare name
+    /// the index silently overwrote, so which type a call got depended on which
+    /// other files happened to be in the run's path set -- and on their order.
+    #[test]
+    fn namesake_classes_do_not_share_a_signature() {
+        let source = "class Widget; end\nclass Gadget; end\n\n\
+                      module Alpha\n  class Parser\n    sig { returns(Widget) }\n    \
+                      def thing; end\n  end\nend\n\n\
+                      module Beta\n  class Parser\n    sig { returns(Gadget) }\n    \
+                      def thing; end\n  end\nend\n";
+        let (sigs, hierarchy) = looked_up(source);
+        assert_eq!(
+            sigs.returns(&hierarchy, "Alpha::Parser", "thing", false),
+            Some(Receiver::Instance("Widget".to_string()))
+        );
+        assert_eq!(
+            sigs.returns(&hierarchy, "Beta::Parser", "thing", false),
+            Some(Receiver::Instance("Gadget".to_string()))
+        );
+        // Neither of them answers to the segment they share.
+        assert_eq!(sigs.returns(&hierarchy, "Parser", "thing", false), None);
     }
 
     /// A signature describes the *next* definition, and that is not always a

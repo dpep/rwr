@@ -1262,6 +1262,30 @@ The unit test pinned the bug rather than the rule — *"A constant path denotes 
 everywhere else in rwr"* — and the one e2e test used top-level classes with unambiguous names, so
 no fixture in the repo had a namespaced signature type and a namesake at once.
 
+**And the index is keyed on the qualified defining class** — amended, the same split on the other
+axis. The key's class component was `scope.last()`, the class's as-written last segment, and
+`insert` overwrites, so `Alpha::Parser` and `Beta::Parser` shared one entry and the last file read
+won. The answer therefore depended on **which unrelated files were in the run's path set** —
+adding a sibling file changed a verdict elsewhere — and on their order within one file. The
+realistic trigger is not two app namespaces but a `spec/` double sharing a class name with app
+code, since signatures are read from every file in scope.
+
+The lookups were already qualified wherever the caller spelled a receiver as a constant (that is
+what D100 did), so one signature resolved for `thing.display_name` and not for
+`Alpha::Parser.new.thing.display_name` in the same file. Both halves are one fix: `collect` now
+names its scope with `matcher::scope_name_of` and keys on `matcher::enclosing_class`, and the
+matcher's implicit-self, `self` and parameter lookups ask with the qualified name rather than the
+last segment. A namespaced class whose short name is unambiguous still resolves, through the
+hierarchy; where it is ambiguous the signature now declines, loudly, instead of guessing.
+
+Falling out of the `self` half: `self.foo` inside `class << self` resolved to the `<<self` marker,
+which is not a class name, so it was reported as unaccounted-for while the identical call written
+without `self.` was rewritten (FOLLOWUPS item 4). `enclosing_class` drops the marker, so it now
+resolves.
+
+Every `sigs` unit test used a single class called `C` or `Row`, and the e2e test a single file, so
+nothing in the suite had two classes that could collide.
+
 *Reverses if:* nothing about the feature itself. A repository without signatures is unaffected,
 and a type rwr cannot name still yields nothing rather than a guess. What has gone is the claim
 that a wrong answer here is harmless.
