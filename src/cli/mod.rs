@@ -538,12 +538,12 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// Emit one JSON document, rather than a list of them.
+/// Emit one report: `-j` pretty, `-J` the same object on one line.
 ///
-/// `-j` is a document and `-J` a stream, so a single report is an object under
-/// the first and one line under the second. Serialising it through the row path
-/// wrapped it in a one-element array, which every consumer then had to index
-/// past for no reason.
+/// Every verb emits the same document under both flags. A row-per-match stream
+/// was tried for `find` and is what D5 reversed: rows have nowhere to carry
+/// residue, the unread files or the reading taken, and a mode that cannot carry
+/// the account of blind spots is a mode rwr should not have.
 fn emit_document<T: Serialize>(out: Output, value: &T) -> Option<ExitCode> {
     let rendered = match out {
         Output::Json => serde_json::to_string_pretty(value),
@@ -558,34 +558,6 @@ fn emit_document<T: Serialize>(out: Output, value: &T) -> Option<ExitCode> {
             eprintln!("rwr: {e}");
             return Some(Exit::Error.into());
         }
-    }
-    None
-}
-
-/// Emit a row set: `--json` one pretty array, `--ndjson` one compact object
-/// per line (D23). Returns `Some(exit)` only on a serialisation failure.
-fn emit_rows<T: Serialize>(out: Output, rows: &[T]) -> Option<ExitCode> {
-    match out {
-        Output::Json => match serde_json::to_string_pretty(rows) {
-            Ok(s) => println!("{s}"),
-            Err(e) => {
-                eprintln!("rwr: {e}");
-                return Some(Exit::Error.into());
-            }
-        },
-        Output::Sarif => return None,
-        Output::Ndjson => {
-            for row in rows {
-                match serde_json::to_string(row) {
-                    Ok(line) => println!("{line}"),
-                    Err(e) => {
-                        eprintln!("rwr: {e}");
-                        return Some(Exit::Error.into());
-                    }
-                }
-            }
-        }
-        Output::Text => {}
     }
     None
 }
@@ -1315,10 +1287,12 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
             report_text_residue(&template_residue, templates_skipped);
         }
         _ => {
-            // `-j` is one document, so it carries what produced it. `-J` is a
-            // row per line by definition and cannot: a consumer choosing it has
-            // chosen a stream over a document.
-            let emitted = if out == Output::Json {
+            // One document under both flags, `-J` being the same thing on one
+            // line. `-J` used to emit bare match rows, which had nowhere to put
+            // residue or the unread files -- so the account of blind spots
+            // vanished for anyone who chose the stream, and the tool's central
+            // promise held or not depending on a flag.
+            let emitted = {
                 emit_document(
                     out,
                     &Matches {
@@ -1340,8 +1314,6 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                         interpreted: None,
                     },
                 )
-            } else {
-                emit_rows(out, &found)
             };
             if emitted.is_some() {
                 return Exit::Error.into();
@@ -2140,7 +2112,7 @@ fn cmd_apply(
             // consumer branches on the verb it ran, not on what it happened to
             // pass.
             let rows: Vec<Found> = findings.iter().map(Found::from).collect();
-            let emitted = if out == Output::Json {
+            let emitted = {
                 emit_document(
                     out,
                     &Matches {
@@ -2158,8 +2130,6 @@ fn cmd_apply(
                         interpreted: designator,
                     },
                 )
-            } else {
-                emit_rows(out, &rows)
             };
             if emitted.is_some() {
                 return Exit::Error.into();

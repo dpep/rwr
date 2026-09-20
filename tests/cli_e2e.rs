@@ -3142,3 +3142,43 @@ fn profile_does_not_count_an_unparsed_file_as_parsed() {
     assert!(line.contains("1 parsed"), "app.rb only: {line}");
     assert!(line.contains("1 unparsed"), "broken.rb: {line}");
 }
+
+/// `-J` is `-j` on one line, for every verb.
+///
+/// `find -J` used to emit a bare row per match, with nowhere to put residue,
+/// the files it could not read, or the reading it took of a designator -- so
+/// the account of blind spots held or not depending on which flag was passed.
+/// cli-conventions described a tagged event stream with a `finished`
+/// terminator; nothing in the binary ever emitted one, and narrowing the
+/// contract to one document per run is what D5 chose.
+#[test]
+fn ndjson_is_the_same_document_on_one_line() {
+    let dir = blind_spot_fixture();
+    let path = dir.path();
+
+    for args in [
+        vec!["find", "$R.display_name", "."],
+        vec!["find", "Account#display_name", "."],
+        vec!["check", "rename.yml", "."],
+    ] {
+        let mut stream = args.clone();
+        stream.push("-J");
+        let out = run_in(path, &stream);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            text.trim().lines().count(),
+            1,
+            "{args:?}: one document per run: {text}"
+        );
+        let streamed: serde_json::Value = serde_json::from_str(text.trim()).expect("json");
+
+        let mut document = args.clone();
+        document.push("-j");
+        let out = run_in(path, &document);
+        let pretty: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+        assert_eq!(streamed, pretty, "{args:?}: same document, different width");
+
+        // The thing the row shape could not carry.
+        assert!(streamed["unparsed"].is_array(), "{args:?}: {streamed}");
+    }
+}
