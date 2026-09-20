@@ -3263,3 +3263,43 @@ There is no receiver hazard to guard.
 *Reverses if:* a `where:` predicate can say "this expression's value is discarded", at which
 point the rule is a rewrite again and the fixtures below it already say what it should do.
 
+
+## D113 - `redundant-stub-return` matches an allowlist of chains, not a `contains:`
+
+**Decided.** "A stub returns nil already" holds only when nothing earlier in the chain set an
+implementation, and `contains: receive($M)` does not check that. Against rspec-mocks 3.13:
+
+| chain | with `and_return(nil)` | after removal |
+|---|---|---|
+| `receive(:each).and_yield(1).and_return(nil)` | `nil` | the yielded block's value |
+| `receive(:bar).and_return(1).and_return(nil)` | `nil` | `1` |
+| `receive(:bar).and_raise(Err).and_return(nil)` | `nil` | **raises** |
+| `receive(:bar) do 42 end.and_return(nil)` | `nil` | `42` |
+
+`and_raise` is the worst: the `and_return(nil)` was *suppressing* the raise, so a "redundant"
+removal converts a nil return into an exception.
+
+The match is now `receive($M).and_return(nil)` and `receive($M).with(*$A).and_return(nil)`.
+
+*Why an allowlist and not `name_not: [and_yield, and_raise, and_return]`.* A denylist restates
+rspec-mocks' set of implementation-setting methods and will drift from it the next time that
+gem grows one -- and it drifts *open*, rewriting the new spelling silently. This is the "cheap
+check that restates an expensive one" this codebase already refuses. Spelling the safe chains
+out fails closed: an unlisted chain is simply not matched.
+
+*It also closes the fourth row by construction.* `receive(:bar) do 42 end` binds its block to
+`to`, not to `receive`, so `contains:` found the bare `receive(:bar)` inside the whole
+`allow(...).to ... end` and admitted it -- while the brace spelling of the same program was
+correctly declined. A receiver that must *be* `receive($M)` never sees either.
+
+*The cost is nil, measured.* The two chains cover **11 of 11** sites on mastodon and **24 of
+24** on discourse -- every textual `and_return(nil)` in either repo. The hazardous chains do
+not occur there, so the narrowing loses no coverage and closes all four rows.
+
+*This reverses the reason `contains:` was chosen* -- reaching `with(1)` without spelling the
+chain out. Two rules spell it out instead, which is the trade: enumeration that fails closed
+over generality that fails open.
+
+*Reverses if:* rspec-mocks' chain API becomes enumerable from the gem rather than from memory,
+at which point a denylist derives from the original instead of restating it.
+
