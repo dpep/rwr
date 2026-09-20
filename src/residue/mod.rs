@@ -710,37 +710,56 @@ mod tests {
         assert!(reaches("\"#{x}\""));
     }
 
-    /// Residue survives the prefilter even though the engine wires in no
-    /// anchors.
+    /// The prefilter may never hide a file this report would have named.
     ///
-    /// `Filter::may_contribute` checks required literals conjunctively OR the
-    /// anchors, because residue is reported from files a rule does *not* match.
-    /// `Engine::new` passes `&[]` for anchors, which reads like a silent loss of
-    /// exactly that report -- and is not: `anchors` only returns a name when the
-    /// pattern is that name applied to metavariables, so the anchor is the
-    /// pattern's only literal identifier and the required check already covers
-    /// it.
+    /// A file is parsed only if its bytes pass `Filter::may_contribute`, so the
+    /// filter's reach bounds residue's reach -- and residue is reported from
+    /// files a rule does *not* match, which the required literals alone cannot
+    /// be relied on to admit.
     ///
-    /// Pinned because the invariant holds by coincidence rather than by
-    /// construction. The day `anchors` returns something `required` does not
-    /// extract, the engine silently stops reporting the blind spots it exists
-    /// for, and this is the test that says so.
+    /// This replaces a test that asserted the anchor was always one of the
+    /// required literals. That was true, by coincidence, and it is why the
+    /// engine could pass `&[]` for the residue side of every filter for a whole
+    /// release without a red test: the coincidence held for the patterns the
+    /// suite had, and said nothing about whether the engine wired anything in.
+    /// This asserts the property the filter is *for*, over patterns and sources
+    /// together, so a pattern whose anchor is not a required literal is covered
+    /// by the same words.
     #[test]
-    fn an_anchor_is_always_one_of_the_required_literals() {
-        for pattern in ["$R.display_name", "display_name", "$R.display_name($A)"] {
-            let prepared = crate::pattern::prepare::prepare(pattern).expect("prepares");
-            let parsed = ruby_prism::parse(prepared.source.as_bytes());
-            let root = matcher::pattern_root(&parsed.node()).expect("one expression");
-            let found = anchors(&root, &prepared);
-            assert!(!found.is_empty(), "{pattern} should anchor");
+    fn the_prefilter_admits_every_file_residue_would_report_from() {
+        let sources = [
+            "class Account\n  def display_name; 1; end\nend\n",
+            "class Account\n  attr_reader :display_name\nend\n",
+            "class Account\n  # display_name is the label\nend\n",
+            "class Account\n  delegate :display_name, to: :owner\nend\n",
+            "class Account\n  def go; raise \"display_name moved\"; end\nend\n",
+            "class Widget\n  def unrelated; 1; end\nend\n",
+        ];
+        for pattern in [
+            "$R.display_name",
+            "display_name",
+            "$R.display_name($A)",
+            "def display_name; $B; end",
+        ] {
+            let prepared = prepare::prepare(pattern).expect("prepares");
+            let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+            let p_node = p_parsed.node();
+            let p_root = matcher::pattern_root(&p_node).expect("one expression");
+            let filter = crate::pattern::prefilter::Filter::for_pattern(&p_root, &prepared);
+            let anchors = anchors(&p_root, &prepared);
 
-            let required = crate::pattern::prefilter::required(pattern);
-            for a in &found {
-                let a = String::from_utf8_lossy(a).into_owned();
+            for source in sources {
+                let parsed = ruby_prism::parse(source.as_bytes());
+                let mut would = find(&parsed.node(), &anchors, &[], source.as_bytes());
+                would.extend(in_comments(&parsed, &anchors, source.as_bytes()));
+                if would.is_empty() {
+                    continue;
+                }
                 assert!(
-                    required.contains(&a),
-                    "{pattern}: anchor {a:?} missing from required {required:?} -- \
-                     Engine::new must start passing anchors to Filter::new"
+                    filter.may_contribute(source.as_bytes()),
+                    "{pattern} reports {} occurrence(s) in {source:?}, \
+                     but the prefilter would never let the file be parsed",
+                    would.len()
                 );
             }
         }

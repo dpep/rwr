@@ -317,9 +317,17 @@ impl Engine {
             })
             .collect();
 
-        let filters: Vec<prefilter::Filter> = rules
+        let filters: Vec<prefilter::Filter> = prepareds
             .iter()
-            .map(|r| prefilter::Filter::new(&prefilter::required(&r.pattern), &[]))
+            .map(|prepared| {
+                let parsed = ruby_prism::parse(prepared.source.as_bytes());
+                match matcher::pattern_root(&parsed.node()) {
+                    Some(root) => prefilter::Filter::for_pattern(&root, prepared),
+                    // Unreachable: the loop above refuses a pattern that is not
+                    // one expression. Filtering nothing is the safe reading.
+                    None => prefilter::Filter::new(&[], &[]),
+                }
+            })
             .collect();
 
         let anchor = rules.iter().find_map(rule::Rule::class_anchor);

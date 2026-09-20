@@ -15,6 +15,9 @@
 //! filters nothing.
 
 use super::metavar;
+use super::prepare::Prepared;
+use crate::residue;
+use ruby_prism::Node;
 
 /// Identifiers a pattern requires the source to contain.
 ///
@@ -52,6 +55,19 @@ pub(crate) fn required(pattern: &str) -> Vec<String> {
     out
 }
 
+/// As [`required`], from the prepared form rather than the pattern text.
+///
+/// Substitution copies the pattern verbatim except at metavariable spans, so
+/// dropping the placeholders leaves exactly what `required` extracts from the
+/// original -- pinned by `substitution_does_not_change_the_required_literals`.
+/// Deriving it here is what lets [`Filter::for_pattern`] take the pattern alone.
+fn required_of(prepared: &Prepared) -> Vec<String> {
+    required(&prepared.source)
+        .into_iter()
+        .filter(|word| !prepared.bindings.contains_key(word))
+        .collect()
+}
+
 fn is_start(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_'
 }
@@ -68,17 +84,32 @@ fn is_body(b: u8) -> bool {
 /// once matters because it precomputes a skip table.
 pub(crate) struct Filter {
     required: Vec<memchr::memmem::Finder<'static>>,
-    anchors: Vec<memchr::memmem::Finder<'static>>,
+    residue: Vec<memchr::memmem::Finder<'static>>,
 }
 
 impl Filter {
-    pub(crate) fn new(required: &[String], anchors: &[Vec<u8>]) -> Self {
+    /// Both literal sets derived from the one pattern, so neither can be
+    /// forgotten.
+    ///
+    /// They were two arguments once, supplied independently as data, and
+    /// `Engine::new` passed `&[]` for the residue side of every rule it built.
+    /// That is well typed, silent, and indistinguishable from a pattern that
+    /// anchors on nothing -- and it cost the blind-spot report on every file
+    /// the required literals alone could not admit.
+    pub(crate) fn for_pattern(root: &Node<'_>, prepared: &Prepared) -> Self {
+        Filter::new(&required_of(prepared), &residue::anchors(root, prepared))
+    }
+
+    /// The two sets supplied separately, which is how the residue side came to
+    /// be forgotten. `cli::cmd_find` is the last caller; fold it into
+    /// [`Filter::for_pattern`] and this can go `#[cfg(test)]`.
+    pub(crate) fn new(required: &[String], residue: &[Vec<u8>]) -> Self {
         Filter {
             required: required
                 .iter()
                 .map(|r| memchr::memmem::Finder::new(r.as_bytes()).into_owned())
                 .collect(),
-            anchors: anchors
+            residue: residue
                 .iter()
                 .map(|a| memchr::memmem::Finder::new(a.as_slice()).into_owned())
                 .collect(),
@@ -87,9 +118,9 @@ impl Filter {
 
     /// Whether a file could contribute either a match or a residue occurrence.
     ///
-    /// A match needs **every** required literal present. Residue needs only the
-    /// anchor, and is reported from files a rule does not match -- a
-    /// declaration file, say -- so the two are checked separately rather than
+    /// A match needs **every** required literal present. Residue needs any one
+    /// of its own literals, and is reported from files a rule does not match --
+    /// a declaration file, say -- so the two are checked separately rather than
     /// conjunctively. Getting that wrong would silently drop exactly the
     /// blind-spot report the design exists to produce.
     pub(crate) fn may_contribute(&self, source: &[u8]) -> bool {
@@ -99,7 +130,7 @@ impl Filter {
         if self.required.iter().all(|f| f.find(source).is_some()) {
             return true;
         }
-        self.anchors.iter().any(|f| f.find(source).is_some())
+        self.residue.iter().any(|f| f.find(source).is_some())
     }
 }
 
@@ -139,6 +170,27 @@ mod tests {
         let filter = Filter::new(&required("return nil"), &[]);
         assert!(filter.may_contribute(b"def a; return nil; end"));
         assert!(!filter.may_contribute(b"def a; 1; end"));
+    }
+
+    /// `for_pattern` reads the required literals off the *substituted* source,
+    /// which is only sound if substitution leaves everything else alone.
+    #[test]
+    fn substitution_does_not_change_the_required_literals() {
+        for pattern in [
+            "$R.display_name",
+            "foo($A, $B)",
+            "$R.select { |$P| $B }.first",
+            "def display_name($A); $B; end",
+            "$R.active?",
+            "Foo::$C.bar(*$A)",
+            "attr_reader :display_name",
+        ] {
+            let prepared = super::super::prepare::prepare(pattern).expect("prepares");
+            let (mut from_text, mut from_prepared) = (required(pattern), required_of(&prepared));
+            from_text.sort();
+            from_prepared.sort();
+            assert_eq!(from_text, from_prepared, "{pattern}");
+        }
     }
 
     /// Residue is reported from files a rule does not match, so the anchor
