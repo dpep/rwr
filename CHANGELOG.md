@@ -29,6 +29,35 @@ only calls and symbols, so it pointed you at symbols while a `definition` — th
 means the rewrite you just applied does not hold together — went unnamed and could fall inside the
 "and N more".
 
+**Fixed: rewriting an expression containing a heredoc ate the newline after its terminator.**
+Deleting or replacing a heredoc argument fused the following statement onto the replacement —
+`foo(<<~EOS) … EOS` then `baz` rewrote to `barbaz`, with `baz` becoming an argument. The result
+parsed, so nothing reported it. Prism's `closing_loc` slice is literally `EOS\n`, and
+`effective_range` unioned the line break that belongs to the statement list rather than the node.
+
+**Fixed: a rule whose `match:` continues past the block left the trailing element behind when the
+expression contained a heredoc.** `<<~TXT.lines.select { … }.size` rewrote to `…count { … }.size`,
+applying `.size` to an Integer and silently changing the value. Both symptoms are one cause — the
+range used for the splice was not the range the match covers — and the heredoc guard that already
+existed simply never reached these rules. Affected `performance/count`, `detect`, `exists`,
+`filter-map` and `find-by`; no rule needed changing (D111).
+
+**`performance/reverse-each` now reports instead of rewriting.** `each` returns its receiver, so
+`reverse.each` and `reverse_each` evaluate to different things wherever the value is not discarded,
+and a rule cannot tell which. It still finds every site; applying one is now your call. **If you ran
+this rule, the sites it rewrote are worth a look** — any where the value was assigned, chained,
+returned or passed as an argument changed meaning (D112).
+
+**`rspec/redundant-stub-return` now matches only `receive(:m).and_return(nil)` and
+`receive(:m).with(…).and_return(nil)`.** It previously removed the clause from chains that had
+already set an implementation — after `and_yield`, after an earlier `and_return`, after `and_raise`
+(where `and_return(nil)` was *suppressing* the raise), and from a `do`/`end` block implementation.
+**If you ran this rule, check any stub whose chain had more than `with` in it** (D113).
+
+**`performance/string-replacement`'s unsafe note was wrong.** It warned about `tr`'s `^` negation and
+trailing backslash, both of which are literals at single-character length; it now names the receiver
+instead. No change to what the rule matches.
+
 **A `# rwr:ignore` directive can no longer accept half a rename.** A rename is one edit across a
 definition and every call site, so a directive on either end left the other calling a method that no
 longer exists — and `rewrite` exited 0 having written it, while `check` on the same tree exited 1.
