@@ -70,6 +70,19 @@ The marker has to **open the comment**: `# rwr:ignore style/no-sleep` is a direc
 the marker suppresses nothing, so writing about the convention never silences the code you were
 writing about. A space after the `#` is optional.
 
+**Directives do not work in templates** — `.erb`, `.haml`, `.slim`. rwr reads an
+ERB template by stitching its tag bodies into one Ruby program, which discards
+the HTML between them, so "the statement below this comment" no longer means
+what you wrote; Haml and Slim are not parsed at all. A directive there is
+reported rather than silently ignored:
+
+```
+rwr: 1 rwr:ignore directive(s) in template file(s) -- rwr does not honour directives in templates, so they suppressed nothing:
+  app/views/accounts/show.erb:4
+```
+
+If you need the exception, put it on the Ruby the template calls.
+
 There is deliberately **no `disable`/`enable` block form**. A forgotten
 terminator silently suppresses the rest of a file, which is the invisible blind
 spot rwr exists to refuse. If you need a wider exception than a statement, the

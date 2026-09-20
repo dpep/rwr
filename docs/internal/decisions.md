@@ -1752,6 +1752,23 @@ rest of a file, which is the invisible blind spot this tool exists to refuse. A 
 terminator only converts that into "hope the reviewer notices it is 400 lines down". Node
 scoping gets the useful part of a block with nothing to forget to close.
 
+**A directive in a template is reported, never honoured.** The template pass ran its own matcher
+loop and never read directives at all, so one in an ERB or Haml file neither suppressed nor was
+reported stale, unknown or malformed, while `rewrite` edited the site anyway. Both halves missing
+is the outcome this decision exists to forbid.
+
+Reporting is the whole of the answer, because honouring cannot be stated honestly. ERB is matched
+by stitching its tag bodies into one Ruby program, which discards the template's line structure:
+two tags six lines of HTML apart become adjacent lines, so the node scoping above would attach a
+directive to a subject the author cannot see it next to, and D35's "a blank line ends the search"
+has nothing left to mean. Haml and Slim are never parsed at all, so there is no node to scope to.
+Honouring it in the one dialect where the machinery happens to reach would be a rule nobody could
+state, and the two dialects would disagree silently.
+
+They are read as text rather than through each dialect's comment syntax -- three re-derivations
+is the cheap check that drifts from the expensive one -- so a bare mention of the marker in
+rendered prose is reported too. That costs a line of stderr; the other direction costs the silence.
+
 **Rule ids are mandatory.** A bare `# rwr:ignore` is a blanket blind spot that no staleness
 check can audit, so it is reported as malformed and suppresses nothing. A directive naming a
 rule outside the current run is left alone: it belongs to another pack, and it is neither

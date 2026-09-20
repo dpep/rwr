@@ -144,6 +144,37 @@ fn body(comment: &str) -> Option<&str> {
     (rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c == ',')).then_some(rest)
 }
 
+/// The rule ids a directive body names, deduplicated, in the order written.
+///
+/// A reason is the natural thing to write next to a suppression, and taking it
+/// as part of a rule name meant the directive silently named a rule nothing has
+/// -- neither honoured nor reported stale, because an unknown id is assumed to
+/// belong to another pack.
+///
+/// A name written twice is one name. Staleness and the unknown-id report each
+/// walk the list once per entry, so a repeat printed one comment's `file:line`
+/// twice and counted it twice. Deduplicated here rather than at either report,
+/// so the two cannot disagree.
+fn names(rest: &str) -> Vec<String> {
+    let named = rest.split(" -- ").next().unwrap_or(rest);
+    let mut rules: Vec<String> = named
+        .split([',', ' ', '\t'])
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(str::to_string)
+        .collect();
+    // A handful of names, so order is kept by scanning rather than sorting.
+    let mut seen = Vec::with_capacity(rules.len());
+    rules.retain(|r| {
+        let fresh = !seen.contains(r);
+        if fresh {
+            seen.push(r.clone());
+        }
+        fresh
+    });
+    rules
+}
+
 /// Whether a comment is an instruction addressed to rwr rather than prose.
 ///
 /// D72's "never counted as residue" half, and the *only* reader of a directive's
@@ -157,6 +188,53 @@ fn body(comment: &str) -> Option<&str> {
 /// reported as such; it is no more prose than a well-formed one.
 pub(crate) fn is_directive(comment: &str) -> bool {
     body(comment).is_some()
+}
+
+/// A directive written in a template, which rwr does not honour.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct InTemplate {
+    pub(crate) file: String,
+    pub(crate) line: usize,
+    /// The ids named, empty when the directive named none.
+    pub(crate) rules: Vec<String>,
+}
+
+/// Directives written in a template.
+///
+/// **Reported, never honoured** -- and reporting is the whole of the fix, since
+/// both halves missing is the one outcome D72 forbids. rwr cannot honour one
+/// faithfully: ERB is matched by stitching its tag bodies into one Ruby program,
+/// which collapses the template's line structure, so two tags six lines of HTML
+/// apart become adjacent lines and D72's node scoping would attach a directive
+/// to a subject the author cannot see it next to. Haml and Slim are never parsed
+/// at all, so there is no node to scope to. Honouring it in the one dialect
+/// where the machinery happens to reach would be a rule nobody could state.
+///
+/// Read as text, because the alternative is re-deriving three template
+/// languages' comment syntax -- exactly the cheap check that drifts from the
+/// expensive one. So a bare mention of the marker in rendered prose is reported
+/// too. That errs toward a spare line of stderr; the other direction is the
+/// silence this mechanism may never produce.
+pub(crate) fn in_template(source: &[u8], file: &str) -> Vec<InTemplate> {
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    memchr::memmem::find_iter(source, MARKER.as_bytes())
+        .filter(|at| {
+            at.checked_sub(1).is_none_or(|i| !is_word(source[i]))
+                && source.get(at + MARKER.len()).is_none_or(|b| !is_word(*b))
+        })
+        .map(|at| {
+            let rest = &source[at + MARKER.len()..];
+            let rest = &rest[..memchr::memchr(b'\n', rest).unwrap_or(rest.len())];
+            let rest = String::from_utf8_lossy(rest).into_owned();
+            // `<%# rwr:ignore a/b %>` would otherwise name `%>` as a rule.
+            let rest = rest.split("%>").next().unwrap_or(&rest);
+            InTemplate {
+                file: file.to_string(),
+                line: crate::source::line_col(source, at).0,
+                rules: names(rest),
+            }
+        })
+        .collect()
 }
 
 /// Read every directive in a source.
@@ -188,30 +266,7 @@ pub(crate) fn directives(
         let Some(rest) = body(&text) else { continue };
         let line = crate::source::line_col(source, location.start_offset()).0;
 
-        // A reason is the natural thing to write next to a suppression, and
-        // taking it as part of a rule name meant the directive silently named a
-        // rule nothing has -- neither honoured nor reported stale, because an
-        // unknown id is assumed to belong to another pack.
-        let named = rest.split(" -- ").next().unwrap_or(rest);
-        let mut rules: Vec<String> = named
-            .split([',', ' ', '\t'])
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-            .map(str::to_string)
-            .collect();
-        // A name written twice is one name. Staleness and the unknown-id
-        // report each walk `rules` once per entry, so a repeat printed one
-        // comment's `file:line` twice and counted it twice. Deduplicated here
-        // rather than at either report, so the two cannot disagree; the list
-        // is a handful of names, so order is kept by scanning it.
-        let mut seen = Vec::with_capacity(rules.len());
-        rules.retain(|r| {
-            let fresh = !seen.contains(r);
-            if fresh {
-                seen.push(r.clone());
-            }
-            fresh
-        });
+        let rules = names(rest);
         if rules.is_empty() {
             // A blanket ignore is a blind spot nothing can audit, so it is an
             // error rather than a very effective directive.
@@ -601,6 +656,46 @@ mod tests {
         let (found, _) = read(src);
         let taken = covering(&found, Some("a/b"), at(src, "return nil")).expect("covered");
         assert_eq!(taken.line, 1);
+    }
+
+    /// A template directive is read out of the raw text, in every dialect --
+    /// the template pass never looked for one at all, so an ERB or Haml
+    /// directive neither suppressed nor was reported.
+    #[test]
+    fn a_template_directive_is_read_in_every_dialect() {
+        for (dialect, text) in [
+            ("erb", "<div>\n  <%# rwr:ignore a/b %>\n</div>\n"),
+            ("haml", "%div\n  -# rwr:ignore a/b\n"),
+            ("slim", "div\n  / rwr:ignore a/b\n"),
+        ] {
+            let found = in_template(text.as_bytes(), "v");
+            assert_eq!(found.len(), 1, "{dialect}");
+            assert_eq!(found[0].rules, vec!["a/b"], "{dialect}");
+            assert_eq!(found[0].line, 2, "{dialect}");
+        }
+    }
+
+    /// The ERB tag close is not a rule name. Splitting the rest of the line on
+    /// whitespace alone would report `%>` as a rule this run does not have.
+    #[test]
+    fn a_tag_close_is_not_a_rule_name() {
+        let found = in_template(b"<%# rwr:ignore a/b, c/d %>\n", "v");
+        assert_eq!(found[0].rules, vec!["a/b", "c/d"]);
+    }
+
+    /// A bare one names no rule. Reported all the same -- in a template the
+    /// whole category is "this did nothing", so there is nothing to tell apart.
+    #[test]
+    fn a_bare_template_directive_is_still_reported() {
+        let found = in_template(b"%div\n  -# rwr:ignore\n", "v");
+        assert_eq!(found.len(), 1);
+        assert!(found[0].rules.is_empty());
+    }
+
+    /// Whole word, as in Ruby: `rwr:ignored` is English.
+    #[test]
+    fn a_longer_word_is_not_the_marker_in_a_template_either() {
+        assert!(in_template(b"<%# rwr:ignored by policy %>\n", "v").is_empty());
     }
 
     #[test]

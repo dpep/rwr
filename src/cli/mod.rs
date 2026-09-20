@@ -613,6 +613,7 @@ fn report_suppressions(
     stale: &[crate::suppress::Stale],
     unknown: &[crate::suppress::Unknown],
     malformed: &[crate::suppress::Malformed],
+    in_templates: &[crate::suppress::InTemplate],
 ) {
     if !suppressed.is_empty() {
         eprintln!(
@@ -663,6 +664,39 @@ fn report_suppressions(
     for d in malformed {
         eprintln!("rwr: {}:{}: rwr:ignore {}", d.file, d.line, d.why);
     }
+    if !in_templates.is_empty() {
+        // The template pass never read these at all: they did not suppress,
+        // and nothing said so. rwr cannot honour one -- ERB's tag bodies are
+        // stitched into one program, which collapses the line structure a
+        // directive's scoping depends on, and Haml and Slim are never parsed
+        // -- so saying plainly that it did nothing is the whole of the answer.
+        eprintln!(
+            "rwr: {} rwr:ignore directive(s) in template file(s) -- rwr does not honour \
+             directives in templates, so they suppressed nothing:",
+            in_templates.len()
+        );
+        for d in in_templates.iter().take(RESIDUE_DETAIL_CAP) {
+            eprintln!("  {}:{}", d.file, d.line);
+        }
+        if in_templates.len() > RESIDUE_DETAIL_CAP {
+            eprintln!("  ... and {} more", in_templates.len() - RESIDUE_DETAIL_CAP);
+        }
+    }
+}
+
+/// Directives written in the templates a run walked past.
+///
+/// Read here rather than in the template matcher loop, because a template that
+/// does not parse never reaches that loop and a directive in one is exactly as
+/// inert -- and exactly as much owed a report.
+fn template_directives(templates: &[std::path::PathBuf]) -> Vec<crate::suppress::InTemplate> {
+    templates
+        .iter()
+        .flat_map(|path| {
+            let source = source::open(path);
+            crate::suppress::in_template(source.bytes(), &path.display().to_string())
+        })
+        .collect()
 }
 
 /// Say why candidates were declined.
@@ -1421,6 +1455,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                             stale_suppressions: &[],
                             unknown_suppressions: &[],
                             malformed_directives: &[],
+                            template_directives: &[],
                         },
                         unseen: Unseen {
                             template_residue: &template_residue,
@@ -1543,6 +1578,11 @@ struct Audit<'a> {
     unknown_suppressions: &'a [crate::suppress::Unknown],
     /// Directives naming no rule.
     malformed_directives: &'a [crate::suppress::Malformed],
+    /// Directives written in a template, which rwr does not honour. Additive
+    /// and absent when there are none, so `REPORT_SCHEMA` stays where it is and
+    /// a consumer that has never seen it reads the document it always did.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    template_directives: &'a [crate::suppress::InTemplate],
 }
 
 /// What running the rules over one template produced.
@@ -2131,6 +2171,9 @@ fn cmd_apply(
         .iter()
         .flat_map(|o| o.scanned.malformed.iter().cloned())
         .collect();
+    // Over every template the walk found, not only the ones that parsed: a
+    // directive is as inert in a template rwr could not read as in one it could.
+    let in_templates = template_directives(&templates);
 
     let mut widened: Vec<crate::engine::Widened> = outcomes
         .iter()
@@ -2188,7 +2231,7 @@ fn cmd_apply(
             report_unsafe(&changed, rules);
             report_widened(&widened);
             report_rejections(&rejections);
-            report_suppressions(&suppressed, &stale, &unknown, &malformed);
+            report_suppressions(&suppressed, &stale, &unknown, &malformed, &in_templates);
             report_unread(&unparsed, &unreadable);
             report_residue(&left_over);
             // Only the templates that fell back: one rwr parsed has real
@@ -2213,6 +2256,7 @@ fn cmd_apply(
                             stale_suppressions: &stale,
                             unknown_suppressions: &unknown,
                             malformed_directives: &malformed,
+                            template_directives: &in_templates,
                         },
                         unseen: Unseen {
                             template_residue: &left_over_text,
@@ -2245,6 +2289,7 @@ fn cmd_apply(
                     stale_suppressions: &stale,
                     unknown_suppressions: &unknown,
                     malformed_directives: &malformed,
+                    template_directives: &in_templates,
                 },
                 unseen: Unseen {
                     template_residue: &left_over_text,

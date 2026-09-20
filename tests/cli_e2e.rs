@@ -2397,6 +2397,79 @@ fn suppressions_are_always_in_structured_output() {
 /// The template pass used to `continue` past both a `plan` refusal and a
 /// cross-tag `splice` refusal -- no count, no report, no exit code -- while the
 /// `.rb` path reported the same refusal and exited 5. "Never silently drop an
+/// A directive in a template is not honoured -- and is reported, so it is not
+/// silently inert.
+///
+/// The template pass runs its own matcher loop and never read directives at
+/// all: one in an ERB or Haml file did not suppress, and was reported neither
+/// stale, unknown nor malformed, while `rewrite` edited the site anyway. Both
+/// halves missing is the one outcome D72 forbids.
+#[test]
+fn a_directive_in_a_template_is_reported_rather_than_silently_inert() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("account.rb"),
+        "class Account\n  def display_name\n    \"x\"\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("page.erb"),
+        "<div>\n  <%# rwr:ignore Account#display_name %>\n  \
+         <%= Account.new.display_name %>\n</div>\n",
+    )
+    .expect("write");
+    // Even a bare one, which in Ruby is reported as malformed.
+    std::fs::write(
+        path.join("bare.haml"),
+        "%div\n  -# rwr:ignore\n  = Account.new.display_name\n",
+    )
+    .expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args([
+            "check",
+            "Account#display_name",
+            "-r",
+            "full_name",
+            ".",
+            "-j",
+        ])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let found = doc["template_directives"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(found.len(), 2, "both templates are named: {doc}");
+    let files: Vec<&str> = found.iter().filter_map(|d| d["file"].as_str()).collect();
+    assert!(files.iter().any(|f| f.ends_with("page.erb")), "{doc}");
+    assert!(files.iter().any(|f| f.ends_with("bare.haml")), "{doc}");
+
+    // Said in the text report too, unconditionally -- a suppression that
+    // silences itself is the one thing this mechanism may never do.
+    let text = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "Account#display_name", "-r", "full_name", "."])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    let err = stderr(&text);
+    assert!(
+        err.contains("2 rwr:ignore directive(s) in template file(s)"),
+        "{err}"
+    );
+
+    // It did not suppress: the site is still counted, which is the honest half.
+    assert!(
+        doc["changed"].as_array().is_some_and(|c| c
+            .iter()
+            .any(|f| f["file"].as_str().is_some_and(|n| n.ends_with("page.erb")))),
+        "the template site is still reported: {doc}"
+    );
+}
+
 /// edit" is the second first principle, and the failure DESIGN.md names ast-grep
 /// and Synvert for.
 #[test]
