@@ -1237,6 +1237,59 @@ fn a_line_scope_also_bounds_the_suppression_audit() {
     );
 }
 
+/// Overlapping path arguments name one tree, not two.
+///
+/// `rwr rewrite all w.rb w.rb` reported "rewrote 1 site(s)" twice, and
+/// `rwr check all z.rb .` counted every file in the repo twice -- including the
+/// suppression audit, so the number a reviewer acts on doubled. The union of
+/// two overlapping path sets has one unambiguous answer, so this is
+/// deduplicated rather than refused: nothing is being guessed at.
+#[test]
+fn overlapping_paths_are_walked_once() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::create_dir_all(path.join("app/models")).expect("mkdir");
+    std::fs::write(
+        path.join("app/models/m.rb"),
+        "def m\n  return nil  # rwr:ignore style/return-nil\nend\ndef n\n  return nil\nend\n",
+    )
+    .expect("write");
+
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("binary runs");
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("json")
+    };
+
+    for paths in [
+        // The same file named twice.
+        vec!["app/models/m.rb", "app/models/m.rb"],
+        // A file and the root that holds it, spelled differently.
+        vec!["app/models/m.rb", "."],
+        // A directory and a directory inside it.
+        vec!["app", "app/models"],
+    ] {
+        let mut args = vec!["check", "style/return-nil"];
+        args.extend(paths.iter().copied());
+        args.push("-j");
+        let doc = run(&args);
+        assert_eq!(
+            doc["changed"].as_array().map(Vec::len),
+            Some(1),
+            "one file, once: {paths:?} -> {doc}"
+        );
+        assert_eq!(doc["changed"][0]["sites"], 1, "{paths:?} -> {doc}");
+        assert_eq!(
+            doc["suppressed"].as_array().map(Vec::len),
+            Some(1),
+            "the audit doubles with the walk: {paths:?} -> {doc}"
+        );
+    }
+}
+
 /// `--since main` is `main...HEAD`, not `main..HEAD`. Two-dot reports whatever
 /// the base gained meanwhile as though this branch had written it.
 #[test]

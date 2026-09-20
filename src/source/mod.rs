@@ -110,6 +110,47 @@ pub(crate) fn is_ruby(path: &Path) -> bool {
         .is_some_and(|n| RUBY_FILENAMES.contains(&n))
 }
 
+/// Drop every root another root already covers.
+///
+/// Resolved before comparing, because `z.rb` and `./z.rb` are the same file
+/// spelled two ways and the walk would otherwise yield both. Compared as paths
+/// rather than as strings, so `/a/bc` is not "inside" `/a/b`.
+///
+/// Duplicates keep the first spelling, so the report names the path the caller
+/// wrote first rather than one it picked.
+fn prune_contained<'a>(roots: &[&'a str]) -> Vec<&'a str> {
+    if roots.len() < 2 {
+        return roots.to_vec();
+    }
+    let real: Vec<PathBuf> = roots
+        .iter()
+        .map(|r| {
+            Path::new(r)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(r))
+        })
+        .collect();
+    let kept: Vec<&str> = roots
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            !real.iter().enumerate().any(|(j, other)| {
+                // Dropped by a strict ancestor, or by an identical root
+                // earlier in the list -- so one of a duplicated pair lives.
+                j != *i && real[*i].starts_with(other) && (real[*i] != *other || j < *i)
+            })
+        })
+        .map(|(_, r)| *r)
+        .collect();
+    // Nothing can eliminate every root, but a walk over no roots would silently
+    // check nothing -- the vacuous green this tool exists to refuse.
+    if kept.is_empty() {
+        roots.to_vec()
+    } else {
+        kept
+    }
+}
+
 /// Ruby files under `roots`, gitignore-aware, and how many templates were
 /// walked past.
 ///
@@ -123,6 +164,18 @@ pub(crate) fn walk(roots: &[String], include_vendored: bool) -> (Vec<PathBuf>, V
         roots.iter().map(String::as_str).collect()
     };
 
+    // Overlapping roots name one tree, not two. `rwr rewrite all w.rb w.rb`
+    // reported "rewrote 1 site(s)" twice and `rwr check all z.rb .` counted
+    // every file in the repo twice, the suppression audit included -- and
+    // `check app/ app/models/` is the same bug wearing a plausible shape.
+    //
+    // Pruned at the root rather than deduplicated per file: a contained root
+    // adds nothing its container does not already walk, so the walker never
+    // visits the file twice and there is no per-file syscall on a tree of
+    // eleven thousand. Deduplicated rather than refused because the union of
+    // two overlapping path sets has one unambiguous answer -- refusal is for
+    // ambiguity, and there is none here.
+    let roots = prune_contained(&roots);
     let mut builder = WalkBuilder::new(roots[0]);
     for extra in &roots[1..] {
         builder.add(extra);
@@ -283,6 +336,74 @@ pub(crate) fn line_at(source: &[u8], offset: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Roots that exist on disk, since the resolved paths are what is compared
+    /// and a test over names that do not exist only ever exercises the
+    /// fallback.
+    fn in_a_tree<T>(dirs: &[&str], f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        for dir in dirs {
+            std::fs::create_dir_all(tmp.path().join(dir)).expect("mkdir");
+        }
+        f(tmp.path())
+    }
+
+    /// A sibling whose name merely *starts with* another root's is not inside
+    /// it. Comparing the spellings as strings would drop `app/modelsx` for
+    /// `app/models`, and a root dropped by mistake is a tree nobody checked --
+    /// silent, because a pruned root is indistinguishable from an empty one.
+    #[test]
+    fn a_name_prefix_is_not_containment() {
+        in_a_tree(&["app/models", "app/modelsx"], |root| {
+            let (a, b) = (
+                root.join("app/models").display().to_string(),
+                root.join("app/modelsx").display().to_string(),
+            );
+            assert_eq!(prune_contained(&[&a, &b]), vec![a.as_str(), b.as_str()]);
+        });
+    }
+
+    /// Unrelated roots are all kept; a strict ancestor absorbs its descendant,
+    /// whichever order they were written in.
+    #[test]
+    fn only_a_contained_root_is_dropped() {
+        in_a_tree(&["app/models", "lib"], |root| {
+            let (app, models, lib) = (
+                root.join("app").display().to_string(),
+                root.join("app/models").display().to_string(),
+                root.join("lib").display().to_string(),
+            );
+            assert_eq!(
+                prune_contained(&[&app, &lib]),
+                vec![app.as_str(), lib.as_str()]
+            );
+            assert_eq!(prune_contained(&[&app, &models]), vec![app.as_str()]);
+            assert_eq!(prune_contained(&[&models, &app]), vec![app.as_str()]);
+        });
+    }
+
+    /// The two spellings of one file, which is how `rwr check z.rb .` counted
+    /// the whole repo twice.
+    #[test]
+    fn the_same_place_spelled_two_ways_is_one_root() {
+        in_a_tree(&["app"], |root| {
+            let (plain, dotted) = (
+                root.join("app").display().to_string(),
+                root.join("./app").display().to_string(),
+            );
+            assert_eq!(prune_contained(&[&plain, &dotted]), vec![plain.as_str()]);
+        });
+    }
+
+    /// One of a duplicated pair survives, and it is the first spelling -- a
+    /// filter that dropped both would leave the walk with nothing to do.
+    #[test]
+    fn a_repeated_root_survives_once() {
+        in_a_tree(&["app"], |root| {
+            let app = root.join("app").display().to_string();
+            assert_eq!(prune_contained(&[&app, &app, &app]), vec![app.as_str()]);
+        });
+    }
 
     /// `.rb` is not the whole language. Discourse keeps 11,854 lines of Ruby in
     /// `.rake` files, a Gemfile and a gemspec; a rename skipped every one, and

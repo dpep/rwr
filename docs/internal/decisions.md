@@ -3056,3 +3056,31 @@ touch. Narrower, and in the right direction.
 *Reverses if:* a caller wants a scoped run's audit to cover the whole file deliberately -- a
 "what is this file's total suppression debt" question, which is a different question and wants
 its own command rather than a scoped run that quietly answers it.
+
+## D109 - Overlapping path arguments name one tree
+**Decided.**
+
+`rwr rewrite all w.rb w.rb` reported "rewrote 1 site(s)" twice; `rwr check all z.rb .` counted
+every file in the repo twice, the suppression audit included. `rwr check app/ app/models/` is the
+same bug wearing a plausible shape, and it is the shape a script produces -- a CI job building a
+path list from the directories a change touched hits it without anyone typing anything odd.
+
+**Deduplicated, not refused.** Refusal is for ambiguity, and there is none: the union of two
+overlapping path sets has exactly one answer, which is every file once. Refusing would break a
+generated path list for a case whose correct behaviour is obvious.
+
+**Pruned at the root, not deduplicated per file.** A root another root contains adds nothing, so
+dropping it means the walker never visits the file twice -- no per-file `canonicalize` on a tree
+of eleven thousand, and the fix sits at the cause. Roots are resolved before comparing, because
+`z.rb` and `./z.rb` are one file spelled two ways, and compared as paths rather than strings, so
+`app/modelsx` is not "inside" `app/models`. A root dropped by mistake is a tree nobody checked,
+and a pruned root is indistinguishable from an empty one -- the silence this tool exists to
+refuse -- so that comparison has its own test.
+
+**Nothing is reported.** Pruning creates no blind spot: every file is still walked, once. A line
+saying "I ignored `app/models` because `app` covers it" would print on every run of a perfectly
+correct command.
+
+*Reverses if:* a root ever means something other than "walk this" -- a per-root rule set or
+severity, say -- at which point two overlapping roots would carry different instructions for the
+same file and the answer becomes a refusal.
