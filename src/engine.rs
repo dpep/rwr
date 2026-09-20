@@ -322,7 +322,8 @@ pub(crate) struct Scanned {
     /// Directives naming no rule, which cannot be audited.
     pub(crate) malformed: Vec<crate::suppress::Malformed>,
     /// Classes this source's matched receivers resolved to, for the
-    /// cross-class warning. Empty unless the rule set narrows by none.
+    /// cross-class warning. Empty unless the rule set edits and narrows by
+    /// none.
     pub(crate) spread: Vec<String>,
     pub(crate) flagged: Vec<Finding>,
     /// Edits per rule, positionally. Attribution is per source because that is
@@ -777,7 +778,15 @@ impl Engine {
                                 // A rule that does not say which class it means
                                 // may be renaming across several. Recorded here,
                                 // warned about once at the end (Q10).
-                                if self.unnarrowed {
+                                //
+                                // Only for a rule that edits. A finding rule
+                                // renames nothing, so the warning was answering
+                                // a question nobody asked -- and answering it
+                                // with whatever `receiver_class` made of a
+                                // receiver that never needed resolving, which
+                                // for `INDEXES.filter_map` is the constant's
+                                // own name presented as a class.
+                                if self.unnarrowed && rule.rewrite.is_some() {
                                     for hit in &hits {
                                         if let Some(class) =
                                             matcher::receiver_class(hit, &ctx.hierarchy, &ctx.sigs)
@@ -801,7 +810,7 @@ impl Engine {
                                             byte_end: end,
                                             rule: rule.id.clone().unwrap_or_default(),
                                             note: rule.description.clone().unwrap_or_default(),
-                                            text: source::line_at(&current, start),
+                                            text: source::span_text(&current, start, end),
                                             via: matcher::rests_on_signature(
                                                 hit,
                                                 &ctx.hierarchy,

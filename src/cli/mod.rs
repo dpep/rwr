@@ -874,15 +874,17 @@ fn report_findings(findings: &[Finding]) {
 /// A warning rather than a refusal: a genuinely repo-wide rename is legitimate,
 /// and refusing it would train people to reach for a flag that disables the
 /// check. What they need is to be told, once, with the fix.
-fn report_spread(classes: &[&String]) {
+fn report_spread(classes: &[&String], write: bool) {
     let mut distinct: Vec<&str> = classes.iter().map(|c| c.as_str()).collect();
     distinct.sort_unstable();
     distinct.dedup();
     if distinct.len() < 2 {
         return;
     }
+    // The same verb the per-file lines use: `check` has rewritten nothing.
+    let verb = if write { "rewrote" } else { "would rewrite" };
     eprintln!(
-        "\nwarning: rewrote receivers of {} different classes ({}). These are \
+        "\nwarning: {verb} receivers of {} different classes ({}). These are \
          different methods that share a name -- narrow with \
          `where: {{ $R: {{ type: ... }} }}` if only one was meant.",
         distinct.len(),
@@ -1372,7 +1374,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                         col,
                         byte_start: loc.start_offset(),
                         byte_end: loc.end_offset(),
-                        text: source::line_at(&src, loc.start_offset()),
+                        text: source::span_text(&src, loc.start_offset(), loc.end_offset()),
                         // A bare pattern runs with `Criteria::none()`, so no
                         // signature can have contributed to it.
                         via: None,
@@ -2268,6 +2270,7 @@ fn cmd_apply(
                     .iter()
                     .flat_map(|o| o.scanned.spread.iter())
                     .collect::<Vec<_>>(),
+                write,
             );
             report_unsafe(&changed, rules);
             report_widened(&widened);

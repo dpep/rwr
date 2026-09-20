@@ -333,6 +333,62 @@ pub(crate) fn line_at(source: &[u8], offset: usize) -> String {
         .to_string()
 }
 
+/// How much of a collapsed multi-line site to show before cutting it.
+///
+/// Only multi-line sites are cut. A single line is shown whole however long it
+/// is, exactly as it always was.
+const SPAN_CHARS: usize = 120;
+
+/// The source a site occupies, rendered as one line.
+///
+/// A site that starts on its own line reduces to its first line's worth of
+/// text, which for a leading-dot chain is the bare receiver -- `dns`, where
+/// the site is `dns.getresources(...).to_a.map { |e| e.exchange.to_s }`. A
+/// finding list is read by skimming, and that is not skimmable.
+///
+/// One line still, because `text` sits in a `file:line:col: text` column that a
+/// pipe splits on newlines. A site that spans lines is joined at the line
+/// breaks, with the indentation that follows one dropped, and cut at
+/// [`SPAN_CHARS`]. A site on a single line takes the whole line, unchanged and
+/// uncut -- the common case is byte-identical to reading the line directly.
+pub(crate) fn span_text(source: &[u8], start: usize, end: usize) -> String {
+    let start = start.min(source.len());
+    let end = end.clamp(start, source.len());
+    if !source[start..end].contains(&b'\n') {
+        return line_at(source, start);
+    }
+
+    let span = &source[start..end];
+    let mut out: Vec<u8> = Vec::with_capacity(span.len());
+    let mut i = 0;
+    while i < span.len() {
+        if span[i] != b'\n' {
+            out.push(span[i]);
+            i += 1;
+            continue;
+        }
+        while i < span.len() && span[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        while matches!(out.last(), Some(b' ' | b'\t')) {
+            out.pop();
+        }
+        // A joining space would read as a typo where the break sits inside an
+        // expression: `dns .getresources`, `foo( bar`.
+        let tight = span.get(i).is_some_and(|n| b".,)]}".contains(n))
+            || matches!(out.last(), Some(b'(' | b'['));
+        if !tight {
+            out.push(b' ');
+        }
+    }
+
+    let out = String::from_utf8_lossy(&out).trim().to_string();
+    match out.char_indices().nth(SPAN_CHARS) {
+        Some((cut, _)) => format!("{}…", &out[..cut]),
+        None => out,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +529,50 @@ mod tests {
         let src = b"first\nsecond\nthird\n";
         assert_eq!(line_at(src, 0), "first");
         assert_eq!(line_at(src, 7), "second");
+    }
+
+    /// A site on one line is reported exactly as reading that line was, whole
+    /// and uncut, including what sits beside it.
+    #[test]
+    fn span_text_of_a_single_line_site_is_its_whole_line() {
+        let src = b"  total = xs.size\n";
+        let (start, end) = (10, 17);
+        assert_eq!(span_text(src, start, end), "  total = xs.size");
+        assert_eq!(span_text(src, start, end), line_at(src, start));
+    }
+
+    /// The defect: a leading-dot chain reported as its first line is the bare
+    /// receiver, and a receiver is not a finding anyone can act on.
+    #[test]
+    fn span_text_joins_a_leading_dot_chain() {
+        let src = b"def go\n  orders\n    .each { |o| puts o.customer.name }\nend\n";
+        let start = 9;
+        let end = src.len() - 5;
+        assert_eq!(line_at(src, start), "  orders");
+        assert_eq!(
+            span_text(src, start, end),
+            "orders.each { |o| puts o.customer.name }"
+        );
+    }
+
+    /// A break inside an argument list joins without a space too, and one
+    /// between two words keeps it.
+    #[test]
+    fn span_text_joins_without_inventing_spaces() {
+        let src = b"foo(\n  a,\n  b\n) do |x|\n  x\nend\n";
+        assert_eq!(span_text(src, 0, src.len() - 1), "foo(a, b) do |x| x end");
+    }
+
+    /// One line, always: `text` sits in a column a pipe splits on newlines, so
+    /// a long block is cut rather than allowed to bury the list.
+    #[test]
+    fn span_text_cuts_a_long_block() {
+        let body = "  puts :x\n".repeat(40);
+        let src = format!("xs.each do |x|\n{body}end\n");
+        let out = span_text(src.as_bytes(), 0, src.len() - 1);
+        assert!(!out.contains('\n'), "{out}");
+        assert!(out.ends_with('…'), "{out}");
+        assert_eq!(out.chars().count(), SPAN_CHARS + 1);
     }
 
     #[test]

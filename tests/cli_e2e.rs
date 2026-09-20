@@ -851,6 +851,56 @@ fn a_rule_without_a_template_is_a_finding() {
     assert_eq!(after, "a = Company.where(x: 1).size\n");
 }
 
+/// A finding's product is the skim, so a site that spans lines has to arrive
+/// whole. Reported as its first line, a leading-dot chain is the bare receiver
+/// -- `orders` -- which names nothing a reader can act on, while `-j` carried
+/// offsets covering both lines all along.
+#[test]
+fn a_finding_that_spans_lines_is_reported_whole() {
+    let dir = fixture("def go\n  orders\n    .each { |o| puts o.customer.name }\nend\n");
+    let rule = dir.path().join("r.yml");
+    std::fs::write(
+        &rule,
+        "id: perf/n-plus-one\ndescription: a hop per element\nmatch: $R.each { |$X| $B }\n",
+    )
+    .expect("write");
+
+    let out = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("orders.each { |o| puts o.customer.name }"),
+        "{text}"
+    );
+
+    let json = rwr(&[
+        "check",
+        rule.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+        "-j",
+    ]);
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
+    let found = &report["findings"][0];
+    assert_eq!(
+        found["text"], "orders.each { |o| puts o.customer.name }",
+        "{report}"
+    );
+    // The offsets were never the problem; they are what the text now agrees
+    // with.
+    let (start, end) = (
+        found["byte_start"].as_u64().expect("start"),
+        found["byte_end"].as_u64().expect("end"),
+    );
+    let src = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    assert!(
+        src[start as usize..end as usize].contains('\n'),
+        "the site really does span lines"
+    );
+}
+
 /// A bare pattern is not a rule file, so it never reaches the lint path.
 #[test]
 fn a_bare_pattern_without_a_template_still_fails() {
@@ -1655,6 +1705,38 @@ fn a_rename_across_two_classes_warns() {
         "{}",
         stderr(&scoped)
     );
+
+    // `check` writes nothing, so it has not rewritten anything either.
+    assert!(err.contains("would rewrite receivers"), "{err}");
+}
+
+/// The cross-class warning is about a rename reaching further than it meant
+/// to. A rule with no `rewrite:` renames nothing, so it had no business
+/// raising it -- and it did so in the past tense, naming whatever
+/// `receiver_class` made of receivers that never needed resolving (`INDEXES`,
+/// a constant holding an array, reported as a class).
+#[test]
+fn a_finding_rule_does_not_warn_about_renaming() {
+    let dir = fixture(
+        "class Account\n  def display_name; 1; end\nend\n         class Company\n  def display_name; 2; end\nend\n         account = Account.new\ncompany = Company.new\n         account.display_name\ncompany.display_name\n",
+    );
+    let lint = dir.path().join("lint.yml");
+    std::fs::write(
+        &lint,
+        "id: t/lint\ndescription: worth a look\nmatch: $R.display_name\n",
+    )
+    .expect("write");
+
+    let out = rwr(&[
+        "check",
+        lint.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(!err.contains("different classes"), "{err}");
+    assert!(!err.contains("rewrote"), "{err}");
+    // It still reports the findings; only the warning is gone.
+    assert_eq!(out.status.code(), Some(1), "{err}");
 }
 
 /// A machine consumer needs to know what produced the document it is parsing,
