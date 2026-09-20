@@ -516,18 +516,19 @@ silently matches nothing.
 ## Reporting into a pull request
 
 ```sh
-rwr check all --since "origin/$GITHUB_BASE_REF" --sarif > rwr.sarif
+script/pr-suggest.sh 2                                   # this repo
+script/pr-suggest.sh https://github.com/dpep/rwr/pull/2  # any repo, by URL
 ```
 
-SARIF 2.1.0, which `github/codeql-action/upload-sarif` turns into annotations.
-A rewritable site or a lint finding is `warning`; residue is `note`, because it
-is not a defect in the code but a thing rwr could not reach and a human must
-judge. Blind spots with no line — a file that would not parse — arrive as
-`toolExecutionNotifications` rather than results.
+The script builds a review from `rwr check -j`: an applicable ` ```suggestion `
+block where a rule knows the fix, a plain comment where it does not, posted
+through the ordinary reviews API. Inline and scoped to the diff, because a
+review is about what this change introduced — the full account of a rename
+stays in the terminal and in `-j`.
 
 The workflow needs `fetch-depth: 0` (a shallow clone has no base branch to diff
-against) and `continue-on-error: true` on the rwr step, since `check` exits 1
-when there is work to do and would otherwise kill the upload.
+against) and `pull-requests: write`. rwr emits no SARIF: nothing it finds is a
+vulnerability, and Code Scanning files it as one. See `docs/github-actions.md`.
 
 ## Exit codes
 

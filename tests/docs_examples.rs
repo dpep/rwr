@@ -53,7 +53,7 @@ fn strip_trailing_comment(line: &str) -> &str {
     line.trim_end()
 }
 
-/// `<rule>` is a hole in a syntax sketch. `--sarif > rwr.sarif` is a redirect,
+/// `<rule>` is a hole in a syntax sketch. A shell redirect also ends in `>`,
 /// so the opening bracket is what distinguishes them.
 fn has_placeholder(cmd: &str) -> bool {
     cmd.split_once('<')
@@ -134,14 +134,9 @@ enum Expect {
     Changes,
     /// `test` and the flag-only invocations: it runs and succeeds.
     Succeeds,
-    /// `--sarif`: exit 0 or 1, and the document it emitted has results.
-    Sarif,
 }
 
 fn expectation(cmd: &str) -> Expect {
-    if cmd.contains("--sarif") {
-        return Expect::Sarif;
-    }
     match cmd.split_whitespace().nth(1).unwrap_or("") {
         "check" => Expect::Work,
         "rewrite" => Expect::Changes,
@@ -156,7 +151,7 @@ fn expectation(cmd: &str) -> Expect {
 /// what the run did, so the example still proves what the doc claims.
 fn instrumented(cmd: &str, expect: Expect) -> String {
     let already = cmd.split_whitespace().any(|w| w == "-j" || w == "-J");
-    if already || matches!(expect, Expect::Succeeds | Expect::Sarif) {
+    if already || expect == Expect::Succeeds {
         cmd.to_string()
     } else {
         format!("{cmd} -j")
@@ -168,32 +163,7 @@ fn count(doc: &serde_json::Value, key: &str) -> usize {
 }
 
 /// `Ok` or the one sentence that says what the example failed to do.
-fn verdict(
-    expect: Expect,
-    code: Option<i32>,
-    stdout: &str,
-    cwd: &Path,
-    cmd: &str,
-) -> Result<(), String> {
-    if expect == Expect::Sarif {
-        if !matches!(code, Some(0 | 1)) {
-            return Err(format!("exited {code:?}; --sarif should exit 0 or 1"));
-        }
-        let Some(target) = cmd.rsplit_once('>').map(|(_, f)| f.trim()) else {
-            return Ok(());
-        };
-        let written = std::fs::read_to_string(cwd.join(target))
-            .map_err(|e| format!("wrote no {target}: {e}"))?;
-        let sarif: serde_json::Value =
-            serde_json::from_str(&written).map_err(|e| format!("{target} is not JSON: {e}"))?;
-        let results = sarif["runs"][0]["results"].as_array().map_or(0, Vec::len);
-        return if results == 0 {
-            Err("emitted SARIF with no results".into())
-        } else {
-            Ok(())
-        };
-    }
-
+fn verdict(expect: Expect, code: Option<i32>, stdout: &str) -> Result<(), String> {
     // `test` prints its tally and `--completions` its script, so a silent
     // success would mean the example ran and produced nothing.
     if expect == Expect::Succeeds {
@@ -242,7 +212,7 @@ fn verdict(
                 Ok(())
             }
         }
-        Expect::Succeeds | Expect::Sarif => unreachable!("handled above"),
+        Expect::Succeeds => unreachable!("handled above"),
     }
 }
 
@@ -522,7 +492,7 @@ fn every_documented_example_still_works() {
             .expect("shell runs");
 
         let stdout = String::from_utf8_lossy(&out.stdout);
-        if let Err(why) = verdict(expect, out.status.code(), &stdout, &cwd, &line) {
+        if let Err(why) = verdict(expect, out.status.code(), &stdout) {
             failures.push(format!(
                 "{}:{}\n  {}\n  {why}\n  stderr: {}",
                 ex.doc,
@@ -578,7 +548,6 @@ fn an_example_that_does_nothing_is_a_failure() {
     let doc: serde_json::Value =
         serde_json::from_str(r#"{"changed": [], "findings": [], "residue": [{"x": 1}]}"#)
             .expect("json");
-    let dir = tempfile::tempdir().expect("temp dir");
-    assert!(verdict(Expect::Changes, Some(0), &doc.to_string(), dir.path(), "").is_err());
-    assert!(verdict(Expect::Work, Some(0), &doc.to_string(), dir.path(), "").is_err());
+    assert!(verdict(Expect::Changes, Some(0), &doc.to_string()).is_err());
+    assert!(verdict(Expect::Work, Some(0), &doc.to_string()).is_err());
 }
