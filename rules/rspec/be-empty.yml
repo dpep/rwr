@@ -77,20 +77,11 @@
       output: |
         expect(account.public_key).to be_empty
 
-    # FAILING, and an engine defect rather than a rule one: an empty heredoc has
-    # the same unescaped value as `''` (D36), so it matches -- and dropping the
-    # argument takes the heredoc body with it, one byte too far. The edit eats
-    # the newline after the terminator and fuses the next statement onto this
-    # one. `effective_range` extends over a heredoc's `closing_loc`, which
-    # includes that newline; `DiscontiguousCapture` does not fire because the
-    # heredoc is not being re-spliced, only deleted.
-    #
-    # Reduced, with no rule involved:
-    #   printf 'foo(<<~EOS)\n  body\nEOS\nbaz\n' > a.rb
-    #   rwr 'foo($X)' -r bar a.rb    # replacement: "barbaz"
-    #
-    # Ruby still parses the result, so `ruby -c` says nothing: `be_empty` simply
-    # swallows the next assertion as an argument.
+    # An empty heredoc has the same unescaped value as `''` (D36), so it
+    # matches, and deleting the argument has to take the body with it without
+    # taking the newline after the terminator. That newline ends the line the
+    # rewrite leaves behind: covering it fused the next assertion onto this one
+    # as an argument to `be_empty`, and the result still parsed (D14, D111).
     - input: |
         expect(result).to eq(<<~EOS)
         EOS

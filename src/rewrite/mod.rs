@@ -126,6 +126,8 @@ impl std::fmt::Display for Refusal {
 /// node and its descendants carry extends the range over content that
 /// `node.location()` stops short of. Only the end extends: heredoc bodies
 /// always follow their opening token, never precede it.
+///
+/// It stops *short* of one byte, though: see [`heredoc_closing`].
 pub(crate) fn effective_range(node: &Node<'_>) -> (usize, usize) {
     let base = node.location();
     let start = base.start_offset();
@@ -134,18 +136,76 @@ pub(crate) fn effective_range(node: &Node<'_>) -> (usize, usize) {
     let mut stack = vec![generated::dup(node)];
     while let Some(current) = stack.pop() {
         end = end.max(current.location().end_offset());
-        for (_, e) in generated::locations(&current) {
+        let terminator = heredoc_closing(&current);
+        for (s, e) in generated::locations(&current) {
+            // The terminator is taken below, without its line break.
+            if terminator.as_ref().is_some_and(|t| t.start_offset() == s) {
+                continue;
+            }
             end = end.max(e);
+        }
+        if let Some(t) = &terminator {
+            end = end.max(t.start_offset() + without_line_break(t.as_slice()).len());
         }
         stack.extend(generated::children(&current));
     }
     (start, end)
 }
 
+/// A heredoc's terminator location -- `EOS` plus the newline ending its line.
+///
+/// `None` for a quoted string, whose closing delimiter sits inside the node's
+/// own span; a heredoc is exactly the string whose terminator does not.
+///
+/// That trailing newline is the one thing `effective_range` must *not* cover.
+/// It ends the line the edit leaves behind, not the heredoc: swallow it and
+/// `foo(<<~EOS) ... EOS` / `baz` rewrites to `barbaz`, two statements fused
+/// into one and `baz` now an argument. Which still parses, so nothing
+/// downstream notices (D14).
+fn heredoc_closing<'pr>(node: &Node<'pr>) -> Option<ruby_prism::Location<'pr>> {
+    let closing = match node {
+        Node::StringNode { .. } => node.as_string_node()?.closing_loc()?,
+        Node::InterpolatedStringNode { .. } => node.as_interpolated_string_node()?.closing_loc()?,
+        Node::XStringNode { .. } => node.as_x_string_node()?.closing_loc(),
+        Node::InterpolatedXStringNode { .. } => node.as_interpolated_x_string_node()?.closing_loc(),
+        _ => return None,
+    };
+    (closing.end_offset() > node.location().end_offset()).then_some(closing)
+}
+
+/// `bytes` without the line break that ends it, if it has one.
+fn without_line_break(bytes: &[u8]) -> &[u8] {
+    let trimmed = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    trimmed.strip_suffix(b"\r").unwrap_or(trimmed)
+}
+
 /// Whether a node's content runs past its own location -- true exactly when it
 /// contains a heredoc, whose body sits outside the span the node reports.
 fn is_discontiguous(node: &Node<'_>) -> bool {
     effective_range(node).1 > node.location().end_offset()
+}
+
+/// A node's own span, excluding any heredoc body that trails it.
+fn own_range(node: &Node<'_>) -> (usize, usize) {
+    let loc = node.location();
+    (loc.start_offset(), loc.end_offset())
+}
+
+/// Whether a heredoc *opens* anywhere in `[start, end)`.
+///
+/// Deleting such a region strands the body further down the file as bare
+/// statements -- text that usually still parses, so neither [`verify`] nor
+/// [`verify_template`] would see it.
+fn heredoc_opens_within(node: &Node<'_>, start: usize, end: usize) -> bool {
+    let mut stack = vec![generated::dup(node)];
+    while let Some(current) = stack.pop() {
+        let at = current.location().start_offset();
+        if (start..end).contains(&at) && heredoc_closing(&current).is_some() {
+            return true;
+        }
+        stack.extend(generated::children(&current));
+    }
+    false
 }
 
 /// The source text a capture stands for, preserving its original formatting.
@@ -256,10 +316,24 @@ fn unwrap_to_subtree(
         ) else {
             continue;
         };
-        let (outer_start, outer_end) = effective_range(target);
-        let (inner_start, inner_end) = effective_range(x_child);
+        // What surrounds the subtree is measured by the nodes' *own* spans, not
+        // their effective ones. A heredoc inside the subtree pushes both
+        // effective ends onto the terminator line, so they compare equal and
+        // the trailing element is left standing -- `select { }.size` became
+        // `count { }.size`, exit 0, no diagnostic.
+        let (outer_start, outer_end) = own_range(target);
+        let (inner_start, inner_end) = own_range(x_child);
         if outer_start > inner_start || inner_end > outer_end {
             continue;
+        }
+        // A heredoc opening in what is being deleted is a different problem:
+        // the body would be stranded, and no contiguous edit can express the
+        // fix. Give up here and let the caller re-render the whole node, which
+        // either covers the heredoc entire or refuses on the capture.
+        if heredoc_opens_within(target, outer_start, inner_start)
+            || heredoc_opens_within(target, inner_end, outer_end)
+        {
+            return None;
         }
         if outer_start < inner_start {
             edits.push(Edit {
@@ -1207,6 +1281,85 @@ mod tests {
         let out = apply(source.as_bytes(), &planned.edits);
         verify(&out)?;
         Ok(out)
+    }
+
+    /// The Prism fact the heredoc arithmetic rests on: a heredoc's terminator
+    /// location carries the newline that ends its line, and a quoted string's
+    /// closing delimiter sits inside the node's own span.
+    #[test]
+    fn a_heredoc_terminator_carries_its_line_break() {
+        let src: &[u8] = b"foo(<<~EOS)\n  body\nEOS\nbaz\n";
+        let parsed = ruby_prism::parse(src);
+        let node = parsed.node();
+        let program = node.as_program_node().expect("root is a program");
+        let first = program
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .expect("one statement");
+        let call = first.as_call_node().expect("statement is a call");
+        let heredoc = call
+            .arguments()
+            .expect("call has arguments")
+            .arguments()
+            .iter()
+            .next()
+            .expect("first argument");
+
+        let closing = heredoc_closing(&heredoc).expect("the argument is a heredoc");
+        assert_eq!(closing.as_slice(), b"EOS\n");
+        assert_eq!(without_line_break(closing.as_slice()), b"EOS");
+
+        // And a quoted string is not a heredoc, however similar the node kind.
+        let quoted = ruby_prism::parse(b"foo(\"x\")\n");
+        let quoted_node = quoted.node();
+        assert!(!heredoc_opens_within(&quoted_node, 0, 8));
+    }
+
+    /// Replacing a call whose argument is a heredoc must leave the line break
+    /// after the terminator alone. Covering it fused the next statement onto
+    /// the replacement -- `barbaz`, valid Ruby, `baz` now an argument to `bar`.
+    #[test]
+    fn deleting_a_heredoc_argument_keeps_the_next_statement_apart() {
+        let out = rewrite("foo($X)", "bar", "foo(<<~EOS)\n  body\nEOS\nbaz\n");
+        assert_eq!(out.as_deref(), Ok("bar\nbaz\n"));
+
+        // The control, which was always right, still is.
+        let plain = rewrite("foo($X)", "bar", "foo(1)\nbaz\n");
+        assert_eq!(plain.as_deref(), Ok("bar\nbaz\n"));
+    }
+
+    /// A rewrite that unwraps -- pattern wider than template -- has to delete
+    /// the trailing element. Measured by effective range, the inner and outer
+    /// nodes both ended on the heredoc's terminator, so nothing was deleted and
+    /// `.size` stayed, applied to the result of `count`.
+    #[test]
+    fn unwrapping_around_a_heredoc_still_deletes_the_trailing_element() {
+        let out = rewrite(
+            "$R.select { |$P| $B }.size",
+            "$R.count { |$P| $B }",
+            "a = <<~TXT.lines.select { |l| l.ok? }.size\n  -a\nTXT\n",
+        );
+        assert_eq!(
+            out.as_deref(),
+            Ok("a = <<~TXT.lines.count { |l| l.ok? }\n  -a\nTXT\n")
+        );
+    }
+
+    /// The other half, and why measuring the surround by own span needs a
+    /// guard: here the heredoc opens in the part being *deleted*, so its body
+    /// has to go with it. A `.join(<<~T)` snipped by own span alone would leave
+    /// the body behind as bare statements -- which parse, so nothing else
+    /// would have noticed.
+    #[test]
+    fn unwrapping_takes_a_heredoc_in_what_it_deletes() {
+        let out = rewrite(
+            "$R.lines.join($A)",
+            "$R.lines",
+            "a = xs.lines.join(<<~T)\n  -a\nT\nbaz\n",
+        );
+        assert_eq!(out.as_deref(), Ok("a = xs.lines\nbaz\n"));
     }
 
     /// A prefix operator's name and a `.method` name are both `message_loc`,

@@ -133,6 +133,12 @@ default. `whitequark/parser` needed a hardcoded `Map::Heredoc` for the same reas
 and still ships heredoc-corruption bugs (#10895, #10320, #6653, #11621). So the capture API
 does not expose raw `.location` at all. Unsafe operation unrepresentable, not documented.
 
+**Amended (D111).** "Unioning each heredoc's `closing_loc`" was one byte too generous, and
+"the only splice-able range" was one claim too many. `closing_loc` covers `EOS\n`, and that
+newline ends the line the *edit* leaves behind, so the union must stop short of it; and a
+range built by union cannot answer "what surrounds this subtree", because two nodes sharing
+a heredoc share an end. D111 has both, and the reduction that found them.
+
 ## D15 — Overlap: find is reentrant, rewrite is outermost-only, partial overlap aborts
 **Decided.** Resolves Q3. Conflict unit is the **edit** range, not the match range — minimal
 edits mean nested matches usually produce disjoint edits and both apply cleanly.
@@ -3165,3 +3171,63 @@ the exit-0 behaviour.
 *Reverses if:* renames gain a way to be partial *and correct* -- an alias left behind at the old
 name, say -- at which point accepting one site has a meaning that runs, and the answer becomes
 that alias rather than a refusal.
+
+## D111 - `effective_range` stops at the terminator, and the surround is measured by own span
+
+**Decided.** Amends D14. Two rules, one root cause: the range a splice uses is not the range a
+match covers, because a node containing a heredoc occupies *two* stretches of the file and
+`effective_range` returns one.
+
+1. **The union stops before the terminator's line break.** Prism's `closing_loc` for a heredoc
+   is `EOS\n`, and that newline ends the line the replacement will sit on, not the heredoc.
+2. **What surrounds a subtree is measured by the nodes' own `location`s**, never by their
+   effective ranges.
+
+*The reduction, with no rule involved:*
+
+```sh
+printf 'foo(<<~EOS)\n  body\nEOS\nbaz\n' > a.rb
+rwr rewrite 'foo($X)' -r bar a.rb     # before: "barbaz"   after: "bar\nbaz"
+```
+
+Two statements fused into one and `baz` promoted to an argument of `bar` -- which parses, so
+`verify` was silent, `ruby -c` was silent, and the run exited 0. `DiscontiguousCapture` did not
+fire because it guards a capture being *re-spliced*; here the heredoc was only being deleted.
+This is the D14 hazard occurring inside the mechanism built to prevent it, which is the reason
+D14 says documenting is not enough.
+
+*The second symptom, and why the newline alone was not the fix.* A rule whose `match:` continues
+past the block to a trailing element left that element behind:
+
+```ruby
+a = <<~TXT.lines.select { |l| l.start_with?("-") }.size   # => 2
+a = <<~TXT.lines.count  { |l| l.start_with?("-") }.size   # => 8
+```
+
+`unwrap_to_subtree` deletes what surrounds the aligned subtree, and it asked for that surround in
+effective ranges. Both the outer node and the inner one end on the same terminator, so they
+compared equal and the `.size` was never deleted -- an `Integer` where an Array was, exit 0, no
+diagnostic. Own spans do not have that failure: the heredoc body sits past both ends and belongs
+to neither. Confirmed on all four positions a heredoc takes here -- bare receiver, deeper in the
+receiver, inside the block body, and `Model.where(x: <<~SQL).count > 0` -> `.exists? > 0`.
+
+*Why the correct edit rather than a refusal.* Refusing was defensible and was on the table.
+Deleting an argument is an ordinary thing to want, and the correct edit states in one sentence --
+give back the line break; measure the surround by own span. A refusal states in no fewer, and
+costs every heredoc-bearing site in exchange.
+
+*Own spans need a guard, and it earns its place.* When the deleted surround is what *opens* the
+heredoc (`xs.lines.join(<<~T)` -> `xs.lines`), snipping it by own span alone strands the body
+further down the file as bare statements -- which parse. `heredoc_opens_within` declines to emit
+that edit and lets the caller re-render the whole node instead, which either covers the heredoc
+entire or refuses on the capture. Measured, not assumed: without it that shape regresses, and
+`rewrite::tests::unwrapping_takes_a_heredoc_in_what_it_deletes` is the case that says so.
+
+*Blast radius.* 263 `<<~NAME.method` sites across rails and mastodon, **zero** of them reaching an
+affected rule. The shape is ordinary, the bug was general to the engine, and nothing in either
+corpus was being mis-rewritten today. Latent, not live -- which is why this ships as a fix rather
+than a retraction.
+
+*Reverses if:* edits become a structural diff over the tree rather than byte ranges, at which
+point a node that does not move is never spliced and "the span a node occupies" stops needing to
+be contiguous at all.
