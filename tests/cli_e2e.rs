@@ -3616,3 +3616,40 @@ fn an_ambiguous_short_name_rewrites_no_call_site() {
         stderr(&out)
     );
 }
+
+/// A rename reaches a call however its arguments are written, or not written.
+///
+/// The call rules were `$R.{name}` and a bare `{name}`, which are the
+/// *no-argument* shapes, so every call that passed one was left behind and
+/// filed as residue. Loud, but for a method with a required argument that is
+/// every call site there is: the definition moves and the file stops running.
+/// Roughly a quarter of explicit-receiver calls in rails, discourse and
+/// mastodon carry a parenthesised argument list.
+///
+/// The output is compared byte for byte, because the obvious fix is not enough
+/// on its own: a template of `$R.{new}(*$A)` renders `w.caption()` on a call
+/// that had no parentheses, which is a diff rwr has no business making.
+#[test]
+fn a_rename_reaches_a_call_that_passes_arguments() {
+    let source = "class Widget\n  def label(suffix = nil)\n    \"w\"\n  end\n\n  \
+                  def both\n    label\n    label(\"y\")\n    label \"z\"\n    self.label\n    \
+                  self.label(\"q\")\n  end\nend\n\n\
+                  w = Widget.new\nw.label\nw.label(\"y\")\nw.label \"z\"\n\
+                  w.send(:label)\nw.send(:label, \"y\")\n";
+    let dir = fixture(source);
+    let out = rwr(&[
+        "rewrite",
+        "Widget#label",
+        "-r",
+        "caption",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    assert_eq!(
+        after,
+        source.replace("label", "caption"),
+        "every spelling moves, and only the name: {}",
+        stderr(&out)
+    );
+    assert_eq!(out.status.code(), Some(0), "nothing left over: {after}");
+}

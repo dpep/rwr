@@ -2648,3 +2648,42 @@ misses the file that declares it -- `class Base` inside `module ActiveRecord`. W
 Requiring every segment of a known name narrows it to 2,441 files and is *slower* at 251ms, because
 last segments collapse a subclass tree onto one finder. D92 already accepted a full rails parse at
 this scale.
+
+## D101 - A designator's call rules admit an argument list
+**Decided.** Closes a hole D94 left open on the call side; the definition side had it closed already.
+
+`MethodRename::expand` built the explicit-receiver rule as `$R.{name}`, the dispatcher rules as
+`$R.$SEND(:{name})` and the implicit-self rule as a bare `{name}`. All three are the **no-argument**
+shape, and a call carrying arguments is a different node, so every such call was reported as residue
+rather than renamed. The definition rule took `(*$P)` deliberately (D97); the call rules never got
+the same treatment, and nothing recorded the asymmetry -- not FOLLOWUPS, not the docs, not
+open-questions.
+
+It is loud -- residue, exit 1 -- which is why it survived: "residue" reads as a list of judgement
+calls, and here it was the whole rename. For a method with a *required* argument, every call site
+there is lands in it, and the run moves the definition anyway. Measured on discourse,
+`Guardian#can_see?`: **1 site and 226 residue entries before, 101 sites across 25 files and 126
+after.** Share of explicit-receiver calls carrying a parenthesised argument list: rails 30%,
+discourse 26%, mastodon 24%.
+
+**`(*$A)` matches a call that passes nothing, in both spellings.** Verified before relying on it:
+Prism gives a call without arguments no `ArgumentsNode` at all, and `matcher::vanishes` already lets
+the splat absorb the absent list. So one rule covers `w.label`, `w.label("y")` and `w.label "z"`;
+two rules per spelling were not needed.
+
+**The rewrite needed the other half.** Matching worked; the *diff* had no correspondence for an
+argument list the target lacked, gave up, and re-rendered the call from the template -- so a
+paren-less `w.label` came back as `w.caption()`, a formatting change rwr does not own (minimal
+diffs). `matcher::lone_splat_placeholder` is the argument-list twin of `lone_rest_placeholder`, and
+`rewrite::align` carries the list across untouched, advancing the target cursor by one child when
+the call has arguments and none when it does not. This is the same fix `def foo(*$P)` already had,
+one node kind along -- which is the tell that the asymmetry was an oversight rather than a judgement.
+
+**Cost: none measurable.** `*$A` contributes no literal, so the prefilter admits exactly the same
+files -- 95 of 11,022 for `Guardian#can_see?`, 797 for `Topic#title`, unchanged either way. Wall
+time on discourse, median of three: 1,720ms before, 1,525ms after.
+
+**Still not reached, and still residue:** a call carrying a **block** (`w.label { ... }`,
+`w.label("y") { ... }`), a call passing a block argument (`w.label(&:to_s)`), and a *receiverless*
+dispatcher (`send(:label)` inside the class). Each is a different node shape rather than a different
+argument list, so each needs its own rule; left open deliberately rather than bundled in here.

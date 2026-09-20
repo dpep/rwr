@@ -747,9 +747,17 @@ impl MethodRename {
         // Explicit receivers, narrowed by class *and* kind. `self.foo` inside an
         // ordinary method body resolves as an instance receiver, so this covers
         // it too.
+        //
+        // `(*$A)` for the same reason the definition rules take `(*$P)`: a bare
+        // `$R.{name}` is the *no-argument* shape, so every call that passed one
+        // was reported as residue rather than renamed. Loud, but for a method
+        // with a required argument that is every call site there is -- the
+        // definition moves and the file stops running. Roughly a quarter of
+        // explicit-receiver calls in rails, discourse and mastodon carry a
+        // parenthesised argument list.
         let calls = Rule {
-            pattern: format!("$R.{name}"),
-            rewrite: Some(format!("$R.{new}")),
+            pattern: format!("$R.{name}(*$A)"),
+            rewrite: Some(format!("$R.{new}(*$A)")),
             constraints: receiver(),
             ..Default::default()
         };
@@ -781,15 +789,18 @@ impl MethodRename {
 
         let mut rules = definitions;
         rules.push(calls);
+        // `*$A` for the same reason the call rule takes it: `send` forwards the
+        // method's arguments, so `account.send(:display_name, 1)` is the
+        // ordinary spelling and the no-argument shape alone missed it.
         rules.push(Rule {
-            pattern: format!("$R.$SEND(:{name})"),
-            rewrite: Some(format!("$R.$SEND(:{new})")),
+            pattern: format!("$R.$SEND(:{name}, *$A)"),
+            rewrite: Some(format!("$R.$SEND(:{new}, *$A)")),
             constraints: dispatchers(),
             ..Default::default()
         });
         rules.push(Rule {
-            pattern: format!("$R.$SEND(\"{name}\")"),
-            rewrite: Some(format!("$R.$SEND(\"{new}\")")),
+            pattern: format!("$R.$SEND(\"{name}\", *$A)"),
+            rewrite: Some(format!("$R.$SEND(\"{new}\", *$A)")),
             constraints: dispatchers(),
             ..Default::default()
         });
@@ -900,8 +911,8 @@ impl MethodRename {
         // method's body, and vice versa.
         if class.is_some() {
             rules.push(Rule {
-                pattern: name.to_string(),
-                rewrite: Some(new.to_string()),
+                pattern: format!("{name}(*$A)"),
+                rewrite: Some(format!("{new}(*$A)")),
                 scope: Scope {
                     inside: class.map(str::to_string),
                     singleton: Some(kind == Kind::Class),
@@ -1565,9 +1576,38 @@ mod tests {
             "nothing to scope by"
         );
         assert!(
-            rules.iter().any(|r| r.pattern == "$R.display_name"),
+            rules.iter().any(|r| r.pattern == "$R.display_name(*$A)"),
             "explicit-receiver calls still covered"
         );
+    }
+
+    /// No call-site rule is written in the *no-argument* shape.
+    ///
+    /// `$R.display_name` is a call that passes nothing, so every call that
+    /// passed something was reported as residue instead of renamed -- and for a
+    /// method with a required argument that is every call site there is. Stated
+    /// over the whole expansion rather than one index, because the previous
+    /// version of this test asserted on `rules[1]` while the dispatcher and
+    /// implicit-self rules had the same hole.
+    #[test]
+    fn every_call_rule_admits_an_argument_list() {
+        for method in ["Account#display_name", "Account.display_name"] {
+            let rules = MethodRename {
+                method: method.into(),
+                rename: Some("full_name".into()),
+            }
+            .expand();
+            for rule in rules.iter().filter(|r| r.pattern.starts_with("$R.")) {
+                assert!(
+                    rule.pattern.contains("*$A"),
+                    "{method}: `{}` cannot reach a call with arguments",
+                    rule.pattern
+                );
+            }
+            // And the implicit-self rule, which is the largest receiver bucket.
+            let implicit = rules.last().expect("an implicit-self rule");
+            assert!(implicit.pattern.contains("*$A"), "{}", implicit.pattern);
+        }
     }
 
     /// Ruby's own notation, expanded.
@@ -1580,18 +1620,18 @@ mod tests {
         let rules = rename.expand();
         assert_eq!(rules[0].pattern, "def display_name(*$P); $B; end");
         assert_eq!(rules[0].scope.inside.as_deref(), Some("Account"));
-        assert_eq!(rules[1].pattern, "$R.display_name");
+        assert_eq!(rules[1].pattern, "$R.display_name(*$A)");
         assert_eq!(rules[1].constraints["$R"].kind, Some(Kind::Instance));
 
         // A literal name handed to a dispatcher is the same call in another
         // spelling, and the same receiver constraint decides it.
         let patterns: Vec<&str> = rules.iter().map(|r| r.pattern.as_str()).collect();
         assert!(
-            patterns.contains(&"$R.$SEND(:display_name)"),
+            patterns.contains(&"$R.$SEND(:display_name, *$A)"),
             "{patterns:?}"
         );
         assert!(
-            patterns.contains(&"$R.$SEND(\"display_name\")"),
+            patterns.contains(&"$R.$SEND(\"display_name\", *$A)"),
             "{patterns:?}"
         );
         for rule in rules.iter().filter(|r| r.pattern.contains("$SEND")) {
@@ -1607,7 +1647,7 @@ mod tests {
 
         // Implicit self is last, and reaches only inside the class.
         let implicit = rules.last().expect("an implicit-self rule");
-        assert_eq!(implicit.pattern, "display_name");
+        assert_eq!(implicit.pattern, "display_name(*$A)");
         assert_eq!(implicit.scope.inside.as_deref(), Some("Account"));
     }
 

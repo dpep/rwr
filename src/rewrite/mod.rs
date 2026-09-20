@@ -1016,6 +1016,20 @@ fn align<'a, 'pr>(
             }
             continue;
         }
+        // `$R.foo(*$A)` does the same for an argument list. `$A` binds the
+        // *arguments*, but the list holding them is one target child -- or none
+        // at all, since Prism gives a call without arguments no `ArgumentsNode`
+        // rather than an empty one.
+        if let Some(name) = matcher::lone_splat_placeholder(p, prepared) {
+            if matcher::lone_splat_placeholder(t, t_prepared).as_deref() != Some(&name) {
+                return None;
+            }
+            match env.get(&name) {
+                Some(Bound::Many(nodes)) => cursor += usize::from(!nodes.is_empty()),
+                _ => return None,
+            }
+            continue;
+        }
         match matcher::splat_placeholder_name(p, prepared) {
             Some(name) => {
                 // The same sequence must sit at the same position in the

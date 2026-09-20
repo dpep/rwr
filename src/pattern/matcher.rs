@@ -1201,6 +1201,22 @@ pub(crate) fn lone_rest_placeholder(node: &Node<'_>, prepared: &Prepared) -> Opt
     prepared.bindings.get(key).and_then(|b| b.name.clone())
 }
 
+/// The metavariable an argument list's lone `*$A` stands for.
+///
+/// The argument-list twin of [`lone_rest_placeholder`], and it exists for the
+/// rewrite rather than the match: matching already lets `$R.foo(*$A)` vanish
+/// against a call Prism gave no `ArgumentsNode` at all, but the diff had no
+/// correspondence for it, gave up, and re-rendered the whole call from the
+/// template -- so a paren-less `w.foo` came back as `w.caption()`.
+pub(crate) fn lone_splat_placeholder(node: &Node<'_>, prepared: &Prepared) -> Option<String> {
+    node.as_arguments_node()?;
+    let kids = generated::children(node);
+    let [only] = kids.as_slice() else {
+        return None;
+    };
+    splat_placeholder_name(only, prepared)
+}
+
 /// The marker a singleton class body pushes onto the scope stack.
 ///
 /// Not a class name: `class << self` opens a new *context*, not a new class, so
