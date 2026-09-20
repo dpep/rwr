@@ -1,50 +1,61 @@
-# The two forms return different things: `each` returns its receiver, so
-# `xs.reverse.each {}` yields the reversed copy while `xs.reverse_each {}` yields
-# `xs` in its original order. Interchangeable only where the value is discarded,
-# and the pattern says nothing about that -- see the failing fixture below.
+# Reports; it does not rewrite. The two forms return different things: `each`
+# returns its receiver, so `xs.reverse.each {}` evaluates to the reversed copy
+# while `xs.reverse_each {}` evaluates to `xs` in its original order. They are
+# interchangeable exactly where the value is discarded, and `where:` has no way
+# to say that -- "is this expression in void context" is a fact about the
+# statement around the match, not about the match.
+#
+# So this is the case the docs describe for a finding: the right answer depends
+# on something rwr cannot see. A reader answers it in one look -- is the value
+# assigned, chained, returned or passed? -- which is why reporting is worth more
+# here than either a silent flip or nothing at all.
+#
+# *Not* deleted, and not `unsafe:`. Deleting was proposed on the measurement
+# that rails and mastodon have zero sites; discourse has nine, every one of them
+# void, and `docs/internal/phase0-results.md` already recorded five. The rule
+# finds real code. `unsafe:` would gate it behind a run-level flag and then
+# rewrite every site the run touched, including the ones a reader would have
+# declined -- the flag says "I accept this hazard", not "check each site".
 #
 # The receiver hazard is the other way round from the obvious guess: `reverse`
 # lives on Array and String only, while `reverse_each` comes from Enumerable and
 # is on Hash, Range, Set and Enumerator too. String has no `each`, so every
-# receiver reaching this rule at runtime is already an Array.
-description: '`reverse.each` allocates a reversed copy; `reverse_each` iterates backwards in place.'
+# receiver reaching this rule at runtime is already an Array. There is nothing
+# to guard there.
+description: '`reverse.each` allocates a reversed copy; where the value is discarded, `reverse_each` iterates backwards in place.'
 match: $R.reverse.each { |$P| $B }
-rewrite: $R.reverse_each { |$P| $B }
 tests:
   - input: |
       xs.reverse.each { |x| p x }
-    output: |
-      xs.reverse_each { |x| p x }
+    finds: 1
 
-  # FAILING. `each` returns the receiver, so the value of the expression flips
-  # from reversed to original order. Nothing in `where:` can say "the value is
-  # discarded", so the rule cannot currently decline these.
+  # The reason there is no `rewrite:`. `each` returns the receiver, so rewriting
+  # any of these flips the value of the expression from reversed to original
+  # order -- assigned, chained, and passed as an argument. They are still
+  # reported: a finding is a question for the reader, and these are the sites
+  # where the answer is no.
   - input: |
       a = xs.reverse.each { |x| p x }
       xs.reverse.each { |x| p x }.first
       consume(xs.reverse.each { |x| p x })
-    unchanged: true
+    finds: 3
 
   - input: |
       xs.reverse.each do |x|
         p x
       end
-    output: |
-      xs.reverse_each do |x|
-        p x
-      end
+    finds: 1
 
-  # `&.` has to survive on the surviving call, or a nil receiver starts raising.
+  # Safe navigation is a different call node and still the same shape.
   - input: |
       xs&.reverse&.each { |x| p x }
-    output: |
-      xs&.reverse_each { |x| p x }
+    finds: 1
 
   # Anything between `reverse` and `each` makes the copy load-bearing.
   - input: |
       xs.reverse.uniq.each { |x| p x }
-    unchanged: true
+    finds: 0
 
   - input: |
       xs.reverse.map { |x| x }
-    unchanged: true
+    finds: 0

@@ -3231,3 +3231,35 @@ than a retraction.
 *Reverses if:* edits become a structural diff over the tree rather than byte ranges, at which
 point a node that does not move is never spliced and "the span a node occupies" stops needing to
 be contiguous at all.
+
+## D112 - A rule that cannot state its precondition reports; it does not rewrite
+
+**Decided.** `performance/reverse-each` becomes a finding. `each` returns its receiver, so
+`xs.reverse.each {}` evaluates to the reversed copy and `xs.reverse_each {}` to the original.
+They are interchangeable exactly where the value is discarded -- a fact about the *statement
+around* the match, which `where:` has no predicate for and structurally cannot: rwr matches a
+node, and void context is a property of its position. On a 13-case file the rule matched 7
+sites and 4 of them were non-void -- assignment, `.first` chained onto the result, an implicit
+return, and a call argument -- each silently flipping the value.
+
+*Why not delete it.* Deletion was proposed on "zero sites in rails and mastodon, blast radius
+nil". Re-measured: **nine sites on discourse**, every one of them void, and
+`phase0-results.md` had already recorded five. The rule finds real code, and the reader can
+answer its question in one look -- is the value assigned, chained, returned or passed?
+
+*Why not `unsafe:`.* That flag is run-level. It says "I accept this hazard", and then rewrites
+every site the run touched, including the ones a reader would have declined. The hazard here
+is per-site and the reader is the only one who can see it, which is the case the docs give
+report-only rules for: the right answer depends on something rwr cannot see.
+
+*What it costs.* A finding cannot be applied, so the nine discourse sites stop being a
+one-command change. That is the point: seven of thirteen matched and four of those seven were
+wrong, so "one command" was never the offer.
+
+*The receiver hypothesis is disproved, not deferred.* `reverse` exists on Array and String
+only, and String has no `each`, so every receiver reaching this rule is already an Array.
+There is no receiver hazard to guard.
+
+*Reverses if:* a `where:` predicate can say "this expression's value is discarded", at which
+point the rule is a rewrite again and the fixtures below it already say what it should do.
+
