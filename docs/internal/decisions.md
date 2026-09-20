@@ -1739,6 +1739,14 @@ directive above `def three` covered only the signature while the violation sat i
 it suppressed nothing and reported itself stale. Line scoping in a structural tool leaves the
 whole advantage on the table -- rwr has the tree, and no line-based tool can offer this.
 
+**Nested directives: the narrowest covering one takes the finding.** Resolution was document
+order, and a directive above a `class` always precedes the one at the site inside it -- so the
+broad one absorbed the finding and the specific one was reported stale, "delete the comment".
+That is the comment documenting the actual exception, and deleting the broad one later would
+then have *widened* the blind spot instead of narrowing it: the site it covered by accident is
+not the site anyone wrote it for. Width ties fall back to document order, and only arise for
+directives on the same statement, where either answer is the same answer.
+
 **No block form.** A `disable`/`enable` pair with a forgotten terminator silently suppresses the
 rest of a file, which is the invisible blind spot this tool exists to refuse. A mandatory
 terminator only converts that into "hope the reviewer notices it is 400 lines down". Node

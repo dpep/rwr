@@ -50,6 +50,12 @@ end
 starting on the attached line**, so above a `def` it means the whole method,
 nested blocks included, and it stops at that method's `end`.
 
+If two directives both cover a finding — one above a `class`, one at the site —
+the **narrower** one accepts it and the broader one is reported stale. So
+deleting the broad one later narrows the blind spot instead of quietly widening
+it, and the comment that documents the real exception is never the one you are
+told to delete.
+
 A reason may follow `--`. Rule ids are required: a bare `# rwr:ignore` is
 reported as malformed and suppresses nothing, because a blanket ignore is one no
 staleness check can audit.

@@ -303,6 +303,29 @@ fn line_start(source: &[u8], offset: usize) -> usize {
         .map_or(0, |n| n + 1)
 }
 
+/// The directive that accepts a finding of `rule` at `offset`: the **narrowest**
+/// one covering it.
+///
+/// This was `.find(...)`, so document order decided -- and a directive above a
+/// `class` always precedes the one at the site inside it. The broad one absorbed
+/// the finding and the specific one was reported stale, "delete the comment",
+/// which is exactly the comment documenting the real exception. Deleting the
+/// broad one later would then have silently *widened* the blind spot: the site
+/// it had been covering by accident is not the site anyone wrote it for.
+///
+/// Ties fall to document order, which `min_by_key` keeps -- widths tie only for
+/// directives on the same statement, where either answer is the same answer.
+pub(crate) fn covering<'a>(
+    directives: &'a [Directive],
+    rule: Option<&str>,
+    offset: usize,
+) -> Option<&'a Directive> {
+    directives
+        .iter()
+        .filter(|d| d.covers(rule, offset))
+        .min_by_key(|d| d.covers.1 - d.covers.0)
+}
+
 impl Directive {
     /// Whether this directive accepts findings of `rule` at `offset`.
     pub(crate) fn covers(&self, rule: Option<&str>, offset: usize) -> bool {
@@ -548,6 +571,36 @@ mod tests {
     fn deduplicating_names_keeps_the_written_order() {
         let (found, _) = read("sleep 1 # rwr:ignore c/d a/b c/d\n");
         assert_eq!(found[0].rules, vec!["c/d", "a/b"]);
+    }
+
+    /// Nested directives: the narrowest one takes the finding.
+    ///
+    /// Resolution was `.find(...)`, so document order won and a directive above
+    /// a `class` always precedes the one at the site. The broad one absorbed the
+    /// finding and the specific one -- the one documenting the actual exception
+    /// -- was reported stale, "delete the comment". Removing the broad one later
+    /// would then have silently widened the blind spot rather than narrowed it.
+    #[test]
+    fn the_narrowest_covering_directive_takes_the_finding() {
+        let src = "# rwr:ignore a/b\nclass K\n  def m\n    # rwr:ignore a/b\n    return nil\n  end\nend\n";
+        let (found, _) = read(src);
+        let here = at(src, "return nil");
+        assert_eq!(found.len(), 2);
+        // Both cover it; the inner one is the one that answers.
+        assert!(found[0].covers(Some("a/b"), here));
+        assert!(found[1].covers(Some("a/b"), here));
+        let taken = covering(&found, Some("a/b"), here).expect("covered");
+        assert_eq!(taken.line, 4, "the class-level directive took it");
+    }
+
+    /// Equal width is impossible for real nesting, but a tie must still be
+    /// decided the same way twice -- so it falls to document order.
+    #[test]
+    fn a_tie_is_broken_by_document_order() {
+        let src = "# rwr:ignore a/b\n# rwr:ignore a/b\nreturn nil\n";
+        let (found, _) = read(src);
+        let taken = covering(&found, Some("a/b"), at(src, "return nil")).expect("covered");
+        assert_eq!(taken.line, 1);
     }
 
     #[test]

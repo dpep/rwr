@@ -2198,6 +2198,37 @@ fn a_directive_accepts_a_finding_and_reports_that_it_did() {
     assert!(after.contains("def one\n  return\n"), "rewrote: {after}");
 }
 
+/// Nested directives: the narrow one at the site takes the finding, and the
+/// broad one above the class is the one reported stale.
+///
+/// It resolved in document order, so the class-level directive -- which always
+/// precedes the site inside it -- absorbed the finding and the specific one was
+/// told to delete itself. That is the comment documenting the actual exception,
+/// and removing the broad one later would then have silently widened the blind
+/// spot rather than narrowed it.
+#[test]
+fn the_narrowest_directive_takes_the_finding_and_the_broad_one_goes_stale() {
+    let dir = fixture(
+        "# rwr:ignore style/return-nil\nclass K\n  def m\n    \
+         # rwr:ignore style/return-nil\n    return nil\n  end\nend\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "style/return-nil", "fixture.rb"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    let err = stderr(&out);
+    assert!(err.contains("1 finding(s) accepted"), "{err}");
+    assert!(
+        err.contains("fixture.rb:1"),
+        "the broad one is stale: {err}"
+    );
+    assert!(
+        !err.contains("fixture.rb:4"),
+        "the directive at the site must not be told to delete itself: {err}"
+    );
+}
+
 /// A directive naming no rule cannot be checked for staleness, so it is an
 /// error rather than a very effective directive.
 #[test]

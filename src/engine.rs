@@ -640,7 +640,7 @@ impl Engine {
                                         let (start, _) = rewrite::effective_range(&m.node);
                                         let (line, _) = source::line_col(&current, start);
                                         let id = rule.id.as_deref();
-                                        match directives.iter().find(|d| d.covers(id, start)) {
+                                        match crate::suppress::covering(&directives, id, start) {
                                             None => true,
                                             Some(d) => {
                                                 used.insert((
