@@ -1029,11 +1029,12 @@ pub(crate) fn resolve_type(node: &Node<'_>, at: &Where<'_>) -> Option<Receiver> 
             let name = node.as_constant_read_node()?.name().as_slice().to_vec();
             String::from_utf8(name).ok().map(Receiver::Class)
         }
-        Node::ConstantPathNode { .. } => {
-            // `A::B` denotes B; the path is how you reach it, not what it is.
-            let name = node.as_constant_path_node()?.name()?.as_slice().to_vec();
-            String::from_utf8(name).ok().map(Receiver::Class)
-        }
+        // `Billing::Account` denotes a class called `Billing::Account`, spelled
+        // the way `scope_name_of` spells the declaration. Returning the last
+        // segment made every namesake one class on the call side -- and
+        // `same_class` short-circuits on string equality, so the hierarchy
+        // could not separate them afterwards (D100).
+        Node::ConstantPathNode { .. } => qualified(node).map(Receiver::Class),
         // `self` is the class inside `def self.x` or `class << self`, and an
         // instance inside an ordinary method body.
         Node::SelfNode { .. } => scope.last().cloned().map(|n| {
@@ -2696,6 +2697,31 @@ end
         assert_eq!(applied(rule, "Widget.new.dup.itself.display_name\n"), 1);
         // `then` returns the *block's* value, so it is not one of them.
         assert_eq!(applied(rule, "Widget.new.then { |w| w }.display_name\n"), 0);
+    }
+
+    /// A namespaced receiver is spelled whole, so two classes sharing a last
+    /// segment stay two classes on the call side as well as the definition side.
+    ///
+    /// `resolve_type` used to return the bare last segment for a constant path,
+    /// so `type: Account` matched `Billing::Account.foo` and `Sales::Account.foo`
+    /// alike -- and `same_class` short-circuits on string equality, so the
+    /// hierarchy never got the chance to separate them.
+    #[test]
+    fn a_namespaced_receiver_is_not_its_short_namesake() {
+        let on = |class: &str| {
+            format!(
+                "match: $R.display_name\nwhere:\n  $R:\n    type: {class}\n    kind: class\n\
+                 rewrite: $R.full_name\n"
+            )
+        };
+        let account = on("Account");
+        assert_eq!(applied(&account, "Account.display_name\n"), 1);
+        assert_eq!(applied(&account, "Billing::Account.display_name\n"), 0);
+
+        let qualified = on("Billing::Account");
+        assert_eq!(applied(&qualified, "Billing::Account.display_name\n"), 1);
+        assert_eq!(applied(&qualified, "Sales::Account.display_name\n"), 0);
+        assert_eq!(applied(&qualified, "Account.display_name\n"), 0);
     }
 
     /// `Widget.new` is an instance; `Widget` is the class object. A constructor

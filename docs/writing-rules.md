@@ -96,6 +96,12 @@ app/x.rb:42:3: rule: matched, then declined
 "Did not resolve" and "resolved to the wrong class" are different problems. The
 first may not be fixable by changing the rule.
 
+**`type:` names a class, not a last segment.** A receiver written
+`Billing::Account` is `Billing::Account`, so `type: Account` does not match it
+unless `Account` is the only class of that name the run can see — the same rule
+`inside:` and a `Klass#method` designator follow. Write the namespace when the
+repo has more than one.
+
 ## `contains:`
 
 A whole sub-pattern inside a constraint, with shared metavariables required to

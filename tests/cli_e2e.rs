@@ -3551,3 +3551,68 @@ fn a_qualified_designator_does_not_retarget_to_a_sibling() {
         stderr(&out)
     );
 }
+
+/// A rename reaches the call sites of the class it named, and no namesake's.
+///
+/// The definition side obeyed D100 and the call side did not: `resolve_type`
+/// returned the bare last segment for a constant path, and `same_class`
+/// short-circuits on string equality, so the hierarchy never got a chance to
+/// tell `Account` from `Billing::Account`. A rename of the top-level one
+/// rewrote both classes' calls and only one class's definition -- a
+/// `NoMethodError` shipped at exit 0 with an empty residue list.
+#[test]
+fn a_rename_does_not_merge_classes_sharing_a_last_segment() {
+    let both = "class Account\n  def display_name\n    \"t\"\n  end\nend\n\n\
+                module Billing\n  class Account\n    def display_name\n      \"b\"\n    end\n  \
+                end\nend\n\n\
+                Account.new.display_name\nBilling::Account.new.display_name\n";
+    let dir = fixture(both);
+    let out = rwr(&[
+        "rewrite",
+        "Account#display_name",
+        "-r",
+        "full_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    assert!(
+        after.contains("Account.new.full_name\nBilling::Account.new.display_name"),
+        "only the named class's call moves: {after} ({})",
+        stderr(&out)
+    );
+    assert_eq!(
+        after.matches("def full_name").count(),
+        1,
+        "and only its definition: {after}"
+    );
+}
+
+/// An ambiguous short name reaches no class at all -- calls included.
+///
+/// With two namespaced Accounts and no top-level one, the definition side
+/// resolves to none of them (D100) while the call side resolved to *all* of
+/// them: both classes' call sites were rewritten to a method neither defined.
+/// Strictly worse than the behaviour D100 set out to fix.
+#[test]
+fn an_ambiguous_short_name_rewrites_no_call_site() {
+    let source = "module Billing\n  class Account\n    def self.display_name\n      \"b\"\n    \
+                  end\n  end\nend\n\n\
+                  module Sales\n  class Account\n    def self.display_name\n      \"s\"\n    \
+                  end\n  end\nend\n\n\
+                  Sales::Account.display_name\nBilling::Account.display_name\n";
+    let dir = fixture(source);
+    let out = rwr(&[
+        "rewrite",
+        "Account.display_name",
+        "-r",
+        "full_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    assert_eq!(
+        after,
+        source,
+        "neither class is `Account`, so nothing moves: {}",
+        stderr(&out)
+    );
+}

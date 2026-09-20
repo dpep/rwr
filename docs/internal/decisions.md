@@ -2612,6 +2612,24 @@ and it is the remedy this decision offers for ambiguity, which makes it the wors
 The unit tests fed `resolve` only unqualified names, so they asserted the documented rule while the
 code implemented a wider one.
 
+**The call side too** -- amended, and it was the larger half. `resolve_type` returned the bare last
+segment for a `ConstantPathNode` receiver, and `same_class` short-circuits on `one == other`, so the
+hierarchy never ran: `Billing::Account.new.display_name` and `Account.new.display_name` were one
+call site. A rename of the top-level `Account` therefore rewrote *both* classes' calls and only one
+class's definition -- `NoMethodError` at exit 0, with nothing in residue -- and an ambiguous short
+name, which resolves to no class on the definition side, resolved to *every* class on the call side.
+`resolve_type` now returns `qualified(node)`, the same spelling `scope_name_of` records, which is
+this decision's "one spelling, not two" applied to the axis it was not applied to first.
+
+This moves `type:` for hand-written rules: `type: Account` no longer matches `Billing::Account.foo`
+unless the hierarchy resolves `Account` to it. That is a narrowing, it is loud (the site is residue),
+and it makes `type:` agree with `inside:`, which has compared qualified names since this decision
+shipped. A rule whose two halves disagree about which class a name means is the bug, not the cost.
+
+Measured -- classes living under a last segment shared by two or more classes: rails 1,306/5,631
+(23%), discourse 687/7,066 (10%), mastodon 505/2,076 (24%). Mastodon's worst shared segment is
+`Account`, with 16.
+
 **One spelling, not two.** `hierarchy::constant_name` is now `matcher::qualified` re-exported rather
 than a second implementation, and `links` names every class through the matcher's own
 `scope_name_of` / `enclosing_class`. Two modules that spell a class differently are talking about
