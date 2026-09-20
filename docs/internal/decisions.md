@@ -2458,6 +2458,13 @@ as `name` or `save` would report every string in the repository containing that 
 the report. The wide net has a spelling already: the classless designator `#display_name` has no class
 to scope by, so it reports prose everywhere.
 
+**Amended: a regexp is a literal too.** `/display_name/` is not a `StringNode`, so nothing scanned it
+and a rename left every pattern written against the old name behind without a word. It reports as
+`Prose` under the same boundary rules, and on discourse a `User#name` rename yields two prose rows in
+total, so the widening costs nothing measurable. What it still misses: a metacharacter that looks like
+an identifier hides the name beside it, so `/\Adisplay_name\z/` reads as the word `Adisplay_name`.
+Escape-aware boundaries are a regexp-syntax problem rather than a prose one and were not attempted.
+
 ## D97 - A `def` pattern anchors on the name it renames
 **Decided.** A bug, recorded because of what it says about the shape of the report.
 

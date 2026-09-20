@@ -315,6 +315,44 @@ fn may_produce(node: &Node<'_>, anchors: &[Vec<u8>]) -> bool {
     })
 }
 
+/// Mentions of the anchors inside one literal's content span.
+///
+/// Scanned over the raw source slice rather than the unescaped bytes, so an
+/// offset here is an offset in the file; `content_loc` is also what keeps a
+/// heredoc pointing at its body rather than at its opening tag (D14).
+fn mentions(
+    source: &[u8],
+    span: (usize, usize),
+    anchors: &[Vec<u8>],
+    matched: &[(usize, usize)],
+    scope: &[String],
+) -> Vec<Occurrence> {
+    let (from, to) = span;
+    let Some(text) = source.get(from..to) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for anchor in anchors {
+        for at in crate::source::identifier_offsets(text, anchor) {
+            let start = from + at;
+            if matched.iter().any(|(s, e)| start >= *s && start < *e)
+                || !standalone(text, at, anchor.len())
+            {
+                continue;
+            }
+            out.push(Occurrence {
+                context: Context::Prose,
+                byte_start: start,
+                byte_end: start + anchor.len(),
+                scope: scope.to_vec(),
+                implicit: false,
+                via: None,
+            });
+        }
+    }
+    out
+}
+
 /// The method name a literal argument spells, if it spells one.
 ///
 /// `attr_reader :display_name` and `alias_method "new", "old"` both name
@@ -592,25 +630,23 @@ pub(crate) fn find(
             let whole = whole.trim_ascii().to_vec();
             // A string that *is* the name is a dispatch, reported below as
             // `String`. Only the rest are mentions.
-            if !anchors.contains(&whole)
-                && let Some(text) = source.get(from..to)
-            {
-                for anchor in anchors {
-                    for at in crate::source::identifier_offsets(text, anchor) {
-                        if covered(from + at) || !standalone(text, at, anchor.len()) {
-                            continue;
-                        }
-                        out.push(Occurrence {
-                            context: Context::Prose,
-                            byte_start: from + at,
-                            byte_end: from + at + anchor.len(),
-                            scope: here.clone(),
-                            implicit: false,
-                            via: None,
-                        });
-                    }
-                }
+            if !anchors.contains(&whole) {
+                out.extend(mentions(source, (from, to), anchors, matched, &here));
             }
+        }
+
+        // A regexp is a literal too, and a name written into one goes stale the
+        // way one in a string does. Its own arm because a regexp is not a
+        // `StringNode`, which is why nothing scanned it at all.
+        //
+        // The word boundaries are prose's, so a metacharacter that looks like an
+        // identifier hides the name beside it: `/\Adisplay_name\z/` reads as the
+        // word `Adisplay_name`. Escape-aware boundaries are a regexp-syntax
+        // problem, not a prose one, and are not solved here.
+        if let Some(regexp) = node.as_regular_expression_node() {
+            let content = regexp.content_loc();
+            let span = (content.start_offset(), content.end_offset());
+            out.extend(mentions(source, span, anchors, matched, &here));
         }
 
         let mut implicit_self = false;
@@ -772,6 +808,19 @@ mod tests {
         // Nothing static to reason from: unknown is not impossible.
         assert!(reaches("x"));
         assert!(reaches("\"#{x}\""));
+    }
+
+    /// A regexp is a literal, and nothing scanned it -- so a rename left every
+    /// pattern written against the old name behind without a word.
+    #[test]
+    fn a_name_written_into_a_regexp_is_reported() {
+        assert_eq!(
+            residue_of("$R.display_name", "/display_name/.match?(x)\n"),
+            [Context::Prose]
+        );
+        // The same rule as a string: a neighbouring qualifier means this is one
+        // segment of a longer name, not a mention of the method.
+        assert!(residue_of("$R.display_name", "/admin\\/display_name/ =~ x\n").is_empty());
     }
 
     /// A macro definer names what it creates in its arguments, so a rename
