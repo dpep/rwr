@@ -1241,9 +1241,30 @@ which would reach a different and larger class of receiver, and `.rbi` is parsea
 the same machinery would work. It is not built because nothing has asked for it yet, and
 gem-typed receivers are a different rule population from a repository's own classes.
 
-*Reverses if:* nothing about this one. The feature is pure upside — a repository without
-signatures is unaffected, and a wrong signature narrows to a class that simply does not
-match, which under-matches rather than mis-rewrites.
+**A signature's type is read where it was written** — amended, and it retires the claim this
+decision used to close on: *"a wrong signature narrows to a class that simply does not match,
+which under-matches rather than mis-rewrites."* That held only while a signature could not name
+the **wrong** class, and D100 — which postdates this decision — made that possible by teaching the
+call side to spell a constant whole and read it lexically. `sigs::receiver_type` was not part of
+that change and kept doing the opposite: a `ConstantPathNode` became its last segment, a
+`ConstantReadNode` was read at the top level. So `sig { returns(Helpers::Thing) }` narrowed a call
+to the top-level `Thing`, `rwr rewrite 'Thing#display_name' -r label` moved it, and the program
+raised `NoMethodError` on the next run — exit 0, the site in neither report. The same reading
+reached `T::Struct` fields, `params(...)`, `T.class_of(...)`, and `type:` in a hand-written rule,
+so `check` / `rewrite all` in CI carried it.
+
+A signature's type is now stored **as written**, beside the class it was written in, and resolved
+through `Hierarchy::written_at` at lookup — the same call `resolve_type` makes, because two halves
+spelling a class differently is the whole of D100. `T::` is stripped first: it is Sorbet's type
+language rather than a Ruby namespace, and what `T::Array[Widget]` dispatches on is `Array`.
+
+The unit test pinned the bug rather than the rule — *"A constant path denotes its last name, as
+everywhere else in rwr"* — and the one e2e test used top-level classes with unambiguous names, so
+no fixture in the repo had a namespaced signature type and a namesake at once.
+
+*Reverses if:* nothing about the feature itself. A repository without signatures is unaffected,
+and a type rwr cannot name still yields nothing rather than a guess. What has gone is the claim
+that a wrong answer here is harmless.
 
 ## D63 - Three structural cuts in the scan, and the ones not taken
 **Decided**, and every number here is five warm runs on discourse (11,006 files, 39 MB).

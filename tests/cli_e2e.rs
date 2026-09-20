@@ -2751,6 +2751,90 @@ fn a_sorbet_signature_narrows_a_receiver() {
     );
 }
 
+/// A signature's type is a constant, and which class a constant names depends
+/// on where it is written (D100).
+///
+/// Read as its last segment, `sig { returns(Helpers::Thing) }` handed the call
+/// to a top-level namesake: `rwr rewrite 'Thing#display_name' -r label` moved
+/// it, and the program raised `NoMethodError` on the next run. Each designator
+/// must claim exactly the sites that are its own, and decline the other's
+/// loudly.
+#[test]
+fn a_signature_type_does_not_claim_a_namesakes_method() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("helpers.rb"),
+        "module Helpers\n  class Thing\n    def display_name\n      \"helper\"\n    \
+         end\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("thing.rb"),
+        "class Thing\n  def display_name\n    \"top\"\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        path.join("parser.rb"),
+        "class Parser\n  extend T::Sig\n\n  sig { returns(Helpers::Thing) }\n  \
+         def thing\n    @thing\n  end\n\n  def go\n    thing.display_name\n  end\nend\n",
+    )
+    .expect("write");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    // The call is `Helpers::Thing`'s. The bare designator declines it -- and
+    // says so, rather than going quiet.
+    let bare = run(&["find", "Thing#display_name", "."]);
+    let matched = String::from_utf8_lossy(&bare.stdout);
+    assert!(
+        !matched.contains("parser.rb:10"),
+        "a namesake's call was claimed: {matched}"
+    );
+    assert!(
+        stderr(&bare).contains("could not account for"),
+        "declining a call must be reported: {}",
+        stderr(&bare)
+    );
+
+    // And the designator that *is* that class claims it.
+    let qualified = run(&["find", "Helpers::Thing#display_name", "."]);
+    let qualified = String::from_utf8_lossy(&qualified.stdout);
+    assert!(
+        qualified.contains("parser.rb:10"),
+        "the owning designator must claim it: {qualified}"
+    );
+
+    // The rewrite follows: the call stays put under the wrong name, and moves
+    // under the right one.
+    assert_eq!(
+        run(&["rewrite", "Thing#display_name", "-r", "label", "."])
+            .status
+            .code(),
+        Some(0)
+    );
+    let parser = std::fs::read_to_string(path.join("parser.rb")).expect("read");
+    assert!(
+        parser.contains("thing.display_name"),
+        "a namesake's call was rewritten: {parser}"
+    );
+    assert_eq!(
+        run(&["rewrite", "Helpers::Thing#display_name", "-r", "label", "."])
+            .status
+            .code(),
+        Some(0)
+    );
+    let parser = std::fs::read_to_string(path.join("parser.rb")).expect("read");
+    let helpers = std::fs::read_to_string(path.join("helpers.rb")).expect("read");
+    assert!(parser.contains("thing.label"), "{parser}");
+    assert!(helpers.contains("def label"), "{helpers}");
+}
+
 /// `inside:` means one class, by its qualified name.
 ///
 /// Lexical nesting is *namespacing*, not membership: `class Account; class Row`

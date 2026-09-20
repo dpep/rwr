@@ -13,32 +13,58 @@
 //! nothing rather than a guess, so `T.untyped`, `T.any(...)` and `void` simply
 //! do not appear in the index. Narrowing may only ever narrow.
 
+use crate::hierarchy::Hierarchy;
 use crate::pattern::generated;
-use crate::pattern::matcher::Receiver;
+use crate::pattern::matcher::{Receiver, enclosing_class};
 use crate::source::Source;
 use rayon::prelude::*;
 use ruby_prism::Node;
 use std::collections::HashMap;
 
+/// Which method of which class it is: `(class, method, singleton)`.
+type Key = (String, String, bool);
+
 /// Which method of which class, what it returns, and what it takes.
-type Signed = (
-    (String, String, bool),
-    Option<Receiver>,
-    Vec<(String, Receiver)>,
-);
+type Signed = (Key, Option<Written>, Vec<(String, Written)>);
+
+/// A type a signature named, as it was spelled and where it was spelled.
+///
+/// Resolved at lookup rather than here, because which class a constant names
+/// depends on the lexical position it is written at, and that is the
+/// hierarchy's question (D100). Reading `Helpers::Thing` as `Thing` -- or a
+/// bare `Thing` inside `module App` as the top-level one -- claimed a
+/// namesake's method and rewrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Written {
+    /// The constant as the signature spelled it, with its kind.
+    receiver: Receiver,
+    /// The class or module the signature sits in, fully qualified.
+    enclosing: Option<String>,
+}
+
+impl Written {
+    /// The class the signature named, read the way Ruby reads it there.
+    fn at(&self, hierarchy: &Hierarchy) -> Receiver {
+        let name = hierarchy.written_at(self.receiver.class_name(), self.enclosing.as_deref());
+        match self.receiver {
+            Receiver::Instance(_) => Receiver::Instance(name),
+            Receiver::Class(_) => Receiver::Class(name),
+        }
+    }
+}
 
 /// What each signed method returns and accepts, keyed by the class defining it.
 #[derive(Debug, Default)]
 pub(crate) struct Signatures {
     /// `(class, method, singleton) -> return type`.
-    returns: HashMap<(String, String, bool), Receiver>,
+    returns: HashMap<Key, Written>,
     /// `(class, method, singleton) -> parameter name -> its type`.
     ///
     /// Parameters are the half that makes an ordinary guard resolvable. A return
     /// type answers "what does this chain evaluate to"; a parameter type answers
     /// "what is this bare local", which is what most code actually asks about --
     /// `return if x.nil?` guards an argument far more often than a chain.
-    params: HashMap<(String, String, bool), HashMap<String, Receiver>>,
+    params: HashMap<Key, HashMap<String, Written>>,
 }
 
 impl Signatures {
@@ -63,18 +89,32 @@ impl Signatures {
     /// The types a signature gave `class#method`'s parameters, if it gave any.
     pub(crate) fn params(
         &self,
+        hierarchy: &Hierarchy,
         class: &str,
         method: &str,
         singleton: bool,
-    ) -> Option<&HashMap<String, Receiver>> {
+    ) -> Option<Vec<(String, Receiver)>> {
         self.params
             .get(&(class.to_string(), method.to_string(), singleton))
+            .map(|found| {
+                found
+                    .iter()
+                    .map(|(name, written)| (name.clone(), written.at(hierarchy)))
+                    .collect()
+            })
     }
 
     /// What `class#method` (or `class.method`) returns, if a signature said.
-    pub(crate) fn returns(&self, class: &str, method: &str, singleton: bool) -> Option<&Receiver> {
+    pub(crate) fn returns(
+        &self,
+        hierarchy: &Hierarchy,
+        class: &str,
+        method: &str,
+        singleton: bool,
+    ) -> Option<Receiver> {
         self.returns
             .get(&(class.to_string(), method.to_string(), singleton))
+            .map(|written| written.at(hierarchy))
     }
 
     /// Read every signature in the corpus.
@@ -112,7 +152,7 @@ impl Signatures {
 
         let parsed = found.len();
         let mut returns = HashMap::new();
-        let mut params: HashMap<(String, String, bool), HashMap<String, Receiver>> = HashMap::new();
+        let mut params: HashMap<Key, HashMap<String, Written>> = HashMap::new();
         for (key, ret, args) in found.into_iter().flatten() {
             if let Some(ret) = ret {
                 returns.insert(key.clone(), ret);
@@ -137,6 +177,14 @@ fn collect(
     // pairs are what has to be walked rather than nodes.
     if let Some(statements) = node.as_statements_node() {
         let body: Vec<Node<'_>> = statements.body().iter().collect();
+        // Where a type named here is written, which is what decides which
+        // class it names. Spelled by the matcher's own function so the two
+        // halves cannot drift into meaning different things by one name.
+        let here = enclosing_class(scope);
+        let written = |receiver: Receiver| Written {
+            receiver,
+            enclosing: here.clone(),
+        };
         for pair in body.windows(2) {
             // Not gated on a usable return type: `sig { params(x: String).void }`
             // states nothing this index can use about the *result* and everything
@@ -149,6 +197,11 @@ fn collect(
                 continue;
             }
             let Some(class) = scope.last() else { continue };
+            let returns = returns.clone().map(&written);
+            let params: Vec<(String, Written)> = params
+                .iter()
+                .map(|(name, receiver)| (name.clone(), written(receiver.clone())))
+                .collect();
             for (name, on_class) in described_methods(&pair[1], singleton) {
                 out.push((
                     (class.clone(), name, on_class),
@@ -163,7 +216,11 @@ fn collect(
         if struct_body && let Some(class) = scope.last() {
             for statement in &body {
                 if let Some((name, returns)) = struct_field(statement) {
-                    out.push(((class.clone(), name, false), Some(returns), Vec::new()));
+                    out.push((
+                        (class.clone(), name, false),
+                        Some(written(returns)),
+                        Vec::new(),
+                    ));
                 }
             }
         }
@@ -345,16 +402,21 @@ fn signature_params(call: &ruby_prism::CallNode<'_>) -> Vec<(String, Receiver)> 
 }
 
 /// Turn a Sorbet type expression into a receiver, when it names a class.
+///
+/// The name is the constant *as written*: spelled whole (`A::B`, never `B`) and
+/// left unresolved, because what it names depends on where the signature sits
+/// and only the caller knows that. `Written` carries it there.
 fn receiver_type(node: &Node<'_>) -> Option<Receiver> {
     match node {
-        Node::ConstantReadNode { .. } => {
-            let name = String::from_utf8(node.as_constant_read_node()?.name().as_slice().to_vec());
-            name.ok().map(Receiver::Instance)
-        }
-        // `A::B` denotes B, matching how a constant path resolves elsewhere.
-        Node::ConstantPathNode { .. } => {
-            let name = String::from_utf8(node.as_constant_path_node()?.name()?.as_slice().to_vec());
-            name.ok().map(Receiver::Instance)
+        // Shared with the matcher rather than respelled, so a signature's type
+        // and a call's receiver cannot come out as different class names.
+        //
+        // `T::` is stripped: it is Sorbet's type language, not a Ruby
+        // namespace, and what `T::Array[Widget]` dispatches on is `Array`.
+        Node::ConstantReadNode { .. } | Node::ConstantPathNode { .. } => {
+            crate::pattern::matcher::qualified(node)
+                .map(|name| name.strip_prefix("T::").unwrap_or(&name).to_string())
+                .map(Receiver::Instance)
         }
         Node::CallNode { .. } => {
             let call = node.as_call_node()?;
@@ -390,16 +452,23 @@ mod tests {
         Signatures::from_sources(&[Source::Owned(source.as_bytes().to_vec())]).0
     }
 
+    /// A lookup reads a type where it was written, so every assertion needs the
+    /// hierarchy of the same source the signatures came from.
+    fn looked_up(source: &str) -> (Signatures, Hierarchy) {
+        (index(source), Hierarchy::from_source(source))
+    }
+
     fn returns_of(sig: &str) -> Option<Receiver> {
         let source = format!("class C\n  {sig}\n  def m; end\nend\n");
-        index(&source).returns("C", "m", false).cloned()
+        let (sigs, hierarchy) = looked_up(&source);
+        sigs.returns(&hierarchy, "C", "m", false)
     }
 
     fn params_of(sig: &str) -> Vec<(String, String)> {
         let source = format!("class C\n  {sig}\n  def m(a, b); end\nend\n");
-        let index = index(&source);
-        let mut found: Vec<(String, String)> = index
-            .params("C", "m", false)
+        let (sigs, hierarchy) = looked_up(&source);
+        let mut found: Vec<(String, String)> = sigs
+            .params(&hierarchy, "C", "m", false)
             .map(|p| {
                 p.iter()
                     .map(|(k, v)| (k.clone(), v.class_name().to_string()))
@@ -426,7 +495,8 @@ mod tests {
         // And the same signature yields no return type, which is the half that
         // used to decide whether any of it was recorded.
         let source = "class C\n  sig { params(a: String).void }\n  def m(a); end\nend\n";
-        assert!(index(source).returns("C", "m", false).is_none());
+        let (sigs, hierarchy) = looked_up(source);
+        assert!(sigs.returns(&hierarchy, "C", "m", false).is_none());
     }
 
     /// A repository whose signatures are all `params(..).void` has no return
@@ -435,10 +505,11 @@ mod tests {
     /// that had just resolved a parameter two lines earlier.
     #[test]
     fn a_void_only_index_is_not_empty() {
-        let index = index("class C\n  sig { params(a: String).void }\n  def m(a); end\nend\n");
-        assert!(index.returns("C", "m", false).is_none());
-        assert!(!index.is_empty());
-        assert_eq!(index.len(), 1);
+        let (sigs, hierarchy) =
+            looked_up("class C\n  sig { params(a: String).void }\n  def m(a); end\nend\n");
+        assert!(sigs.returns(&hierarchy, "C", "m", false).is_none());
+        assert!(!sigs.is_empty());
+        assert_eq!(sigs.len(), 1);
     }
 
     /// The nilable unwrapping that makes a guard resolvable: what reaches the
@@ -481,10 +552,11 @@ mod tests {
             returns_of("sig { overridable.returns(Widget) }"),
             instance("Widget")
         );
-        // A constant path denotes its last name, as everywhere else in rwr.
+        // A constant path names the class it spells, as everywhere else in rwr
+        // since D100. Reading it as `Widget` claimed a namesake's method.
         assert_eq!(
             returns_of("sig { returns(A::B::Widget) }"),
-            instance("Widget")
+            instance("A::B::Widget")
         );
         // A value that reaches a call site is not nil there.
         assert_eq!(
@@ -513,19 +585,43 @@ mod tests {
         assert_eq!(returns_of("sig { params(a: Integer).void }"), None);
     }
 
+    /// Which class a signature's type names depends on where the signature is
+    /// written, exactly as it does for a call's receiver (D100). Reading a path
+    /// as its last segment, or a bare name at the top level, handed a
+    /// namesake's method to a rewrite -- `Helpers::Thing#display_name` renamed
+    /// under the name `Thing`, for a `NoMethodError` at runtime.
+    #[test]
+    fn a_signature_type_is_read_where_it_was_written() {
+        let nested = "module App\n  class Thing; end\n\n  class Parser\n    \
+                      sig { returns(Thing) }\n    def thing; end\n  end\nend\n\nclass Thing; end\n";
+        let (sigs, hierarchy) = looked_up(nested);
+        assert_eq!(
+            sigs.returns(&hierarchy, "Parser", "thing", false),
+            Some(Receiver::Instance("App::Thing".to_string()))
+        );
+
+        let path = "module Helpers\n  class Thing; end\nend\n\nclass Thing; end\n\n\
+                    class Parser\n  sig { returns(Helpers::Thing) }\n  def thing; end\nend\n";
+        let (sigs, hierarchy) = looked_up(path);
+        assert_eq!(
+            sigs.returns(&hierarchy, "Parser", "thing", false),
+            Some(Receiver::Instance("Helpers::Thing".to_string()))
+        );
+    }
+
     /// A signature describes the *next* definition, and that is not always a
     /// `def`: `attr_reader` is signed the same way and defines one method per
     /// symbol.
     #[test]
     fn attr_readers_carry_their_signature() {
-        let sigs = index(
+        let (sigs, hierarchy) = looked_up(
             "class C\n  sig { returns(Widget) }\n  attr_reader :one\n\n  \
              sig { returns(Widget) }\n  attr_accessor :two, :three\nend\n",
         );
         for name in ["one", "two", "three"] {
             assert_eq!(
-                sigs.returns("C", name, false),
-                Some(&Receiver::Instance("Widget".to_string())),
+                sigs.returns(&hierarchy, "C", name, false),
+                Some(Receiver::Instance("Widget".to_string())),
                 "{name}"
             );
         }
@@ -535,31 +631,31 @@ mod tests {
     /// return types must not share a key.
     #[test]
     fn singleton_and_instance_methods_are_separate() {
-        let sigs = index(
+        let (sigs, hierarchy) = looked_up(
             "class C\n  sig { returns(Widget) }\n  def self.build; end\n\n  \
              sig { returns(Gadget) }\n  def build; end\nend\n",
         );
         assert_eq!(
-            sigs.returns("C", "build", true),
-            Some(&Receiver::Instance("Widget".to_string()))
+            sigs.returns(&hierarchy, "C", "build", true),
+            Some(Receiver::Instance("Widget".to_string()))
         );
         assert_eq!(
-            sigs.returns("C", "build", false),
-            Some(&Receiver::Instance("Gadget".to_string()))
+            sigs.returns(&hierarchy, "C", "build", false),
+            Some(Receiver::Instance("Gadget".to_string()))
         );
     }
 
     /// Everything inside `class << self` is a singleton method.
     #[test]
     fn a_singleton_class_body_is_singleton_context() {
-        let sigs = index(
+        let (sigs, hierarchy) = looked_up(
             "class C\n  class << self\n    sig { returns(Widget) }\n    def build; end\n  end\nend\n",
         );
         assert_eq!(
-            sigs.returns("C", "build", true),
-            Some(&Receiver::Instance("Widget".to_string()))
+            sigs.returns(&hierarchy, "C", "build", true),
+            Some(Receiver::Instance("Widget".to_string()))
         );
-        assert_eq!(sigs.returns("C", "build", false), None);
+        assert_eq!(sigs.returns(&hierarchy, "C", "build", false), None);
     }
 
     /// `T::Struct` states a field's type in the declaration itself, with no
@@ -567,24 +663,27 @@ mod tests {
     /// again as many as its `sig` blocks.
     #[test]
     fn struct_fields_carry_their_type() {
-        let sigs = index(
+        let (sigs, hierarchy) = looked_up(
             "class Row < T::Struct\n  const :name, String\n  prop :widget, Widget\n  \
              const :maybe, T.nilable(Gadget)\n  const :untyped_thing, T.untyped\nend\n",
         );
         assert_eq!(
-            sigs.returns("Row", "name", false),
-            Some(&Receiver::Instance("String".to_string()))
+            sigs.returns(&hierarchy, "Row", "name", false),
+            Some(Receiver::Instance("String".to_string()))
         );
         assert_eq!(
-            sigs.returns("Row", "widget", false),
-            Some(&Receiver::Instance("Widget".to_string()))
+            sigs.returns(&hierarchy, "Row", "widget", false),
+            Some(Receiver::Instance("Widget".to_string()))
         );
         assert_eq!(
-            sigs.returns("Row", "maybe", false),
-            Some(&Receiver::Instance("Gadget".to_string()))
+            sigs.returns(&hierarchy, "Row", "maybe", false),
+            Some(Receiver::Instance("Gadget".to_string()))
         );
         // A type rwr cannot name yields nothing here as everywhere else.
-        assert_eq!(sigs.returns("Row", "untyped_thing", false), None);
+        assert_eq!(
+            sigs.returns(&hierarchy, "Row", "untyped_thing", false),
+            None
+        );
     }
 
     /// `const` is an ordinary enough word that reading it outside a `T::` struct
