@@ -250,14 +250,18 @@ fn read_owned(path: &Path) -> Source {
 }
 
 /// One-based line and column for a byte offset.
+///
+/// The column counts **characters**, which is the contract every consumer reads
+/// (`coordinate_conventions`: `columns: "1-based-chars"`). Counted as
+/// non-continuation bytes rather than by decoding: one pass over the current
+/// line, no UTF-8 validation, no allocation, and nothing to panic on in a file
+/// that is not valid UTF-8.
 pub(crate) fn line_col(source: &[u8], offset: usize) -> (usize, usize) {
     let upto = &source[..offset.min(source.len())];
     let line = upto.iter().filter(|b| **b == b'\n').count() + 1;
-    let col = upto
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map_or(offset, |i| offset - i - 1)
-        + 1;
+    let start = upto.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    // 0b10xxxxxx is the tail of a character already counted at its lead byte.
+    let col = upto[start..].iter().filter(|b| *b & 0xC0 != 0x80).count() + 1;
     (line, col)
 }
 
@@ -321,6 +325,26 @@ mod tests {
         assert_eq!(line_col(src, 2), (2, 1));
         assert_eq!(line_col(src, 3), (2, 2));
         assert_eq!(line_col(src, 5), (3, 1));
+    }
+
+    /// The column counts characters, not bytes. Every consumer -- the text
+    /// report, `-j`, an editor jumping to the site -- gets a column past the
+    /// match otherwise, on any line carrying an accented name, an i18n string
+    /// or a pasted curly quote.
+    #[test]
+    fn the_column_counts_characters_not_bytes() {
+        let two_byte = "x = \"caf\u{e9}\"; Foo".as_bytes();
+        assert_eq!(line_col(two_byte, two_byte.len() - 3), (1, 13));
+        let four_byte = "x = \"\u{1f389}\"; Foo".as_bytes();
+        assert_eq!(line_col(four_byte, four_byte.len() - 3), (1, 10));
+    }
+
+    /// The byte count restarts at each newline, so a multi-byte character on an
+    /// earlier line must not follow the count onto this one.
+    #[test]
+    fn a_multi_byte_character_on_an_earlier_line_does_not_leak() {
+        let src = "\u{e9}\u{e9}\u{e9}\nab".as_bytes();
+        assert_eq!(line_col(src, src.len() - 1), (2, 2));
     }
 
     #[test]

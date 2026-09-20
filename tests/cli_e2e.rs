@@ -323,6 +323,44 @@ fn find_json_carries_residue_and_the_reading() {
     assert_eq!(doc["interpreted"]["class"], "Account");
 }
 
+/// `col` is a character column, which is what `coordinate_conventions`
+/// promises and what an editor, an annotation and a human all assume.
+///
+/// Two characters wide apart in byte length, because a 2-byte one makes the
+/// byte column coincide with the right answer here by accident -- the extra
+/// byte cancels the 0-based/1-based gap against `byte_start` -- and a test
+/// written on that example passes while the bug is live.
+#[test]
+fn the_reported_column_counts_characters_not_bytes() {
+    for (what, source, col, byte_start) in [
+        (
+            "a two-byte character",
+            "x = \"caf\u{e9}\"; Widget.new\n",
+            13,
+            13,
+        ),
+        (
+            "a four-byte character",
+            "x = \"\u{1f389}\"; Widget.new\n",
+            10,
+            12,
+        ),
+    ] {
+        let dir = fixture(source);
+        let out = rwr(&[
+            "find",
+            "Widget.new",
+            dir.path().to_str().expect("utf8"),
+            "-j",
+        ]);
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+        let m = &doc["matches"][0];
+        assert_eq!(m["col"], col, "{what}: {m}");
+        // Pinned alongside so the two can never be silently conflated again.
+        assert_eq!(m["byte_start"], byte_start, "{what}: {m}");
+    }
+}
+
 /// A bare pattern is still a pattern, and adding `()` is how the literal call
 /// shape stays reachable now that the two-part spelling names the method.
 #[test]
