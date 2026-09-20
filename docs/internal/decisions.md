@@ -1200,6 +1200,31 @@ it does **not** reach chained receivers. Those need a type source or they stay r
 honest default is residue: rwr does not match them, does not rewrite them, and reports them,
 which is under-matching in the safe direction.
 
+**A block parameter shadows the name it reuses** — amended. "Receivers named directly" was
+implemented as a flat map from name to class, with a scope boundary at `def` and none at a block,
+so `t = Widget.new; [Gadget.new].each { |t| t.display_name }` read the block's `t` as a Widget and
+a rename of `Widget#display_name` moved the call. Ruby rebinds the name for the length of the
+block; rwr kept the outer meaning. The same map also let an assignment *inside* a block leak out
+of it.
+
+The block's parameter names are now taken out of the map on the way in and put back on the way
+out. This only ever **removes** a binding, so the worst it can do is decline a match — it cannot
+claim a different class's, which is why it is safe to apply generally rather than narrowly.
+Nothing in `locals` then knows what the block's `t` is, and the site lands in residue, which is
+the honest answer: an array literal's element type is not something rwr reads.
+
+Not a signature bug, though a signature is what made it dangerous. `params` is the only thing that
+resolves a bare *parameter* at all (D62), so every parameter a signature types is a fresh name a
+block can shadow — and deleting the `sig` from the fixture turned the wrong rewrite back into a
+loud miss.
+
+Measured, as an upper bound on the population: files where a block parameter reuses a name
+assigned from a constructor anywhere in the same file — 70 of 3,254 on rails (79 names), 51 of
+11,209 on discourse (60), 6 of 3,258 on mastodon (8). Counted per *file* rather than per method,
+so the affected population is smaller still. The shipped rule pack's output over all three corpora
+is byte-identical before and after, and `Guardian#can_see?` on discourse still reaches its 101
+sites.
+
 *Reverses if:* a repository carries RBS signatures or Sorbet RBI, which state return types
 outright and turn the 70% into data rather than inference. That is the case for ingesting
 them — a much stronger one than "it would help receiver narrowing generally", which this

@@ -989,6 +989,65 @@ fn collect_ivars(
     }
 }
 
+/// The local names a block's parameters bind, which shadow the outer scope.
+///
+/// A block parameter is a fresh binding for the length of the block, whatever
+/// the name meant outside it. Carrying the outer binding in claimed
+/// `[Gadget.new].each { |t| t.display_name }` for whatever `t` was before --
+/// a wrong rewrite, where forgetting the name merely declines.
+///
+/// Deliberately over-inclusive: it walks the parameter list whole, so a
+/// default value's own block contributes its parameters too. Shadowing a name
+/// that was not shadowed only ever drops a binding, and a dropped binding
+/// declines.
+fn block_parameter_names(node: &Node<'_>) -> Vec<String> {
+    let parameters = match node {
+        Node::BlockNode { .. } => node.as_block_node().and_then(|b| b.parameters()),
+        Node::LambdaNode { .. } => node.as_lambda_node().and_then(|l| l.parameters()),
+        _ => return Vec::new(),
+    };
+    let Some(parameters) = parameters else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack = vec![parameters];
+    while let Some(node) = stack.pop() {
+        let name = match &node {
+            Node::RequiredParameterNode { .. } => {
+                node.as_required_parameter_node().map(|n| n.name())
+            }
+            Node::OptionalParameterNode { .. } => {
+                node.as_optional_parameter_node().map(|n| n.name())
+            }
+            Node::RestParameterNode { .. } => node.as_rest_parameter_node().and_then(|n| n.name()),
+            Node::RequiredKeywordParameterNode { .. } => {
+                node.as_required_keyword_parameter_node().map(|n| n.name())
+            }
+            Node::OptionalKeywordParameterNode { .. } => {
+                node.as_optional_keyword_parameter_node().map(|n| n.name())
+            }
+            Node::KeywordRestParameterNode { .. } => {
+                node.as_keyword_rest_parameter_node().and_then(|n| n.name())
+            }
+            Node::BlockParameterNode { .. } => {
+                node.as_block_parameter_node().and_then(|n| n.name())
+            }
+            // `|a; b|` -- declared block-local, and shadowing is its whole job.
+            Node::BlockLocalVariableNode { .. } => {
+                node.as_block_local_variable_node().map(|n| n.name())
+            }
+            _ => None,
+        };
+        if let Some(name) = name
+            && let Ok(name) = String::from_utf8(name.as_slice().to_vec())
+        {
+            out.push(name);
+        }
+        stack.extend(generated::children(&node));
+    }
+    out
+}
+
 /// The variable a receiver reads, for looking up an inferred class.
 ///
 /// An instance variable read is not a `bare_name` -- it has no method call
@@ -1710,6 +1769,14 @@ fn walk<'pr>(
         outer
     });
 
+    // A block parameter is a fresh binding for the length of the block, so the
+    // outer meaning of that name must not reach inside it.
+    let shadowed_by_block = block_parameter_names(target);
+    let displaced: Vec<(String, String)> = shadowed_by_block
+        .iter()
+        .filter_map(|name| state.locals.remove_entry(name))
+        .collect();
+
     // `def self.x` and `class << self` both put their bodies in singleton
     // context, which is what makes `self` mean the class rather than an
     // instance.
@@ -1736,6 +1803,13 @@ fn walk<'pr>(
         walk(pattern, &child, prepared, criteria, state);
     }
     state.singleton = outer_singleton;
+
+    // A block's own bindings die with it, including any the body assigned to a
+    // shadowing name, and the outer meanings come back.
+    for name in &shadowed_by_block {
+        state.locals.remove(name);
+    }
+    state.locals.extend(displaced);
 
     if let Some(saved) = shadowed {
         // Locals are discarded with the method that declared them, but an

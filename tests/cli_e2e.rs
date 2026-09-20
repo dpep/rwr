@@ -2900,6 +2900,47 @@ fn namesake_classes_do_not_share_a_signature() {
     );
 }
 
+/// A block parameter is a fresh binding, whatever its name meant outside.
+///
+/// The outer binding was carried straight into the block, so
+/// `[Gadget.new].each { |t| t.display_name }` was claimed for whatever `t`
+/// was before it -- and a rename moved the call on an object that never had
+/// the method. What the block's `t` actually is, rwr cannot say, so the site
+/// belongs in residue: the fix only ever *removes* a binding, which is why it
+/// can decline a match but never claim a different class's.
+///
+/// A signature makes this worse rather than causing it -- the second fixture
+/// reproduces it from a plain assignment -- but `params` is the only thing
+/// that resolves a bare parameter at all, so every signed parameter is a new
+/// name a block can shadow.
+#[test]
+fn a_block_parameter_shadows_the_name_it_reuses() {
+    let classes = "class Widget\n  def display_name\n    \"w\"\n  end\nend\n\n\
+                   class Gadget\n  def display_name\n    \"g\"\n  end\nend\n\n";
+    let shadowing = "    [Gadget.new].each do |t|\n      t.display_name\n    end\n  end\nend\n";
+    let signed = format!(
+        "{classes}class Runner\n  extend T::Sig\n\n  sig {{ params(t: Widget).void }}\n  \
+         def go(t)\n{shadowing}"
+    );
+    let assigned = format!("{classes}class Runner\n  def go\n    t = Widget.new\n{shadowing}");
+
+    for (label, source) in [("signature", signed), ("assignment", assigned)] {
+        let dir = fixture(&source);
+        let at = dir.path().to_str().expect("utf8");
+        let out = rwr(&["find", "Widget#display_name", at]);
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("t.display_name"),
+            "{label}: a block's own `t` was claimed for the outer one: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            stderr(&out).contains("t.display_name"),
+            "{label}: an unresolved receiver must be reported: {}",
+            stderr(&out)
+        );
+    }
+}
+
 /// `self` names the class it sits in, spelled in full.
 ///
 /// Read as the innermost scope entry, it was the `class << self` marker inside
