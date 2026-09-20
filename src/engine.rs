@@ -343,8 +343,9 @@ impl Engine {
         self.rules.iter().zip(&self.prepareds)
     }
 
-    /// The match criteria for one rule, built in one place so a caller cannot
-    /// assemble them differently from the way `scan` does.
+    /// The match criteria for one rule, built in one place so no caller can
+    /// assemble them differently -- `scan` included, which overrides only
+    /// `explain` and takes the rest from here.
     pub(crate) fn criteria<'a>(&'a self, index: usize, ctx: &'a Context) -> matcher::Criteria<'a> {
         matcher::Criteria {
             explain: false,
@@ -523,13 +524,13 @@ impl Engine {
                                 // constraint rejection drives backtracking to a
                                 // different binding rather than discarding the
                                 // match (Q13).
+                                // Assembled by `criteria` even here: spelling
+                                // the fields out again is how `scan` and the
+                                // ERB pass come to disagree about what a rule
+                                // means.
                                 let criteria = matcher::Criteria {
                                     explain,
-                                    constraints: &rule.constraints,
-                                    contained: &self.contained[index],
-                                    scope: &rule.scope,
-                                    hierarchy: &ctx.hierarchy,
-                                    sigs: &ctx.sigs,
+                                    ..self.criteria(index, ctx)
                                 };
                                 let (mut hits, declined) = matcher::search_explaining(
                                     &p_root,
