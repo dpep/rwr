@@ -1,11 +1,23 @@
 # A lint, not a rewrite: `.size` on a relation is `count` when the relation is
 # unloaded and `length` when it is loaded, and which one the author wanted is a
 # question about code rwr cannot see. Flagging it is the honest answer.
+#
+# **It stays quiet on a real app, and `where` is why.** Measured: 0 sites across
+# mastodon, which writes 113 `.size` calls in `app/` and never one after a
+# `where`; 12 on rails, all in ActiveRecord's own tests. Widening the receiver
+# to "a `where` anywhere inside it" was measured too -- 19 on rails, still 0 on
+# mastodon, and it admits `relation.pluck(:id).size`, which is an Array's size.
+# So it was not taken: it bought noise, not reach.
+#
+# The shape that would actually pay -- `account.posts.size` on a `has_many` --
+# has no syntactic tell at all. It is `$R.$M.size`, which is also
+# `hash.keys.size`. Reaching it needs a receiver that resolves to
+# `ActiveRecord::Relation`, not a better pattern.
 description: '`.size` on a relation queries when unloaded and counts in memory when loaded; say which you meant.'
 unsafe: >-
   Assumes an ActiveRecord relation. `where` on anything else is a different
   method entirely.
-match: $R.where($C).size
+match: $R.where(*$C).size
 tests:
   - input: |
       n = Model.where(x: 1).size
@@ -22,6 +34,11 @@ tests:
   - input: |
       n = Model.where(x: 1, y: 2).size
     finds: 1
+  # A string condition is the other half of `where` and takes two arguments.
+  # `($C)` bound one and was blind to these; `(*$C)` covers every arity.
+  - input: |
+      n = Model.where('x = ?', 1).size
+    finds: 1
   # `where` is not a relation, only a hint of one: any receiver with a one-arg
   # `where` matches, and rwr has no way to tell them apart. Pinned so the
   # over-match is on the record next to the under-match below.
@@ -29,16 +46,10 @@ tests:
       n = config.where(x: 1).size
     finds: 1
   # Anything chained after `where` hides the site: the shape anchors `.size`
-  # directly to the `where` call, and real relations rarely end there.
+  # directly to the `where` call. Pinned as an under-match, not endorsed --
+  # loosening the anchor to "a `where` anywhere in the receiver" was measured
+  # and rejected (below).
   - input: |
       n = Model.where(x: 1).order(:id).size
       m = Model.where(x: 1).includes(:parts).size
     finds: 0
-  # RED, deliberately -- string conditions are the other half of `where`, and
-  # they take two arguments, so `$C` never binds and the rule is blind to them.
-  # This is the same question about the same relation as the passing case
-  # above. Measured: the rule finds nothing at all across a whole real Rails
-  # app, which has hundreds of `where` calls and over a hundred `.size` calls.
-  - input: |
-      n = Model.where('x = ?', 1).size
-    finds: 1
