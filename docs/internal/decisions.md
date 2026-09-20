@@ -2651,6 +2651,37 @@ The matcher's own unit tests could not see it: `applied` ran against an empty `H
 every name resolves to itself, so every question routed through it was a string comparison. It now
 builds one from the test's own source, as it already did for signatures.
 
+**And residue asks about class names, not scope segments** -- amended, the third site and the last of
+them. `["App", "Helpers", "Numeric"]` names `App::Helpers::Numeric`; `scoped_to` asked the hierarchy
+about `Numeric`, which is not a class name at all. That was right only while the segment had exactly
+one candidate to widen to, and it stopped being right the moment the same module was *also* written
+relatively somewhere in the run -- because the written spelling goes into the index beside the
+declared one. `include App::Helpers::Numeric` reported the concern's `def` and the implicit-self
+calls in its body; `include Helpers::Numeric`, one word shorter, reported neither, at the same exit
+code with nothing on either stream. The absolute spelling was passing by accident, which is why no
+test saw it: every fixture used one spelling.
+
+`scoped_to` now asks about the qualified prefixes of the scope stack. A `class << self` body keeps
+its marker there rather than a class name, because `self` is the class object and a bare call in it
+is a singleton method -- the asymmetry FOLLOWUPS records, preserved deliberately rather than changed
+under cover of this fix.
+
+Measured: namespaced `include`/`prepend`/`extend` arguments needing lexical resolution -- 70 of 1,124
+on rails (6.2%), 0 of 363 on mastodon; `ActionController::Base` alone loses four. Rails' own
+`ActiveModel::Type::Helpers::Numeric` had its `def cast` -- an override on three numeric types -- and
+the `cast(value)` call in its body reported nowhere, while `Helpers::Mutable`, included by full path
+in the same tree, was reported.
+
+**Still literal, and deliberately: the constant index.** `by_segment` holds constants as *written*,
+so a relative `Helpers::Numeric` is indexed as a class of that literal name beside the declared
+`App::Helpers::Numeric`. Two candidates under the segment, so the short designator `Numeric#cast`
+resolves to neither: exit 1 and an empty report, for a class that is the only one of its name. This
+is what the accident above was made of. Measured -- 136 phantom entries on rails cost 36 of 6,632
+declared classes their own short name (0.5%); 60 phantoms cost 8 of 2,303 on mastodon (0.3%). Left
+open because the failure is in the safe direction -- a name resolving to nothing, never to the wrong
+class -- and the remedy *widens* what a short name reaches, which is the direction "Qualified means
+qualified" had to walk back. It changes this decision's resolution set and wants its own measurement.
+
 **One spelling, not two.** `hierarchy::constant_name` is now `matcher::qualified` re-exported rather
 than a second implementation, and `links` names every class through the matcher's own
 `scope_name_of` / `enclosing_class`. Two modules that spell a class differently are talking about

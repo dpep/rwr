@@ -153,6 +153,32 @@ const DEFINERS: &[&[u8]] = &[
     b"enum",
 ];
 
+/// Every class a scope stack names, outermost first and fully qualified.
+///
+/// `["App", "Helpers", "Numeric"]` names `App`, `App::Helpers` and
+/// `App::Helpers::Numeric`. Asking the hierarchy about the bare segments
+/// instead happened to work while the module's only spelling left one candidate
+/// to widen to, and stopped the moment the same module was also written
+/// relatively somewhere -- a written constant read literally where the rest of
+/// the run reads it lexically (D100).
+fn enclosing_classes(scope: &[String]) -> Vec<String> {
+    (1..=scope.len())
+        .filter_map(|n| matcher::enclosing_class(&scope[..n]))
+        .collect()
+}
+
+/// The class an implicit-self call in this scope dispatches on, qualified.
+///
+/// A `class << self` body keeps the marker instead of a class name: `self` is
+/// the class object there, so a bare call is a singleton method and never the
+/// instance one a `#` rule names, and the marker matches no class.
+fn implicit_receiver(scope: &[String]) -> Option<String> {
+    match scope.last() {
+        Some(last) if last == matcher::SINGLETON => Some(last.clone()),
+        _ => matcher::enclosing_class(scope),
+    }
+}
+
 /// Narrow a report to what a class-anchored rule could plausibly be about.
 ///
 /// This is the payoff of receiver narrowing: the reason an unscoped report
@@ -174,15 +200,15 @@ pub(crate) fn scoped_to(
             // scope has already named the receiver.
             if o.context == Context::Call
                 && o.implicit
-                && let Some(enclosing) = o.scope.last()
+                && let Some(enclosing) = implicit_receiver(&o.scope)
                 && enclosing != class
-                && !hierarchy.descends_from(enclosing, class)
+                && !hierarchy.descends_from(&enclosing, class)
                 // A module mixed into the class dispatches on the class, so an
                 // implicit call in its body reaches the target after all. This
                 // guard runs before the keep-rules below, so without the check
                 // here a concern's own methods were rejected early and never
                 // reconsidered.
-                && !hierarchy.contributes_to(enclosing, class)
+                && !hierarchy.contributes_to(&enclosing, class)
             {
                 return false;
             }
@@ -194,7 +220,7 @@ pub(crate) fn scoped_to(
                 // comparing names literally dropped the whole category and said
                 // nothing about having dropped it. In Rails that is where a
                 // large share of a model's methods live.
-                || o.scope
+                || enclosing_classes(&o.scope)
                     .iter()
                     .any(|s| hierarchy.contributes_to(s, class))
                 // A definition in a *subclass* is the rule's business too: an
@@ -1074,6 +1100,49 @@ mod tests {
         let src = "class A\n  def display_name\n    1\n  end\nend\na.display_name\n";
         let found = residue_of("$R.display_name", src);
         assert!(found.contains(&Context::Definition), "{found:?}");
+    }
+
+    /// A concern's contribution is reported however the mixin was spelled.
+    ///
+    /// The scope stack holds *segments*; a class is the join of them. Asking
+    /// the hierarchy about the bare segment `Numeric` worked only while that
+    /// segment had exactly one candidate to widen to -- so writing the same
+    /// module relatively, which puts its written spelling in the index beside
+    /// its declared one, silently dropped the concern's `def` and the
+    /// implicit-self calls in its body. Two files, one word apart, one
+    /// reported.
+    #[test]
+    fn a_relative_mixin_path_keeps_the_concern_in_the_report() {
+        for spelling in ["App::Helpers::Numeric", "Helpers::Numeric"] {
+            let src = format!(
+                "module App\n  module Helpers\n    module Numeric\n      def cast(v)\n        \
+                 cast(v)\n      end\n    end\n  end\n  class Value\n    def cast(v); v; end\n  \
+                 end\n  class Integer < Value\n    include {spelling}\n  end\nend\n"
+            );
+            let parsed = ruby_prism::parse(src.as_bytes());
+            let anchors = vec![b"cast".to_vec()];
+            let all = find(&parsed.node(), &anchors, &[], src.as_bytes());
+            let hierarchy = crate::hierarchy::Hierarchy::from_source(&src);
+            let scoped = scoped_to(all, "App::Value", &hierarchy);
+            // In the concern, not in `App::Value` -- whose own `def cast` is
+            // kept by the plain name comparison and would pass this for the
+            // wrong reason.
+            let in_concern = |want| {
+                scoped.iter().any(|o| {
+                    o.context == want
+                        && matcher::enclosing_class(&o.scope).as_deref()
+                            == Some("App::Helpers::Numeric")
+                })
+            };
+            assert!(
+                in_concern(Context::Definition),
+                "`include {spelling}` loses the concern's def: {scoped:?}"
+            );
+            assert!(
+                in_concern(Context::Call),
+                "`include {spelling}` loses the implicit call in its body: {scoped:?}"
+            );
+        }
     }
 
     /// The payoff of receiver narrowing: a class-anchored rule scopes its own

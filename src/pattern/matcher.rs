@@ -1261,7 +1261,7 @@ pub(crate) fn lone_splat_placeholder(node: &Node<'_>, prepared: &Prepared) -> Op
 ///
 /// Not a class name: `class << self` opens a new *context*, not a new class, so
 /// it is transparent when asking which class encloses a match.
-const SINGLETON: &str = "<<self";
+pub(crate) const SINGLETON: &str = "<<self";
 
 /// Marks a scope entry that resets the namespace instead of nesting under it --
 /// a rooted `class ::Bar`, or a body whose owner is a receiver rather than the

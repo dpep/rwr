@@ -3665,6 +3665,37 @@ fn a_bare_constant_receiver_resolves_lexically() {
     );
 }
 
+/// A mixin named by a relative constant path is the same mixin.
+///
+/// `include Helpers::Numeric` inside `module App` is `App::Helpers::Numeric`,
+/// exactly as the absolute spelling is, so the concern's `def` and the
+/// implicit-self calls in its body belong to the class's account either way.
+/// Written relatively they were dropped from the report with nothing said --
+/// and on rails that is `ActiveModel::Type::Helpers::Numeric`, an override on
+/// three numeric types, reported nowhere.
+#[test]
+fn a_relative_mixin_path_keeps_its_blind_spot_report() {
+    for spelling in ["App::Helpers::Numeric", "Helpers::Numeric"] {
+        let dir = fixture(&format!(
+            "module App\n  module Helpers\n    module Numeric\n      def cast(v)\n        \
+             v\n      end\n    end\n  end\n\n  class Value\n    def cast(v)\n      v\n    \
+             end\n  end\n\n  class Integer < Value\n    include {spelling}\n  end\nend\n"
+        ));
+        let out = rwr(&[
+            "check",
+            "App::Value#cast",
+            "-r",
+            "zz",
+            dir.path().to_str().expect("utf8"),
+        ]);
+        let text = stderr(&out);
+        assert!(
+            text.contains("1 definition"),
+            "`include {spelling}` leaves the concern's def unaccounted for: {text}"
+        );
+    }
+}
+
 /// A rename reaches a call however its arguments are written, or not written.
 ///
 /// The call rules were `$R.{name}` and a bare `{name}`, which are the
