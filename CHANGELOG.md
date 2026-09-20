@@ -1,6 +1,93 @@
 # Changelog
 
-## Unreleased
+## 0.6.8 — 2026-09-07
+
+**A rename now reports the name left behind in strings.** A method's doc comment was already
+accounted for; the error message it raises was not. `raise ArgumentError, "display_name needs a
+Router"` names a method a rename has moved, and it is the text a developer sees when they get the
+call wrong — so it is now reported as `Prose`, alongside the comments. Reported, never rewritten:
+prose containing an identifier may be naming it or using an ordinary word, and rwr cannot tell (D96).
+
+`Prose` is deliberately not `String`. A string that *is* the name may be a live dispatch and will
+break; a name mentioned inside one is documentation and will go stale. Only standalone mentions
+count — `t("accounts.display_name")` is an i18n key, not prose about a method.
+
+Prose is scoped to the class like a comment, so a rename of a common name does not report every
+string containing that word. For the wide net, use the classless form: `rwr find '#display_name'`
+has no class to scope by and reports mentions everywhere.
+
+**Fixed: a `def` rename reported an empty residue list instead of what it missed.** A pattern whose
+root is a `def` produced no search anchors, while still claiming to account for the rename — so it
+printed `residue: []`, which reads as "nothing left over" and meant "nothing was looked for". Rerun
+any rename written as a bare `def …` pattern; the designator and `method:`/`rename:` forms were not
+affected (D97).
+
+**A `$$$A` pattern now names the rwr spelling.** Prism reports "unexpected constant", which describes
+the symptom; the error now adds that a run of nodes is `*$NAME` — `foo(*$A)` matches any argument
+list.
+
+## 0.6.7 — 2026-09-04
+
+**Fixed: a malformed `rename:` silently did nothing.** A rename target that is not a Ruby method
+name — a typo, an empty string, `Account.other` — built templates like `def (*$P); $B; end`, which
+match nothing. The run then reported every site as residue and exited 0, so the mistake read as
+"clean, nothing to do". It is now refused at exit 3, naming the bad value. A rule file could hit
+this long before the CLI took a method name, so re-run any rename that has only ever reported
+residue.
+
+`-d` on a method refuses (exit 5) rather than renaming it to the empty string. Deleting a method is
+not a rename: the definition and the call sites go separately, and removing one without the other
+leaves a `NoMethodError` — so rwr will not guess which was meant.
+
+`--help` now documents both kinds of argument. `find` describes the full placeholder set
+(`$NAME`, `*$NAME`, `**$NAME`, `_`, `*_`) alongside the method notation and the `#`-is-a-comment
+hazard; `check` and `rewrite` say that `RULE` takes a method too, and that `-r` is then the new
+name rather than a replacement template.
+
+## 0.6.6 — 2026-09-04
+
+**Ruby's method notation now works wherever a rule is named.** `rwr check 'Account#display_name'`
+reports every site of that method — the definition in all three spellings, explicit-receiver calls
+narrowed by class and kind, `send`/`try` with a literal name, the `attr_*` and visibility macros,
+`define_method`/`alias_method`, and implicit-self calls inside the class — and proposes no edit.
+`Account.display_name` is the class method, `#display_name` is the method on any class. This
+previously answered "no such file, directory, or built-in rule" (D94).
+
+`rwr rewrite 'Account#display_name' -r full_name` does the whole rename with no YAML file. Naming a
+method with no new name for it now refuses (exit 5), rather than reporting its sites and exiting 0
+having written nothing.
+
+A rule that reports rather than rewrites no longer has its own findings listed back as residue.
+Residue means "neither rewritten nor shown to you", and a finding rule rewrites nothing, so every
+site it reported used to come back twice.
+
+**`rwr find 'Account#display_name'` now finds the method.** It used to read `#` as a Ruby comment,
+parse the argument as the bare constant `Account`, and report every mention of it at exit 0 — a
+confidently wrong answer. Going the other way, write `Account.display_name()` for the literal call
+shape (D95).
+
+find, check and rewrite now run one pipeline, so a method names the same sites under all three — a
+preview can no longer cover less than the apply. find keeps observation polarity: exit 0 when there
+are sites, 1 when there are none. The reading rwr took is printed to stderr and carried as
+`interpreted` in `-j`.
+
+`find -j` now carries `residue` and `suppressed`. It used to collect residue, print it, and drop it
+from the document, so an agent got matches with no account of what the search could not see.
+
+**Fixed: whether a literal receiver matched used to depend on how it was declared.**
+`rwr find 'widget.status'` matched `widget.status` when `widget` was an inherited reader and missed
+the identical line when `widget` was a method parameter or a block variable — Prism gives a bare name
+a different node kind depending on the scope around it, and a pattern is parsed with no scope. The
+miss was silent: zero results and exit 1, the same answer as "no such code exists". A repo-wide
+rename therefore rewrote some sites, skipped others, and reported success. Both spellings now
+correspond wherever the identifier sits below the pattern root (D93).
+
+A bare pattern still means the method call, so renaming `Account#display_name` does not touch a local
+variable that shadows it.
+
+**The `rwr-phase0` binary is gone.** It existed to collect the Phase 0 measurements, which are
+done and recorded in `docs/internal/phase0-results.md`. `cargo install rwr` now installs only
+`rwr`; delete any stray `~/.cargo/bin/rwr-phase0` by hand.
 
 **The hierarchy's structural pre-filter is gone**, and with it the whole class of bug it kept
 producing. A file used to be worth parsing only if it held `class` and `<`, or a mixin keyword —
@@ -21,7 +108,7 @@ It saved no parses, because the per-round search already requires a file to name
 in the tree — and running it over every file cost more than the scans it saved.
 
 It was also hiding a third gap. A file is a candidate only once, so an alias to a class discovered in
-a *later* round — `Widget = Premium`, where Premium arrives in round two — was filtered out before
+a *later* round — `Widget = Premium`, where `Premium` arrives in round two — was filtered out before
 its round came. Every file being a candidate closes that by construction.
 
 **A rename follows constant aliases.** `Alias = Account` is a second name for one class, so
@@ -58,7 +145,7 @@ straight through.
 
 A new property runs *changing* rewrites over real code, since an identity rewrite emits zero edits
 and never reaches the result checks at all. Measured before being written: with the nested-capture
-guard removed it refuses on `$R.freeze` over rails, on a real `Date.today.freeze.freeze`. It is the
+guard removed it refuses on `$R.freeze` over rails, at a real `Date.today.freeze.freeze`. It is the
 test that would have caught it.
 
 ## 0.6.5 — 2026-08-24

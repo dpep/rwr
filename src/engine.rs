@@ -40,6 +40,11 @@ pub(crate) struct Finding {
     pub(crate) file: String,
     pub(crate) line: usize,
     pub(crate) col: usize,
+    /// The site's own bytes. `find` reports a finding the same way it reports a
+    /// pattern match, and a row that sometimes carries offsets and sometimes
+    /// does not is a row a consumer cannot rely on.
+    pub(crate) byte_start: usize,
+    pub(crate) byte_end: usize,
     pub(crate) rule: String,
     pub(crate) note: String,
     pub(crate) text: String,
@@ -619,12 +624,14 @@ impl Engine {
                                 // parse still describes it.
                                 if rule.rewrite.is_none() {
                                     for hit in &hits {
-                                        let (start, _) = rewrite::effective_range(&hit.node);
+                                        let (start, end) = rewrite::effective_range(&hit.node);
                                         let (line, col) = source::line_col(&current, start);
                                         flagged.push(Finding {
                                             file: label.to_string(),
                                             line,
                                             col,
+                                            byte_start: start,
+                                            byte_end: end,
                                             rule: rule.id.clone().unwrap_or_default(),
                                             note: rule.description.clone().unwrap_or_default(),
                                             text: source::line_at(&current, start),
@@ -740,7 +747,16 @@ impl Engine {
             })
             .collect();
 
-        let residue = self.residue(label, &current, ctx);
+        // Only when nothing was rewritten are the findings' spans still offsets
+        // into `current`. A set that rewrote is already covered by reporting
+        // against the rewritten source, where a handled site no longer carries
+        // the anchor at all.
+        let reported: Vec<(usize, usize)> = if total == 0 {
+            flagged.iter().map(|f| (f.byte_start, f.byte_end)).collect()
+        } else {
+            Vec::new()
+        };
+        let residue = self.residue(label, &current, ctx, &reported);
         if total == 0
             && residue.is_empty()
             && flagged.is_empty()
@@ -780,7 +796,18 @@ impl Engine {
     /// Reported against the *rewritten* source, so an occurrence a rule already
     /// handled is not counted twice -- and so a subclass call site left behind
     /// by a rename is visible rather than silently broken.
-    fn residue(&self, label: &str, current: &[u8], ctx: &Context) -> Vec<Residue> {
+    ///
+    /// A finding rule rewrites nothing, so that mechanism does not cover it and
+    /// every site it reported would be re-reported here as unaccounted for.
+    /// `reported` is how those sites are accounted for instead: residue means
+    /// "neither rewritten nor shown to you", under both readings.
+    fn residue(
+        &self,
+        label: &str,
+        current: &[u8],
+        ctx: &Context,
+        reported: &[(usize, usize)],
+    ) -> Vec<Residue> {
         if !self.claims_completeness {
             return Vec::new();
         }
@@ -796,7 +823,7 @@ impl Engine {
             if anchors.is_empty() {
                 continue;
             }
-            let mut occurrences = residue::find(&parsed.node(), &anchors, &[], current);
+            let mut occurrences = residue::find(&parsed.node(), &anchors, reported, current);
             // Comments live beside the tree, not in it, so they need their own
             // pass -- and a rename that leaves `# returns the display_name`
             // behind has left something stale that this report should name.

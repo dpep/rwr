@@ -25,8 +25,24 @@ use serde::Serialize;
 pub(crate) enum Context {
     /// `:foo` -- the commonest way a name reaches metaprogramming.
     Symbol,
-    /// `"foo"` or `'foo'`.
+    /// `"foo"` or `'foo'` -- a string that *is* the name, which is how a name
+    /// most often reaches `send`.
     String,
+    /// The name appears *inside* a longer string: an error message, a log line,
+    /// a spec description.
+    ///
+    /// A different thing from [`Context::String`], and the difference is what
+    /// the reader does about it. A string that is the name may be a live
+    /// dispatch and will break; a name mentioned in one is documentation and
+    /// will go stale. `raise ArgumentError, "have_fetched reads a Router's
+    /// trace"` names a method that a rename has moved, and it is the text a
+    /// developer sees when they get it wrong.
+    ///
+    /// Reported, never rewritten, for [`Context::Comment`]'s reason: prose that
+    /// contains an identifier may be naming it or may be using an ordinary
+    /// word, and rwr cannot tell. Reporting is a fact; rewriting would be a
+    /// guess.
+    Prose,
     /// A call by that name the rule did not match, e.g. a different receiver.
     Call,
     /// A definition of that name.
@@ -323,6 +339,22 @@ fn is_literal_name(node: &Node<'_>) -> bool {
 /// treating `first` as its anchor reported every `.first` in the repo -- 3,752
 /// of them on Discourse, which buries the account it exists to give.
 pub(crate) fn anchors(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
+    // A `def` names exactly what it renames, and is the shape a hand-written
+    // rename most obviously takes. Without this the rule claimed completeness --
+    // `defines_a_method` says a DefNode does -- and then had nothing to search
+    // for, so `residue: []` meant "nothing was looked for" while reading as
+    // "nothing was left over". A rename with no account of what it missed is
+    // the one case the account exists for.
+    if let Some(def) = pattern.as_def_node() {
+        let name = def.name().as_slice().to_vec();
+        // `def $M(...)` renames whatever it matched, so there is no one name to
+        // anchor on.
+        return match std::str::from_utf8(&name) {
+            Ok(text) if prepared.bindings.contains_key(text) => Vec::new(),
+            _ => vec![name],
+        };
+    }
+
     // Only the root: a literal name deeper in the pattern is part of a shape,
     // not the thing the rule is about.
     let Some(call) = pattern.as_call_node() else {
@@ -350,6 +382,21 @@ pub(crate) fn anchors(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
         return Vec::new();
     }
     vec![call.name().as_slice().to_vec()]
+}
+
+/// Whether an identifier inside a string is a mention of a name, rather than one
+/// segment of a qualified one.
+///
+/// `t("accounts.display_name")` is an i18n key and `"admin/display_name"` a
+/// path; neither is prose naming the method, and the testbed marks both
+/// `GT:ignore`. A dotted or slashed neighbour is what separates them from
+/// `"display_name reads a Router trace"`, which is exactly the sentence a rename
+/// leaves stale.
+fn standalone(text: &[u8], at: usize, len: usize) -> bool {
+    let qualifier = |b: u8| b == b'.' || b == b'/' || b == b':';
+    let before = at.checked_sub(1).and_then(|i| text.get(i));
+    let after = text.get(at + len);
+    !before.is_some_and(|b| qualifier(*b)) && !after.is_some_and(|b| qualifier(*b))
 }
 
 /// Whether a node stands for whatever it matched, rather than for itself.
@@ -465,6 +512,41 @@ pub(crate) fn find(
                 implicit: false,
                 via: Some(String::from_utf8_lossy(call.name().as_slice()).into_owned()),
             });
+        }
+
+        // A name mentioned inside a longer string. Scanned over the raw source
+        // slice rather than the unescaped bytes, so an offset here is an offset
+        // in the file; `content_loc` is also what keeps a heredoc pointing at
+        // its body rather than at its opening tag (D14).
+        if let Some(string) = node.as_string_node() {
+            let content = string.content_loc();
+            let (from, to) = (content.start_offset(), content.end_offset());
+            // Trimmed, so a heredoc body that is just the name counts as being
+            // the name rather than as prose containing it -- the trailing
+            // newline is layout, not content.
+            let whole = string.unescaped();
+            let whole = whole.trim_ascii().to_vec();
+            // A string that *is* the name is a dispatch, reported below as
+            // `String`. Only the rest are mentions.
+            if !anchors.contains(&whole)
+                && let Some(text) = source.get(from..to)
+            {
+                for anchor in anchors {
+                    for at in crate::source::identifier_offsets(text, anchor) {
+                        if covered(from + at) || !standalone(text, at, anchor.len()) {
+                            continue;
+                        }
+                        out.push(Occurrence {
+                            context: Context::Prose,
+                            byte_start: from + at,
+                            byte_end: from + at + anchor.len(),
+                            scope: here.clone(),
+                            implicit: false,
+                            via: None,
+                        });
+                    }
+                }
+            }
         }
 
         let mut implicit_self = false;
@@ -707,6 +789,78 @@ mod tests {
         let src = "a.display_name\nsend(\"display_name\")\n";
         let found = residue_of("$R.display_name", src);
         assert!(found.contains(&Context::String), "{found:?}");
+    }
+
+    /// The sharp edge: a method's own error message names it, and after a rename
+    /// it points at a method that no longer exists. Reported as prose rather
+    /// than as a string, because a string that *is* the name may be a live
+    /// dispatch while a name inside one is documentation -- different problems,
+    /// different fixes.
+    #[test]
+    fn a_name_mentioned_inside_a_string_is_reported_as_prose() {
+        let src = "a.display_name\nraise ArgumentError, \"display_name needs a Router\"\n";
+        let found = residue_of("$R.display_name", src);
+        assert!(found.contains(&Context::Prose), "{found:?}");
+        assert!(!found.contains(&Context::String), "{found:?}");
+    }
+
+    /// The two do not collapse into each other: `send("x")` stays a string, and
+    /// only the leftover text becomes prose.
+    #[test]
+    fn a_string_that_is_the_name_stays_a_string() {
+        let src = "a.display_name\nsend(\"display_name\")\nlog(\"display_name moved\")\n";
+        let found = residue_of("$R.display_name", src);
+        assert!(found.contains(&Context::String), "{found:?}");
+        assert!(found.contains(&Context::Prose), "{found:?}");
+    }
+
+    /// Prose matching is on identifiers, not substrings — otherwise renaming a
+    /// short name would report every English word containing it.
+    #[test]
+    fn prose_matches_whole_identifiers_only() {
+        let src = "a.display_name\nlog(\"display_names and display_nameify\")\n";
+        let found = residue_of("$R.display_name", src);
+        assert!(!found.contains(&Context::Prose), "{found:?}");
+    }
+
+    /// A dotted or slashed neighbour means the identifier is one segment of a
+    /// qualified name, not a mention of the method. The testbed proved this is
+    /// load-bearing: without it an i18n key and a heredoc body both became
+    /// residue, and both are marked `GT:ignore` there.
+    #[test]
+    fn a_qualified_name_inside_a_string_is_not_a_mention() {
+        for src in [
+            "a.display_name\nt(\"accounts.display_name\")\n",
+            "a.display_name\nrender(\"admin/display_name\")\n",
+            "a.display_name\nfetch(\"user:display_name\")\n",
+            // A heredoc whose body is just the name is the name, not prose
+            // about it -- the trailing newline is layout.
+            "a.display_name\nx = <<~T\n  display_name\nT\n",
+        ] {
+            let found = residue_of("$R.display_name", src);
+            assert!(!found.contains(&Context::Prose), "{src:?} -> {found:?}");
+        }
+    }
+
+    /// A `def` pattern is the shape a hand-written rename most obviously takes.
+    /// It claimed completeness and had no anchor, so it searched for nothing and
+    /// reported `residue: []` — which reads as "nothing left over".
+    #[test]
+    fn a_def_pattern_anchors_on_the_name_it_renames() {
+        let prepared = prepare::prepare("def display_name($A); $B; end").expect("prepares");
+        let parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let root = matcher::pattern_root(&parsed.node()).expect("single expression");
+        assert_eq!(anchors(&root, &prepared), vec![b"display_name".to_vec()]);
+    }
+
+    /// Unless the name is itself a metavariable, where there is no one name the
+    /// rule is about.
+    #[test]
+    fn a_def_pattern_with_a_metavariable_name_anchors_on_nothing() {
+        let prepared = prepare::prepare("def $M($A); $B; end").expect("prepares");
+        let parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let root = matcher::pattern_root(&parsed.node()).expect("single expression");
+        assert!(anchors(&root, &prepared).is_empty());
     }
 
     #[test]

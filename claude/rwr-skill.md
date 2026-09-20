@@ -66,6 +66,43 @@ Patterns are Ruby source with metavariables:
 
 All four are valid Ruby, so a pattern stays copy-pasteable from real code.
 
+## Finding a *method*, not a shape
+
+"Where is this method called" is a different question from "where does this shape
+appear", and it has its own spelling: Ruby's method notation.
+
+```sh
+rwr find 'Account#display_name' app/     # the instance method
+rwr find 'Account.display_name' app/     # the class method — different method
+rwr find '#display_name' app/            # the method on any class
+```
+
+This is receiver narrowing, read-only. It reports the definition in all three
+spellings, explicit-receiver calls narrowed by class *and* subclasses,
+`send`/`try` with a literal name, the `attr_*` and visibility macros,
+`define_method`/`alias_method`, and implicit-self calls inside the class — and
+leaves `Company#display_name` and `Account.display_name` alone, because those are
+different methods. A call whose receiver it cannot resolve is reported as residue
+rather than claimed as a match.
+
+Exit 0 when there are sites, 1 when there are none — find's usual polarity.
+Residue does not make it 0: an occurrence rwr could not tie to *this* method is
+not a site of it. `-j` carries `matches`, `residue`, `suppressed`, and an
+`interpreted` object naming the reading it took.
+
+**A pattern is Ruby, so `#` starts a comment.** That is why the notation exists:
+without it `Account#display_name` would parse as the constant `Account` followed
+by a comment. Going the other way, the two-part form always means the method, so
+write `Account.display_name()` when you want the literal call shape and nothing
+else.
+
+The same notation works wherever a rule is named, and means the same sites:
+
+```sh
+rwr check 'Account#display_name' app/                    # same, enforcement polarity
+rwr rewrite 'Account#display_name' -r full_name app/     # the whole rename, no YAML
+```
+
 ## Renaming a method
 
 The common case has a one-line spelling, in Ruby's own notation:
@@ -81,21 +118,43 @@ rwr check rename.yml app/      # read the site counts and the residue report
 rwr rewrite rename.yml app/    # then apply
 ```
 
+A file is worth it when the rename needs `where:` or fixtures. For a plain one,
+`rwr rewrite 'Account#display_name' -r full_name app/` expands to the same rule
+set with nothing to save. Naming a method with no new name for it refuses
+(exit 5) rather than reporting its sites and exiting 0 having written nothing.
+
 Two commands, not one chained with `&&`: `check` exits **1** when there is work
 to do, so `check && rewrite` would apply the rename only when there was nothing
 to rename. The polarity is deliberate — it is what makes `check` usable as a
 gate — and it is the opposite of what a shell pipeline reads like.
 
-That one line expands to the whole rename: the definition, subclass overrides,
-explicit-receiver calls, and implicit-self calls inside the class. It leaves
-`Company#display_name` and `Account.display_name` alone, because those are
-different methods — the receiver narrowing no other Ruby structural tool does.
+The `method:` line expands to the whole rename: the definition, subclass
+overrides, explicit-receiver calls, and implicit-self calls inside the class. It
+leaves `Company#display_name` and `Account.display_name` alone, because those
+are different methods — the receiver narrowing no other Ruby structural tool
+does.
 
 **Read the residue report.** Anything it could not account for — a symbol
 reaching `delegate`, a `send("display_name")`, a call whose receiver it could not
 resolve, a doc comment still naming the old method — is listed with its file,
 line, and classification. Those are the sites that will break or go stale, and
 handling them is part of finishing the rename.
+
+**A rename has a prose half, and rwr reports it but never rewrites it.** The
+places a parser must ignore are exactly where a public method documents itself:
+its doc comment, its spec descriptions, and the error message it raises at its
+own caller. Those come back as `comment` and `prose`, and on a well-documented
+method they can outnumber the code sites. `prose` is a mention inside a longer
+string — `raise ArgumentError, "display_name needs a Router"` — as against
+`string`, which is a string that *is* the name and may be a live dispatch.
+
+Prose is scoped to the class, so a rename of a common name does not report every
+string containing that word. For the wide net, ask the classless form, which has
+no class to scope by:
+
+```sh
+rwr find '#display_name' app/     # every mention, prose included
+```
 
 ## Applying the built-in rules
 

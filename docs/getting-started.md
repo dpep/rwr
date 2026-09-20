@@ -31,6 +31,25 @@ rwr '$R.select { |$X| $B }.first' app/services
 capturing. All four are valid Ruby, so a pattern stays copy-pasteable from real
 code.
 
+## Find a method
+
+Where a method is used is a different question from where a shape appears. Ask it
+in Ruby's own notation — `#` for an instance method, `.` for a class method:
+
+```sh
+rwr find 'Account#display_name' app/
+```
+
+That reports the definition, calls on a receiver that resolves to `Account` or a
+subclass, `send(:display_name)`, the `attr_*` and visibility macros, and
+implicit-self calls inside the class — and leaves `Company#display_name` alone.
+Anything it could not tie to the method is reported as residue rather than
+claimed as a match.
+
+A pattern is Ruby and `#` starts a comment, so the notation is the only way to
+say this. Going the other way, the two-part form always means the method, so
+write `Account.display_name()` when you want the literal call shape.
+
 ## Change something
 
 ```sh
@@ -72,9 +91,9 @@ to do, so `check && rewrite` would rename only when there was nothing to rename.
 The polarity is what makes `check` usable as a CI gate, and it is the opposite of
 what a shell pipeline reads like.
 
-That one line expands to the whole rename — the definition, subclass overrides,
-explicit-receiver calls, and implicit-self calls inside the class. It leaves
-`Company#display_name` and `Account.display_name` alone, because those are
+The `method:` line expands to the whole rename — the definition, subclass
+overrides, explicit-receiver calls, and implicit-self calls inside the class. It
+leaves `Company#display_name` and `Account.display_name` alone, because those are
 different methods.
 
 ## Read the residue report
@@ -96,7 +115,8 @@ what to triage on:
 | `call` | a call by that name whose receiver rwr could not resolve | maybe — it may be a different class's method |
 | `symbol` | a symbol handed to something that dispatches (`delegate`, `send`, a serializer) | usually |
 | `definition` | another definition of the name | depends — an override breaks, an unrelated class's method does not |
-| `string` | the name as a string literal | maybe — `send("x")` breaks, a SQL column or a message does not |
+| `string` | a string that *is* the name | maybe — `send("x")` breaks, a SQL column does not |
+| `prose` | the name mentioned inside a longer string — an error message, a spec description | no, but it is now stale |
 | `comment` | the name in prose | no, but it is now stale |
 | `text` | found by text search in a template rwr cannot parse | weaker evidence than anything above |
 | `dynamic` | a dispatch on a *computed* name, in this class | unknowable — this is rwr saying it is blind here |

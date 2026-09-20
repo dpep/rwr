@@ -67,9 +67,15 @@ that reads it, silently, for a whole cycle.
 
 **It ships through the private marketplace, which is not where `release` looks
 by default.** `rq` and `gqls` live in `code@dpep`; rwr sits in `rwr@myclaude`
-until it has real mileage. That is now handled by `.release.conf` at the repo
-root, which the script sources after computing its defaults — so `release
-<version>` needs no incantation.
+until it has real mileage. `.release.conf` at the repo root handles it — the
+script sources it after computing its defaults, so `release <version>` needs no
+incantation.
+
+**That file is gitignored** — it names a private marketplace and this repo is
+public — so a fresh clone has to recreate it before releasing. The `release`
+skill carries the template and the one trap worth knowing. Without the file a
+release sends the skill to the wrong marketplace or dies; `release --audit`'s
+SKILL column is what catches it.
 
 Earlier this said `PLUGIN_MANIFEST` was not overridable and the plugin bump had
 to be manual. It is overridable, and `.release.conf` is the documented place for
@@ -131,6 +137,13 @@ exit status. Both look correct and neither is; two commits went out red before
 **Edit, then format — not the reverse.** `cargo fmt` reflows long lines, so a
 text replacement written against pre-format source stops matching after it runs.
 Batch related edits, then format once, then build.
+
+Use **`make fmt`**, which names the files it reflowed. The trap the bare command
+sets is not the first edit but the next one: formatting is silent, so an anchor
+read earlier in the session is already stale and nothing says so until an edit
+mysteriously fails to apply. Re-read the files it lists before editing them
+again. `make check` only ever runs `fmt --check`, so the gate never moves code
+under you.
 
 ## Testing conventions
 

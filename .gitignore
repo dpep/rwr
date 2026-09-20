@@ -5,3 +5,7 @@
 # Scratch space. `tmp/rules-unshipped` holds rules the pack deliberately does
 # not carry -- safe where you know the receivers, not safe to ship.
 /tmp
+
+# Local release config: machine-specific paths, and it names a private
+# marketplace. `release` sources it from the repo root; it is not shipped.
+.release.conf
