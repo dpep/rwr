@@ -1087,6 +1087,22 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
     //
     // A designator only. `find` still never takes a rule *file*: once it did,
     // it and `check` would be one capability wearing two exit codes.
+    // `Account#==` is designator-shaped and names a method rwr has no rule set
+    // for. Falling through to the pattern path is where the silence came from:
+    // `#` opens a Ruby comment, so the argument becomes the bare constant
+    // `Account` and the run answers a different question at exit 0 (D99).
+    // `check` and `rewrite` are refused inside `load_all`, which `find` never calls.
+    if let rule::Designator::Unsupported { name } = rule::designator(pattern) {
+        eprintln!(
+            "rwr: {}",
+            rule::RuleError::Unsupported {
+                method: pattern.to_string(),
+                name
+            }
+        );
+        return Exit::Refused.into();
+    }
+
     if rule::method_notation(pattern).is_some() {
         return cmd_apply(pattern, paths, None, Mode::Find, common, out);
     }
@@ -1499,6 +1515,21 @@ fn cmd_apply(
     // Announced rather than assumed: `Account.display_name` is also a valid
     // pattern, and a result set that silently answered a different question
     // than the one typed is the failure this whole notation exists to avoid.
+    // Same refusal `cmd_find` makes, so one argument gets one answer whichever
+    // verb reads it. `load_all` refuses these too, but at `PatternError`; an
+    // operator designator is well formed and names a method rwr will not guess
+    // at, which is what `Refused` means here (D99).
+    if let rule::Designator::Unsupported { name } = rule::designator(rule_arg) {
+        eprintln!(
+            "rwr: {}",
+            rule::RuleError::Unsupported {
+                method: rule_arg.to_string(),
+                name
+            }
+        );
+        return Exit::Refused.into();
+    }
+
     let designator = rule::method_notation(rule_arg).map(|m| {
         let (class, name, kind) = m.parts_for_report();
         Interpreted {

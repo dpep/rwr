@@ -3404,6 +3404,19 @@ fn an_operator_or_writer_designator_is_refused() {
             assert_ne!(out.status.code(), Some(0), "{verb} {arg}: {text}");
         }
     }
+    // `find` never calls `load_all`, so it had its own way to the pattern path
+    // and stayed silent at exit 0 long after the other two verbs refused.
+    // One argument, one answer, one exit code, whichever verb reads it.
+    for arg in ["Account#==", "Account#name="] {
+        let out = rwr(&["find", arg, path]);
+        let text = stderr(&out);
+        assert_eq!(out.status.code(), Some(5), "find {arg}: {text}");
+        assert!(
+            text.contains("cannot build a rename for"),
+            "find {arg}: {text}"
+        );
+    }
+
     let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
     assert_eq!(after, source, "a refusal writes nothing");
 }

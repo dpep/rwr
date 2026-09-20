@@ -86,12 +86,13 @@ exotic. So what is here is what a ten-year-old Rails monolith actually holds.
 | the rename itself | `app/models/account.rb`, `premium_account.rb`, `archived_account.rb` |
 | an unrelated class sharing the name | `app/models/company.rb` |
 | namespaced classes, nested and compact | `app/models/account/row.rb`, `account/exporter.rb` |
+| a second class with the same last segment, and a subclass of it | `lib/billing_account.rb` |
 | a concern's contribution to its includer | `app/models/concerns/nameable.rb` |
 | dynamic dispatch at both ends | `app/models/account_presenter.rb` |
 | Rails DSLs taking symbols | `app/serializers/account_serializer.rb` |
 | ordinary controller and job control flow | `app/controllers/`, `app/jobs/` |
 | heredocs, all four flavours | `lib/reports/account_report.rb` |
-| reopened classes, `class << self`, `class_eval` | `lib/account_ext.rb` |
+| reopened classes, `class << self` and its macros, `class_eval` | `lib/account_ext.rb` |
 | owners that are not the enclosing class: `class ::Account`, `class << Account`, `def Account.x` | `lib/account_owners.rb` |
 | modules that extend themselves: `extend self`, `module_function` | `lib/account_formatting.rb` |
 | `prepend` and `refine` | `lib/account_patches.rb` |

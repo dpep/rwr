@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+**Fixed: renaming an instance method rewrote the class method's macros.** `attr_accessor`,
+`define_method`, `alias_method` and the visibility macros inside `class << self` configure the *class*
+method of that name, so an instance rename that rewrote them broke every class-method caller — and
+reported `residue: []` while doing it. A class-method rename now reaches them, which it previously could
+not. **Rerun any rename of a method whose class also defines one of the same name in `class << self`.**
+
+**A class designator resolves against the classes the run can see.** `Account#display_name` finds
+`Billing::Account` where that is the only Account, and means only the top-level one where both exist.
+Previously a namespaced class was unreachable by its short name, `subclasses: true` was inert for one,
+and a top-level rename reached subclasses of its namespaced namesake — on rails, 84% of classes are
+namespaced. **If you relied on a short designator reaching a namespaced class that shares its name with
+a top-level one, qualify it.** Where several classes share a last segment and none is top-level, the
+short name now matches none of them rather than guessing between them — qualify it.
+
+**A designator naming an operator or writer method is refused.** `Account#==` and `User#name=` used to
+fall through to the pattern path, where `#` opens a Ruby comment and the argument silently became the
+bare constant `Account` — a different question, answered at exit 0. All three verbs now refuse at exit 5
+with the same message. Renaming operators and writers is not yet supported; the refusal says so instead
+of answering something else.
+
 **Fixed: a dynamic reach in a file of its own was never reported.** `public_send("display_#{attr}")`
 contains no part of `display_name`, so a file holding only a computed reach was dropped before it was
 ever parsed — and its blind spot with it. The same code written beside the definition was reported all
