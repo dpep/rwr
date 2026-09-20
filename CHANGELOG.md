@@ -29,6 +29,35 @@ only calls and symbols, so it pointed you at symbols while a `definition` — th
 means the rewrite you just applied does not hold together — went unnamed and could fall inside the
 "and N more".
 
+**A `# rwr:ignore` directive can no longer accept half a rename.** A rename is one edit across a
+definition and every call site, so a directive on either end left the other calling a method that no
+longer exists — and `rewrite` exited 0 having written it, while `check` on the same tree exited 1.
+Both verbs now refuse the whole run at exit 5, write nothing, and name the directive. Delete it to
+rename every site, or, if that site means a different method of the same name, name the class it
+belongs to. Rules that move no definition, and `find`, are unaffected (D110).
+
+**Directives written in templates are reported instead of silently doing nothing.** A `rwr:ignore`
+in an `.erb`, `.haml` or `.slim` file never suppressed and was never mentioned, while `rewrite`
+edited the site anyway. rwr cannot honour one — ERB is read by stitching its tag bodies into a single
+program, which discards the markup a directive's scope depends on — so it now says so, under the new
+`template_directives` field and a line of stderr. Put the exception on the Ruby the template calls.
+
+**Where two directives cover the same finding, the narrower one accepts it.** Document order decided
+before, so a directive above a `class` absorbed the finding and the specific one at the site was
+reported stale — the comment documenting the actual exception was the one you were told to delete.
+
+**A directive comment is no longer counted as residue.** Because a directive names the id it
+suppresses, it reported itself as a blind spot a human should review, raising the headline number by
+one with no way to drain it short of deleting the suppression.
+
+**A scope now bounds the suppression audit.** Under `--diff`, `--since` or a `file:line` range, a
+directive outside the scope is neither counted as accepted nor reported stale, so the acceptance
+count a reviewer acts on is the change's rather than the whole file's (D108).
+
+**Overlapping path arguments are walked once.** `rwr rewrite all w.rb w.rb`, `rwr check all z.rb .`
+and `rwr check all app/ app/models/` counted every shared file twice, including in the suppression
+audit (D109).
+
 **`--sarif` and the SARIF 2.1.0 output are removed.** Nothing was consuming them, and a second
 structured format had to be kept in step with `-j` by hand — which is how `rwr find '<pattern>'
 --sarif` came to write zero bytes at exit 0. `rwr check -j` carries the same data, and
