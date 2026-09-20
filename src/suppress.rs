@@ -481,6 +481,27 @@ mod tests {
         assert!(found[0].covers(Some("a/b"), at(src, "sleep 1")));
     }
 
+    /// Names split on `,`, space and tab only; what keeps that narrow list
+    /// safe is the `trim` after it. Pinned because the list reads like the
+    /// whole rule and is not -- a CRLF file would otherwise name `a/b\r`,
+    /// a rule nothing has.
+    #[test]
+    fn a_carriage_return_is_not_part_of_a_rule_name() {
+        let (found, _) = read("sleep 1 # rwr:ignore a/b\r\n");
+        assert_eq!(found[0].rules, vec!["a/b"]);
+    }
+
+    /// An `=begin`/`=end` block is prose, not an instruction. It used to be
+    /// read as one, and since names did not split on newline the id became
+    /// `"style/return-nil\n=end"` -- printed with a line break through the
+    /// middle of the stale report.
+    #[test]
+    fn a_directive_inside_an_embdoc_is_not_read() {
+        let (found, bad) = read("=begin\nrwr:ignore a/b\n=end\nsleep 1\n");
+        assert!(found.is_empty(), "{found:?}");
+        assert!(bad.is_empty());
+    }
+
     #[test]
     fn a_directive_only_covers_the_rules_it_names() {
         let src = "sleep 1 # rwr:ignore a/b\n";
