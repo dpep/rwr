@@ -1382,7 +1382,11 @@ struct Changed {
 /// schema number is what it can branch on without a version comparison.
 ///
 /// 1 was a bare array of changed files, with no account of residue at all.
-const REPORT_SCHEMA: u32 = 5;
+/// 6 is the first where every verb answers the same question the same way:
+/// `find` carries the blind-spot and suppression accounting `check` had, `-J`
+/// is one document rather than a row stream, and both documents gained
+/// `unreadable` and `unknown_suppressions`.
+const REPORT_SCHEMA: u32 = 6;
 
 /// Everything a `check` or `rewrite` run has to say, for machine consumers.
 ///

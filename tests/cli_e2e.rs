@@ -1513,8 +1513,10 @@ fn structured_output_names_its_own_shape() {
         // One version across the CLI contract, not one per command: field
         // names are shared, so a consumer branches on a single number. 3 added
         // `rejections`; 4 added `unparsed`; 5 added the `dynamic` residue
-        // context and made `residue` absent when no name moved.
-        assert_eq!(doc["schema"], 5, "{text}");
+        // context and made `residue` absent when no name moved; 6 gave `find`
+        // the accounting `check` had and added `unreadable` and
+        // `unknown_suppressions` to both.
+        assert_eq!(doc["schema"], 6, "{text}");
         assert_eq!(doc["rwr_version"], env!("CARGO_PKG_VERSION"), "{text}");
     }
 }
