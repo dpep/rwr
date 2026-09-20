@@ -538,8 +538,6 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// Emit a row set: `--json` one pretty array, `--ndjson` one compact object
-/// per line (D23). Returns `Some(exit)` only on a serialisation failure.
 /// Emit one JSON document, rather than a list of them.
 ///
 /// `-j` is a document and `-J` a stream, so a single report is an object under
@@ -564,6 +562,8 @@ fn emit_document<T: Serialize>(out: Output, value: &T) -> Option<ExitCode> {
     None
 }
 
+/// Emit a row set: `--json` one pretty array, `--ndjson` one compact object
+/// per line (D23). Returns `Some(exit)` only on a serialisation failure.
 fn emit_rows<T: Serialize>(out: Output, rows: &[T]) -> Option<ExitCode> {
     match out {
         Output::Json => match serde_json::to_string_pretty(rows) {
@@ -1657,8 +1657,7 @@ fn cmd_apply(
         .par_iter()
         .filter_map(|path| {
             let source = source::open(path);
-            let original = source.bytes().to_vec();
-            let mut current = original.clone();
+            let mut current = source.bytes().to_vec();
             let mut sites = 0usize;
             let mut residue = Vec::new();
             let mut parsed_ok = false;
@@ -1803,18 +1802,18 @@ fn cmd_apply(
                 if parsed_templates.contains(path.display().to_string().as_str()) {
                     return here.into_iter();
                 }
-                let bytes = source::open(path);
-                let bytes = bytes.bytes().to_vec();
+                let mapped = source::open(path);
+                let bytes = mapped.bytes();
                 for (rule, anchor) in &anchors {
-                    for at in source::identifier_offsets(&bytes, anchor) {
-                        let (line, col) = source::line_col(&bytes, at);
+                    for at in source::identifier_offsets(bytes, anchor) {
+                        let (line, col) = source::line_col(bytes, at);
                         here.push(Residue {
                             file: path.display().to_string(),
                             line,
                             col,
                             context: residue::Context::Text,
                             rule: rule.clone(),
-                            text: source::line_at(&bytes, at),
+                            text: source::line_at(bytes, at),
                         });
                     }
                 }
