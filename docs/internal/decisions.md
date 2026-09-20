@@ -3321,3 +3321,49 @@ unconstrained receiver. Left gated and written down here rather than changed qui
 
 *Reverses if:* `type:` on `$R` becomes cheap enough to require, which pins the receiver and
 leaves the rule with no hazard to name at all.
+
+## D117 - A rewrite that can be silently wrong becomes a lint or leaves the pack
+**Decided.** Governs the shipped pack; does not change the engine.
+
+A hardening pass put fixtures on the five ActiveRecord performance rules and found seven cases
+where the rule changed what the program does. The interesting part was not the seven; it was that
+**six of them cannot be excluded by any predicate the rule language has**, so "narrow the pattern"
+was not on the table and each rule had to be decided on what it is worth.
+
+The line drawn, and it is about *silence* rather than about being wrong:
+
+- **Loud when wrong, and the caveat names it -> stays a rewrite.** `sum` turns
+  `['a', 'b'].inject(:+)` into a `TypeError`. It is held back unless `--unsafe`, prints its reason
+  beside the diff, and every other way it differs is either loud or more accurate (`sum`
+  compensates float rounding; `inject` does not). The caveat now names all four.
+- **Silent when wrong, but worth pointing at -> becomes a lint.** `pluck` cannot know that
+  `Account.all.map(&:display_name)` reads an overridden attribute reader, so `pluck(:display_name)`
+  returns different values with nothing raised. Measured, roughly a third of its sites name
+  something that is not a column at all -- 211 of 656 matched symbols on rails, 88 of 278 on
+  mastodon, both 32%. It reports and proposes nothing, and its caveat became the four conditions a
+  human standing at the site can check.
+- **Silent when wrong, and nothing to weigh against it -> deleted.** `relation-count` turns
+  `Model.group(:kind).to_a.size` from an Integer into a Hash. Across two corpora it has no true
+  positives: 0 sites in mastodon, 76 on rails, every one in ActiveRecord's own `test/` and every
+  one an assertion where materialising is the point.
+
+**What blocked the six.** Three gaps in the rule language, each found by trying:
+
+- `where:` cannot constrain a metavariable that appears only inside a `contains:` sub-pattern; it
+  is refused at load as one `match:` never captures. So `$X.$ASSOC.$FIELD` cannot say "and
+  `$ASSOC` is not `id`", which is 26 of `possible-n-plus-one`'s 91 findings on mastodon.
+- There is no negative containment. `orders.includes(:customer).each { |o| o.customer.name }` is
+  visibly eager-loaded *inside the matched receiver*, and the rule cannot decline it.
+- `name_not:` reads a **bare** identifier -- `bare_name` wants no receiver, no arguments and no
+  block -- so it cannot see the method at the tail of a chain. `$R: { name_not: [group] }` does not
+  exclude `Model.group(:kind)`, and `name_not: [includes]` does not exclude
+  `orders.includes(:customer)`. Both present no name and pass.
+
+The first two are one capability seen from two sides. Until it exists, a rule that needs it says
+so in its own header and pins the false positive as a fixture, so the gap is visible where the
+rule is read rather than only here.
+
+*Reverses if:* the language gains those predicates. `relation-count` comes back as a rewrite the
+moment `group` can be excluded, and `possible-n-plus-one` regains `find_each` -- left out because
+it took mastodon from 91 findings to 133 and 35 of the 42 new ones carried a visible
+`includes(...)`, taking that false-positive class from 4/91 to 39/133.
