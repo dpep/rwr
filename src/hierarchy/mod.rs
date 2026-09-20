@@ -9,13 +9,25 @@
 //! because Phase 0 measurement (d) found a full rails parse takes under 200ms,
 //! so the hierarchy is rebuilt per run rather than persisted -- no cache, no
 //! invalidation, no staleness, and D5 still holds.
+//!
+//! Every class in here is named by its **qualified** name, the way the matcher's
+//! scope stack names it, and every written constant is resolved to one of those
+//! before anything is compared (D100).
 
 use crate::pattern::generated;
+use crate::pattern::matcher::{enclosing_class, scope_name_of};
 use rayon::prelude::*;
 use ruby_prism::Node;
 use std::collections::{HashMap, HashSet};
 
-/// Superclass links, keyed by class name.
+/// The name a constant-ish node denotes, qualified -- `Billing::Account`, not
+/// `Account`.
+///
+/// The matcher's own, rather than a copy: a class has to be spelled the same way
+/// on both sides or the two are talking about different classes (D100).
+pub(crate) use crate::pattern::matcher::qualified as constant_name;
+
+/// Superclass links, keyed by qualified class name.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Hierarchy {
     superclass: HashMap<String, String>,
@@ -48,20 +60,82 @@ pub(crate) struct Hierarchy {
     /// interchangeable with an `include`: a rename must not rewrite a call the
     /// refinement is intercepting, or the call quietly stops going through it.
     refines: HashMap<String, Vec<String>>,
-}
-
-/// The name a constant-ish node denotes, ignoring how it was reached.
-pub(crate) fn constant_name(node: &Node<'_>) -> Option<String> {
-    let bytes = match node {
-        Node::ConstantReadNode { .. } => node.as_constant_read_node()?.name().as_slice().to_vec(),
-        Node::ConstantPathNode { .. } => node.as_constant_path_node()?.name()?.as_slice().to_vec(),
-        _ => return None,
-    };
-    String::from_utf8(bytes).ok()
+    /// Every qualified constant this run saw name a class, indexed by last
+    /// segment -- what an unqualified name is resolved against.
+    ///
+    /// References as well as declarations: `class Premium < Billing::Account`
+    /// names a class whether or not the file declaring it was parsed, and
+    /// dropping it would make `Account` unable to reach `Premium`.
+    by_segment: HashMap<String, Vec<String>>,
 }
 
 /// The calls that attach one module's methods to another class.
 const MIXINS: [&[u8]; 4] = [b"include", b"prepend", b"extend", b"refine"];
+
+/// A constant as written, and the class body it was written in.
+///
+/// Ruby resolves a constant lexically, so `Account` inside `module Billing`
+/// means `Billing::Account` when that exists. A reference cannot be resolved
+/// where it is collected -- the declaration may be in a file not parsed yet --
+/// so it is carried whole and resolved once the run has seen everything.
+#[derive(Debug, Clone)]
+struct Ref {
+    written: String,
+    enclosing: Option<String>,
+}
+
+/// What one file contributes, before any name is resolved.
+#[derive(Debug, Default)]
+struct Collected {
+    /// Qualified names of the classes and modules the file declares.
+    declared: Vec<String>,
+    superclass: Vec<(String, Ref)>,
+    mixins: Vec<(Ref, Ref)>,
+    refines: Vec<(Ref, Ref)>,
+    self_extended: Vec<String>,
+    aliases: Vec<(String, Ref)>,
+}
+
+impl Collected {
+    fn absorb(&mut self, other: Collected) {
+        self.declared.extend(other.declared);
+        self.superclass.extend(other.superclass);
+        self.mixins.extend(other.mixins);
+        self.refines.extend(other.refines);
+        self.self_extended.extend(other.self_extended);
+        self.aliases.extend(other.aliases);
+    }
+
+    /// Every constant name this file saw, declared or referred to.
+    fn constants(&self) -> impl Iterator<Item = &str> {
+        self.declared
+            .iter()
+            .chain(self.self_extended.iter())
+            .map(String::as_str)
+            .chain(
+                self.superclass
+                    .iter()
+                    .flat_map(|(c, r)| [c.as_str(), r.written.as_str()]),
+            )
+            .chain(
+                self.aliases
+                    .iter()
+                    .flat_map(|(c, r)| [c.as_str(), r.written.as_str()]),
+            )
+            .chain(
+                self.mixins
+                    .iter()
+                    .chain(self.refines.iter())
+                    .flat_map(|(h, m)| [h.written.as_str(), m.written.as_str()]),
+            )
+    }
+}
+
+/// The last segment of a qualified name -- what an unqualified one has to agree
+/// with before it can mean this class.
+fn last_segment(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
 
 /// Whether a call makes the enclosing module's instance methods reachable on
 /// the module itself.
@@ -141,52 +215,72 @@ fn constant_alias(node: &Node<'_>) -> Option<(String, String)> {
     (name != target).then_some((name, target))
 }
 
-/// Collect `class X < Y` pairs and the modules each class mixes in.
-fn links(
-    root: &Node<'_>,
-    out: &mut Vec<(String, String)>,
-    mixins: &mut Vec<(String, String)>,
-    refined: &mut Vec<(String, String)>,
-    selves: &mut Vec<String>,
-    aliases: &mut Vec<(String, String)>,
-) {
-    // Carries the enclosing class, which a flat stack loses -- and without it an
-    // `include` cannot be attributed to anything.
-    let mut stack = vec![(generated::dup(root), None::<String>)];
-    while let Some((node, enclosing)) = stack.pop() {
-        let mut inner = enclosing.clone();
-        if let Node::ClassNode { .. } = node
-            && let Some(class) = node.as_class_node()
-            && let Ok(name) = String::from_utf8(class.name().as_slice().to_vec())
-        {
-            if let Some(parent) = class.superclass()
-                && let Some(parent) = constant_name(&parent)
-            {
-                out.push((name.clone(), parent));
-            }
-            inner = Some(name);
+/// Collect what a file says about the classes in it.
+///
+/// The walk carries the matcher's own scope stack and names every class through
+/// `enclosing_class`, so a class is spelled here exactly as a match inside it is
+/// spelled there. Reimplementing the spelling is what produced D100's bug.
+fn links(root: &Node<'_>) -> Collected {
+    let mut out = Collected::default();
+    let mut stack = vec![(generated::dup(root), Vec::<String>::new())];
+    while let Some((node, scope)) = stack.pop() {
+        let enclosing = enclosing_class(&scope);
+        let mut inner = scope.clone();
+        if let Some(entry) = scope_name_of(&node) {
+            inner.push(entry);
         }
         // Modules too: a module can `include` another, and a refinement's body
         // belongs to the module that wrote it. Tracking classes alone left
         // anything written inside a module with nothing to attribute it to.
-        if let Node::ModuleNode { .. } = node
-            && let Some(module) = node.as_module_node()
-            && let Ok(name) = String::from_utf8(module.name().as_slice().to_vec())
-        {
-            inner = Some(name);
+        let declares = matches!(node, Node::ClassNode { .. } | Node::ModuleNode { .. });
+        let here = if declares {
+            enclosing_class(&inner)
+        } else {
+            enclosing.clone()
+        };
+        if declares && let Some(name) = &here {
+            out.declared.push(name.clone());
+            if let Some(class) = node.as_class_node()
+                && let Some(parent) = class.superclass()
+                && let Some(written) = constant_name(&parent)
+            {
+                out.superclass.push((
+                    name.clone(),
+                    Ref {
+                        written,
+                        // The superclass expression is read before the class
+                        // body opens, so it resolves against what is outside.
+                        enclosing: enclosing.clone(),
+                    },
+                ));
+            }
         }
-        if let Some(pair) = constant_alias(&node) {
-            aliases.push(pair);
+        if let Some((name, target)) = constant_alias(&node) {
+            let alias = match &enclosing {
+                Some(outer) => format!("{outer}::{name}"),
+                None => name,
+            };
+            out.aliases.push((
+                alias,
+                Ref {
+                    written: target,
+                    enclosing: enclosing.clone(),
+                },
+            ));
         }
         if extends_itself(&node)
-            && let Some(host) = enclosing.clone().or_else(|| inner.clone())
+            && let Some(host) = here.clone()
         {
-            selves.push(host);
+            out.self_extended.push(host);
         }
         let modules = mixed_in(&node);
         if !modules.is_empty()
             && let Some(host) = mixin_host(&node, enclosing.as_ref())
         {
+            let host = Ref {
+                written: host,
+                enclosing: enclosing.clone(),
+            };
             let refines = node
                 .as_call_node()
                 .is_some_and(|c| c.name().as_slice() == b"refine");
@@ -194,12 +288,22 @@ fn links(
                 // The refinement's body belongs to the enclosing module, so that
                 // is what contributes to the host.
                 if let Some(module) = &enclosing {
-                    refined.push((host.clone(), module.clone()));
-                    mixins.push((host, module.clone()));
+                    let module = Ref {
+                        written: module.clone(),
+                        enclosing: None,
+                    };
+                    out.refines.push((host.clone(), module.clone()));
+                    out.mixins.push((host, module));
                 }
             } else {
                 for module in modules {
-                    mixins.push((host.clone(), module));
+                    out.mixins.push((
+                        host.clone(),
+                        Ref {
+                            written: module,
+                            enclosing: enclosing.clone(),
+                        },
+                    ));
                 }
             }
         }
@@ -207,9 +311,76 @@ fn links(
             stack.push((child, inner.clone()));
         }
     }
+    out
+}
+
+/// Index every known constant by its last segment, so an unqualified name can
+/// be resolved without scanning them all.
+fn index(constants: HashSet<String>) -> HashMap<String, Vec<String>> {
+    let mut by_segment: HashMap<String, Vec<String>> = HashMap::new();
+    for name in constants {
+        by_segment
+            .entry(last_segment(&name).to_string())
+            .or_default()
+            .push(name);
+    }
+    by_segment
 }
 
 impl Hierarchy {
+    /// The class a written constant names, as far as this run can tell.
+    ///
+    /// Ruby's lexical lookup first -- innermost enclosing module outwards, then
+    /// the top level. A name that matches nothing seen widens to the single
+    /// class whose qualified name ends with it, and stays as written when
+    /// several do: rwr has no way to choose between `Billing::Account` and
+    /// `Sales::Account`, and choosing is the failure this design exists to
+    /// prevent (D100).
+    fn resolve(&self, r: &Ref) -> String {
+        let candidates = |name: &str| self.by_segment.get(last_segment(name));
+        // `Billing::Account` inside `module Deep` may be `Deep::Billing::Account`.
+        let mut outer = r.enclosing.as_deref();
+        while let Some(scope) = outer {
+            let nested = format!("{scope}::{}", r.written);
+            if candidates(&nested).is_some_and(|c| c.contains(&nested)) {
+                return nested;
+            }
+            outer = scope.rfind("::").map(|i| &scope[..i]);
+        }
+        match candidates(&r.written) {
+            Some(names) if names.iter().any(|n| n == &r.written) => r.written.clone(),
+            // Exactly one class ends with it, so that is what it means.
+            Some(names) if names.len() == 1 => names[0].clone(),
+            _ => r.written.clone(),
+        }
+    }
+
+    /// The class a bare name means, followed through any constant aliases.
+    ///
+    /// `Alias = Account` makes `Alias` a second name for one class, so every
+    /// question about it -- descent, method tables, a `type:` constraint -- is a
+    /// question about `Account`. Chains resolve (`A = B; B = C`), and a cycle
+    /// stops rather than spins: `A = B; B = A` is degenerate Ruby and must not
+    /// hang a linter.
+    pub(crate) fn canonical(&self, name: &str) -> String {
+        let mut current = self.resolve(&Ref {
+            written: name.to_string(),
+            enclosing: None,
+        });
+        for _ in 0..self.aliases.len() + 1 {
+            match self.aliases.get(&current) {
+                Some(target) if *target != current => current = target.clone(),
+                _ => break,
+            }
+        }
+        current
+    }
+
+    /// Whether two names mean one class.
+    pub(crate) fn same_class(&self, one: &str, other: &str) -> bool {
+        one == other || self.canonical(one) == self.canonical(other)
+    }
+
     /// Build only the part of the hierarchy reachable from `roots`.
     ///
     /// A rename names one class, and only its descendants matter -- so rather
@@ -217,6 +388,18 @@ impl Hierarchy {
     /// mentioning a class already known to be in the tree, and iterate to a
     /// fixpoint. `Gold < Premium < Account` is reached in two rounds: the first
     /// finds Premium, which puts "Premium" into the search set for the second.
+    ///
+    /// The search set holds *last segments*, because that is what the bytes of a
+    /// file carry: `Billing::Account` is reached by a file writing `Account`
+    /// inside `module Billing`, and a finder for the qualified name misses the
+    /// very file that declares it. Over-admitting a candidate costs a parse;
+    /// missing one is silent.
+    ///
+    /// Measured on rails against the worst case, `ActiveRecord::Base#save`:
+    /// 3,215 of 3,321 files parsed, 138ms of a 442ms run (minimum of seven).
+    /// Requiring *every* segment of a known name instead narrows that to 2,441
+    /// files and is **slower** at 251ms -- last segments collapse a whole
+    /// subclass tree onto one finder, where per-name segment sets do not.
     ///
     /// The full build parses ~8,700 files on the local Ruby corpus; this
     /// typically parses a handful, and is exact rather than approximate --
@@ -253,12 +436,10 @@ impl Hierarchy {
             .map(crate::source::Source::bytes)
             .collect();
 
-        let mut known: HashSet<String> = roots.iter().cloned().collect();
-        let mut superclass: HashMap<String, String> = HashMap::new();
-        let mut mixins: HashMap<String, Vec<String>> = HashMap::new();
-        let mut self_extended: HashSet<String> = HashSet::new();
-        let mut aliases: HashMap<String, String> = HashMap::new();
-        let mut refines: HashMap<String, Vec<String>> = HashMap::new();
+        let mut known: HashSet<String> =
+            roots.iter().map(|r| last_segment(r).to_string()).collect();
+        let mut all = Collected::default();
+        let mut constants: HashSet<String> = HashSet::new();
         let mut done = vec![false; candidates.len()];
         let mut parsed_total = 0usize;
 
@@ -268,17 +449,7 @@ impl Hierarchy {
                 .map(|n| memchr::memmem::Finder::new(n.as_bytes()).into_owned())
                 .collect();
 
-            type Round = (
-                usize,
-                Vec<(String, String)>,
-                Vec<(String, String)>,
-                Vec<(String, String)>,
-                // Modules that extend themselves: one name, not a pair.
-                Vec<String>,
-                // Constant aliases: alias -> the class it names.
-                Vec<(String, String)>,
-            );
-            let round: Vec<Round> = candidates
+            let round: Vec<(usize, Collected)> = candidates
                 .par_iter()
                 .enumerate()
                 .filter(|(i, _)| !done[*i])
@@ -293,55 +464,71 @@ impl Hierarchy {
                     if parsed.errors().count() > 0 {
                         return None;
                     }
-                    let (mut found, mut mixed, mut refined) = (Vec::new(), Vec::new(), Vec::new());
-                    let mut selves = Vec::new();
-                    let mut aliased = Vec::new();
-                    links(
-                        &parsed.node(),
-                        &mut found,
-                        &mut mixed,
-                        &mut refined,
-                        &mut selves,
-                        &mut aliased,
-                    );
-                    Some((i, found, mixed, refined, selves, aliased))
+                    Some((i, links(&parsed.node())))
                 })
                 .collect();
 
             parsed_total += round.len();
             let mut grew = false;
-            for (i, found, mixed, refined, selves, aliased) in round {
-                self_extended.extend(selves);
-                aliases.extend(aliased);
+            for (i, found) in round {
                 done[i] = true;
-                for (child, parent) in found {
-                    if known.contains(&parent) && known.insert(child.clone()) {
+                constants.extend(found.constants().map(str::to_string));
+                for (child, parent) in &found.superclass {
+                    if known.contains(last_segment(&parent.written))
+                        && known.insert(last_segment(child).to_string())
+                    {
                         grew = true;
                     }
-                    superclass.insert(child, parent);
                 }
-                for (class, module) in mixed {
-                    mixins.entry(class).or_default().push(module);
-                }
-                for (class, module) in refined {
-                    refines.entry(class).or_default().push(module);
-                }
+                all.absorb(found);
             }
             if !grew {
                 break;
             }
         }
 
-        (
-            Hierarchy {
-                superclass,
-                mixins,
-                aliases,
-                self_extended,
-                refines,
-            },
-            parsed_total,
-        )
+        (Hierarchy::from_collected(all, constants), parsed_total)
+    }
+
+    /// Turn written references into class names, once every file is in.
+    fn from_collected(all: Collected, constants: HashSet<String>) -> Self {
+        let mut h = Hierarchy {
+            by_segment: index(constants),
+            ..Hierarchy::default()
+        };
+        // Aliases first: everything else resolves through them.
+        h.aliases = all
+            .aliases
+            .iter()
+            .map(|(name, target)| (h.resolve_name(name), h.resolve(target)))
+            .filter(|(name, target)| name != target)
+            .collect();
+        for (child, parent) in &all.superclass {
+            h.superclass
+                .insert(h.resolve_name(child), h.resolve(parent));
+        }
+        for (host, module) in &all.mixins {
+            let (host, module) = (h.resolve(host), h.resolve(module));
+            h.mixins.entry(host).or_default().push(module);
+        }
+        for (host, module) in &all.refines {
+            let (host, module) = (h.resolve(host), h.resolve(module));
+            h.refines.entry(host).or_default().push(module);
+        }
+        h.self_extended = all
+            .self_extended
+            .iter()
+            .map(|n| h.resolve_name(n))
+            .collect();
+        h
+    }
+
+    /// A name already qualified where it was collected.
+    fn resolve_name(&self, name: &str) -> String {
+        self.resolve(&Ref {
+            written: name.to_string(),
+            enclosing: None,
+        })
     }
 
     /// Whether `module` is mixed into `class` or into any of its descendants.
@@ -351,10 +538,10 @@ impl Hierarchy {
     /// it, everything a concern contributes -- and in Rails that is a large
     /// share of a model -- is dropped from the account with nothing said.
     pub(crate) fn contributes_to(&self, module: &str, class: &str) -> bool {
-        self.mixins.iter().any(|(host, modules)| {
-            modules.iter().any(|m| m == module)
-                && (host == class || self.descends_from(host, class))
-        })
+        let module = self.canonical(module);
+        self.mixins
+            .iter()
+            .any(|(host, modules)| modules.contains(&module) && self.descends_from(host, class))
     }
 
     /// The modules that refine `class`.
@@ -363,49 +550,34 @@ impl Hierarchy {
     /// such a file may be dispatching to the refinement rather than the class --
     /// and renaming it there silently routes around the refinement.
     pub(crate) fn refined_by(&self, class: &str) -> &[String] {
-        self.refines.get(class).map_or(&[], Vec::as_slice)
+        self.refines
+            .get(&self.canonical(class))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether this module's instance methods answer on the module itself, so
+    /// that `Util.foo` and `Util#foo` name one method rather than two.
+    pub(crate) fn extends_itself(&self, class: &str) -> bool {
+        self.self_extended.contains(&self.canonical(class))
     }
 
     /// Whether `class` is `ancestor` or descends from it.
     ///
     /// Guards against a cycle, which valid Ruby cannot express but a
     /// half-written file can.
-    /// The class a name really means, following constant aliases.
-    ///
-    /// `Alias = Account` makes `Alias` a second name for one class, so every
-    /// question about it -- descent, method tables, a `type:` constraint -- is a
-    /// question about `Account`. Chains resolve (`A = B; B = C`), and a cycle
-    /// stops rather than spins: `A = B; B = A` is degenerate Ruby and must not
-    /// hang a linter.
-    pub(crate) fn canonical<'a>(&'a self, name: &'a str) -> &'a str {
-        let mut current = name;
-        for _ in 0..self.aliases.len() + 1 {
-            match self.aliases.get(current) {
-                Some(target) if target != current => current = target,
-                _ => break,
-            }
-        }
-        current
-    }
-
-    /// Whether this module's instance methods answer on the module itself, so
-    /// that `Util.foo` and `Util#foo` name one method rather than two.
-    pub(crate) fn extends_itself(&self, class: &str) -> bool {
-        self.self_extended.contains(class)
-    }
-
     pub(crate) fn descends_from(&self, class: &str, ancestor: &str) -> bool {
-        let mut current = class;
+        let ancestor = self.canonical(ancestor);
+        let mut current = self.canonical(class);
         let mut seen = HashSet::new();
         loop {
             if current == ancestor {
                 return true;
             }
-            if !seen.insert(current.to_string()) {
+            if !seen.insert(current.clone()) {
                 return false;
             }
-            match self.superclass.get(current) {
-                Some(parent) => current = parent,
+            match self.superclass.get(&current) {
+                Some(parent) => current = self.canonical(parent),
                 None => return false,
             }
         }
@@ -416,33 +588,9 @@ impl Hierarchy {
     #[cfg(test)]
     pub(crate) fn from_source(source: &str) -> Self {
         let parsed = ruby_prism::parse(source.as_bytes());
-        let (mut found, mut mixed) = (Vec::new(), Vec::new());
-        let mut refined = Vec::new();
-        let mut selves = Vec::new();
-        let mut aliased = Vec::new();
-        links(
-            &parsed.node(),
-            &mut found,
-            &mut mixed,
-            &mut refined,
-            &mut selves,
-            &mut aliased,
-        );
-        let mut mixins: HashMap<String, Vec<String>> = HashMap::new();
-        for (class, module) in mixed {
-            mixins.entry(class).or_default().push(module);
-        }
-        let mut refines: HashMap<String, Vec<String>> = HashMap::new();
-        for (class, module) in refined {
-            refines.entry(class).or_default().push(module);
-        }
-        Hierarchy {
-            superclass: found.into_iter().collect(),
-            mixins,
-            aliases: aliased.into_iter().collect(),
-            self_extended: selves.into_iter().collect(),
-            refines,
-        }
+        let found = links(&parsed.node());
+        let constants = found.constants().map(str::to_string).collect();
+        Hierarchy::from_collected(found, constants)
     }
 }
 
@@ -485,7 +633,7 @@ mod tests {
 
         let cycle = Hierarchy::from_source("A = B\nB = A\n");
         // Whichever end it stops at, it stops.
-        assert!(matches!(cycle.canonical("A"), "A" | "B"));
+        assert!(matches!(cycle.canonical("A").as_str(), "A" | "B"));
     }
 
     /// Only a bare constant is an alias. `LIMIT = 5` names no class, and
@@ -524,12 +672,69 @@ mod tests {
         assert!(!h.descends_from("A", "C"));
     }
 
-    /// A namespaced superclass resolves by its final name, since that is what
-    /// a `type:` constraint names.
+    /// An unqualified name means the one class that answers to it, and the run
+    /// only knows the classes it has seen -- declared or named as a superclass.
     #[test]
-    fn namespaced_superclasses_resolve_by_name() {
+    fn an_unqualified_name_reaches_the_only_class_that_ends_with_it() {
         let h = Hierarchy::from_source("class Premium < Billing::Account; end");
         assert!(h.descends_from("Premium", "Account"));
+        assert!(h.descends_from("Premium", "Billing::Account"));
+
+        let declared = Hierarchy::from_source(
+            "module Billing\n  class Account; end\nend\nclass Premium < Billing::Account; end",
+        );
+        assert!(declared.descends_from("Premium", "Account"));
+    }
+
+    /// And two classes sharing a last segment are two classes. Renaming
+    /// `Account#foo` reached `class Premium < Billing::Account` before this,
+    /// because the hierarchy kept only the last segment of every name.
+    #[test]
+    fn a_top_level_class_does_not_absorb_its_namespaced_namesake() {
+        let h = Hierarchy::from_source(
+            "class Account; end\nmodule Billing\n  class Account; end\nend\n\
+             class Premium < Billing::Account; end",
+        );
+        assert!(h.descends_from("Premium", "Billing::Account"));
+        assert!(
+            !h.descends_from("Premium", "Account"),
+            "Billing::Account is not the top-level Account"
+        );
+        assert!(!h.same_class("Account", "Billing::Account"));
+    }
+
+    /// A reference written inside a module resolves the way Ruby resolves it:
+    /// the sibling in the same namespace wins over the top-level namesake.
+    #[test]
+    fn a_reference_resolves_against_its_enclosing_module_first() {
+        let h = Hierarchy::from_source(
+            "class Base; end\nmodule Billing\n  class Base; end\n  class Account < Base; end\nend",
+        );
+        assert!(h.descends_from("Billing::Account", "Billing::Base"));
+        assert!(!h.descends_from("Billing::Account", "Base"));
+    }
+
+    /// An alias names the class it points at, namespace and all. Keeping only
+    /// the last segment made `Alias = Billing::Account` a second name for the
+    /// *top-level* Account, which a rename of that class then rewrote.
+    #[test]
+    fn a_constant_alias_keeps_the_namespace_of_what_it_names() {
+        let h = Hierarchy::from_source(
+            "class Account; end\nmodule Billing\n  class Account; end\nend\nAlias = Billing::Account\n",
+        );
+        assert_eq!(h.canonical("Alias"), "Billing::Account");
+        assert!(!h.same_class("Alias", "Account"));
+    }
+
+    /// A namespaced concern is not the top-level module of the same name.
+    #[test]
+    fn a_namespaced_mixin_is_not_its_top_level_namesake() {
+        let h = Hierarchy::from_source(
+            "module Helpers; end\nmodule Billing\n  module Helpers; end\nend\n\
+             class Account\n  include Billing::Helpers\nend",
+        );
+        assert!(h.contributes_to("Billing::Helpers", "Account"));
+        assert!(!h.contributes_to("Helpers", "Account"));
     }
 
     /// A file that mixes a module in without writing `class X < Y` is still
@@ -569,6 +774,17 @@ mod tests {
                 "{module} contributes to Account: {patch}"
             );
         }
+    }
+
+    /// A namespaced class is reached from a file that only ever writes its short
+    /// name, so the search set holds last segments rather than qualified names.
+    #[test]
+    fn the_search_set_reaches_a_class_written_unqualified() {
+        let sources = vec![crate::source::Source::Owned(
+            b"module Billing\n  class Account; end\n  class Premium < Account; end\nend\n".to_vec(),
+        )];
+        let (h, _) = Hierarchy::reachable_from(&sources, &["Billing::Account".to_string()]);
+        assert!(h.descends_from("Billing::Premium", "Billing::Account"));
     }
 
     /// Valid Ruby cannot express a cycle, but a half-written file can, and the

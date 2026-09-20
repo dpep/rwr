@@ -3407,3 +3407,72 @@ fn an_operator_or_writer_designator_is_refused() {
     let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
     assert_eq!(after, source, "a refusal writes nothing");
 }
+
+/// An unqualified designator reaches a namespaced class when the run can see
+/// exactly one of that name (D100).
+///
+/// The hierarchy keyed classes by their last constant segment while scopes used
+/// the qualified name, so `Account` and `Billing::Account` were the same class
+/// to one half of the engine and different classes to the other. Three silent
+/// answers came out of that, and they pull in opposite directions -- which is
+/// why they are pinned together.
+#[test]
+fn an_unqualified_designator_resolves_against_the_classes_it_can_see() {
+    let namespaced = "module Billing\n  class Account\n    def display_name\n      \"base\"\n    \
+                      end\n  end\nend\n";
+
+    // (a) The only class of that name is namespaced, so the short name reaches
+    // it. This returned zero sites at exit 1, and did not appear in residue
+    // either -- the same answer as "no such code exists".
+    let dir = fixture(namespaced);
+    let out = rwr(&[
+        "find",
+        "Account#display_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a namespaced class is reachable by its short name: {}",
+        stderr(&out)
+    );
+
+    // (b) And its subclasses come with it. `subclasses: true` was inert for a
+    // namespaced superclass: the override was neither rewritten nor reported.
+    let dir = fixture(&format!(
+        "{namespaced}\nclass Premium < Billing::Account\n  def display_name\n    \"override\"\n  \
+         end\n\n  def label\n    display_name\n  end\nend\n"
+    ));
+    let out = rwr(&[
+        "check",
+        "Billing::Account#display_name",
+        "-r",
+        "full_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("would rewrite 3 site"),
+        "the base, the override and its implicit call: {text}"
+    );
+
+    // (c) But two classes sharing a last segment are two classes. A top-level
+    // rename reached `class Premium < Billing::Account`, which is not a
+    // descendant of the class named.
+    let dir = fixture(&format!(
+        "class Account\n  def display_name\n    \"top\"\n  end\nend\n\n{namespaced}\n\
+         class Premium < Billing::Account\n  def display_name\n    \"override\"\n  end\nend\n"
+    ));
+    let out = rwr(&[
+        "check",
+        "Account#display_name",
+        "-r",
+        "full_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("would rewrite 1 site"),
+        "only the top-level Account is named: {text}"
+    );
+}

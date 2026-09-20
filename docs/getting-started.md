@@ -55,6 +55,20 @@ supported through the notation yet. rwr names the offending method and refuses,
 rather than reading `Account#==` as a pattern, where it would silently have
 meant the bare constant `Account`.
 
+### Namespaced classes
+
+An unqualified class name means the class of exactly that name if the run can
+see one, and otherwise the single class whose qualified name ends with it. So
+`Account#display_name` finds `Billing::Account` in a codebase that has only
+that one — and means the top-level `Account`, and not `Billing::Account`, in one
+that has both.
+
+When several classes share a last segment and none is top-level — nine
+`…::LogSubscriber`s and no plain one — the short name matches none of them.
+Write the qualified name, `ActiveSupport::LogSubscriber#logger`, to say which
+you mean. Constants written in your source resolve the way Ruby resolves them,
+against the enclosing module nesting.
+
 ## Change something
 
 ```sh

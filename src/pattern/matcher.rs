@@ -582,8 +582,13 @@ pub(crate) fn verdict(
 ) -> Verdict {
     if let Some(wanted) = &scope.inside {
         let here = enclosing_class(&found.scope);
+        // `same_class` rather than `==`: both sides are names of a class, and
+        // which class a name means is the hierarchy's question, not a string
+        // comparison's. With no hierarchy built it *is* a string comparison, so
+        // a rule that asks nothing about classes behaves exactly as before.
         let reached = here.as_deref().is_some_and(|s| {
-            s == wanted || (scope.subclasses.unwrap_or(false) && hierarchy.descends_from(s, wanted))
+            hierarchy.same_class(s, wanted)
+                || (scope.subclasses.unwrap_or(false) && hierarchy.descends_from(s, wanted))
         });
         if !reached {
             return Verdict::WrongScope(ScopeMiss::Inside {
@@ -748,10 +753,9 @@ pub(crate) fn verdict(
             // Through constant aliases on both sides: `Alias = Account` makes
             // the two names one class, so a rule naming either must reach code
             // written with the other.
-            let got = hierarchy.canonical(resolved.class_name());
-            let want = hierarchy.canonical(wanted);
-            let matches_class = got == want
-                || (constraint.subclasses.unwrap_or(false) && hierarchy.descends_from(got, want));
+            let got = resolved.class_name();
+            let matches_class = hierarchy.same_class(got, wanted)
+                || (constraint.subclasses.unwrap_or(false) && hierarchy.descends_from(got, wanted));
             if !matches_class {
                 return unresolved(false, Some(resolved.class_name().to_string()));
             }
@@ -1213,7 +1217,13 @@ const ROOTED: &str = "::";
 const UNKNOWN_OWNER: &str = "<unknown>";
 
 /// A constant path rendered whole -- `Billing::Account` rather than `Account`.
-fn qualified(node: &Node<'_>) -> Option<String> {
+///
+/// Shared with the hierarchy rather than reimplemented there: the two have to
+/// spell a class the same way or they are talking about different classes, and
+/// they did -- the hierarchy keyed on the last segment while scopes carried the
+/// path, so `Account` and `Billing::Account` were one class to one half of the
+/// engine and two to the other (D100).
+pub(crate) fn qualified(node: &Node<'_>) -> Option<String> {
     match node {
         Node::ConstantReadNode { .. } => {
             String::from_utf8(node.as_constant_read_node()?.name().as_slice().to_vec()).ok()

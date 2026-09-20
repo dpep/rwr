@@ -2556,3 +2556,67 @@ hole, and the hole is the part that ships a wrong answer.
 fail with "the rewritten source did not verify: unexpected constant path after `class`" -- a true
 statement about a symptom three steps downstream. `check` answered with "no such file, directory, or
 built-in rule" and a list of twenty built-in rule ids. Both now name the method.
+
+## D100 - A class designator resolves against the classes the run can see
+**Decided.** Fixes the split that predates D90-D97; every decision leaning on the hierarchy inherits it.
+
+The matcher spelled a class by its **qualified** name -- `scope_name_of` records `Billing::Account`,
+`enclosing_class` joins the nesting -- and the hierarchy spelled it by its **last segment**:
+`constant_name` returned `Account` for a `ConstantPathNode` and `ClassNode::name` gives the last
+segment too. `verdict()` then compared exact strings and `descends_from` looked up the short key, so
+one half of the engine thought `Account` and `Billing::Account` were one class and the other thought
+they were two. Introduced by `0c283ec`, which made scope names qualified and left the hierarchy
+short-keyed.
+
+Three silent answers came out of it, and they pull in **opposite** directions, which is why no local
+patch fixes them:
+  - a namespaced class was unreachable by its short name -- `find 'Account#display_name'` over
+    `module Billing; class Account; def display_name` returned zero sites at exit 1, and the
+    definition was not in the residue list either;
+  - `subclasses: true` was inert for a namespaced superclass -- the override was neither rewritten
+    nor reported, `residue: []`, exit 0;
+  - two classes sharing a last segment were one -- a rename of the top-level `Account` reached
+    `class Premium < Billing::Account`.
+
+Measured: 84% of rails classes are namespaced (1,837/2,185), 44% of discourse, 48% of mastodon. The
+common case, not an edge.
+
+**The rule, in one sentence: an unqualified class name means the class of exactly that name if this
+run can see one, and otherwise the single class whose qualified name ends with it -- and when
+several do, it resolves to none of them.**
+
+Everything follows from that. `Account` finds `Billing::Account` when that is the only Account
+around, which is the ordinary case and the one that returned nothing. `Account` means the top-level
+`Account` the moment the run can see one, so it stops reaching `Billing::Account` and its
+descendants. `LogSubscriber` on rails, where nine namespaces declare one and no top level does, is
+ambiguous and resolves to nothing -- rwr has no basis for choosing `ActiveSupport::LogSubscriber`
+over `ActionView::LogSubscriber`, and choosing is the failure the product exists to prevent. Qualify
+it and it works.
+
+**The set it resolves against is every constant the run saw name a class, references included.**
+`class Premium < Billing::Account` names a class whether or not the file declaring it was parsed;
+dropping references would have made `Account` unable to reach `Premium` through it.
+
+**Ruby's own lookup, for names written in source.** A superclass or mixin written `Account` inside
+`module Billing` resolves innermost-outwards -- `Billing::Account` first, then `Account` -- so the
+sibling in the namespace wins over the top-level namesake, as Ruby does it. Only the designator,
+which has no lexical position, gets the widening above.
+
+**One spelling, not two.** `hierarchy::constant_name` is now `matcher::qualified` re-exported rather
+than a second implementation, and `links` names every class through the matcher's own
+`scope_name_of` / `enclosing_class`. Two modules that spell a class differently are talking about
+different classes, and that is the whole bug; a shared spelling makes it unrepresentable rather than
+merely fixed.
+
+**What this does not do.** An ambiguous short name resolves to nothing and rwr does not *say* so --
+the `read ... as` line is printed before the hierarchy exists, so naming the candidates needs that
+announcement moved or deferred. Today the run still produces a residue report naming every
+occurrence it could not account for, where before it produced silence and exit 1. Refusing outright
+(exit 5) is the better end state and needs the same plumbing.
+
+**Cost.** The candidate search now looks for last segments, because a finder for `ActiveRecord::Base`
+misses the file that declares it -- `class Base` inside `module ActiveRecord`. Worst case on rails,
+`ActiveRecord::Base#save`: 3,215 of 3,321 files parsed, 138ms of a 442ms run, minimum of seven.
+Requiring every segment of a known name narrows it to 2,441 files and is *slower* at 251ms, because
+last segments collapse a subclass tree onto one finder. D92 already accepted a full rails parse at
+this scale.
