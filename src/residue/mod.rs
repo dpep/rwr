@@ -384,6 +384,30 @@ pub(crate) fn anchors(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
     vec![call.name().as_slice().to_vec()]
 }
 
+/// Every literal whose presence in a file means that file may hold residue.
+///
+/// The anchor, and -- where the pattern moves a definition -- the dispatchers
+/// too. A computed name is a blind spot with a location (D85), and the bytes
+/// that locate it belong to the dispatcher, never to the anchor:
+/// `public_send("display_#{attr}")` contains no part of `display_name`. So a
+/// prefilter built from the anchor alone drops the file, and with it the one
+/// report it could have produced. Splitting a dispatcher from the definition it
+/// reaches -- a decorator, a serializer, a form object -- is ordinary app
+/// structure, and the same code in one file was reported.
+///
+/// Read off `DISPATCHERS`, the list [`find`] scans with, so the filter in front
+/// of the collector cannot fall behind it.
+pub(crate) fn reach(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
+    let mut out = anchors(pattern, prepared);
+    // With no anchor there is no report, so there is nothing to admit a file
+    // for; and a rule that moves no definition claims no completeness (D7), so
+    // its residue never runs.
+    if !out.is_empty() && defines_a_method(pattern, prepared) {
+        out.extend(DISPATCHERS.iter().map(|d| d.to_vec()));
+    }
+    out
+}
+
 /// Whether an identifier inside a string is a mention of a name, rather than one
 /// segment of a qualified one.
 ///
@@ -710,6 +734,32 @@ mod tests {
         assert!(reaches("\"#{x}\""));
     }
 
+    /// A computed name is located by the dispatcher's bytes, never the
+    /// anchor's, so a file may hold residue without spelling the anchor at all.
+    #[test]
+    fn a_definition_reaches_past_its_own_name() {
+        let reach_of = |pattern: &str| {
+            let prepared = prepare::prepare(pattern).expect("prepares");
+            let parsed = ruby_prism::parse(prepared.source.as_bytes());
+            let node = parsed.node();
+            let root = matcher::pattern_root(&node).expect("one expression");
+            reach(&root, &prepared)
+                .into_iter()
+                .map(|a| String::from_utf8_lossy(&a).into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let moving = reach_of("def display_name; $B; end");
+        assert!(moving.contains(&"display_name".to_string()));
+        assert!(moving.contains(&"public_send".to_string()));
+
+        // No definition moves, so nothing claims completeness and no residue
+        // runs -- widening the filter would only cost parses.
+        assert_eq!(reach_of("$R.display_name"), vec!["display_name"]);
+        // No anchor, so nothing to report and nothing to admit a file for.
+        assert!(reach_of("$R.select { |$P| $B }.first").is_empty());
+    }
+
     /// The prefilter may never hide a file this report would have named.
     ///
     /// A file is parsed only if its bytes pass `Filter::may_contribute`, so the
@@ -734,6 +784,10 @@ mod tests {
             "class Account\n  delegate :display_name, to: :owner\nend\n",
             "class Account\n  def go; raise \"display_name moved\"; end\nend\n",
             "class Widget\n  def unrelated; 1; end\nend\n",
+            // Nowhere in these bytes is the anchor, whole or in part -- the
+            // dispatcher is the only thing that can admit the file.
+            "class Account\n  def go(a); public_send(\"display_#{a}\"); end\nend\n",
+            "class Account\n  def go(a); send(a); end\nend\n",
         ];
         for pattern in [
             "$R.display_name",
@@ -752,6 +806,12 @@ mod tests {
                 let parsed = ruby_prism::parse(source.as_bytes());
                 let mut would = find(&parsed.node(), &anchors, &[], source.as_bytes());
                 would.extend(in_comments(&parsed, &anchors, source.as_bytes()));
+                // A rule that moves no definition claims no completeness (D7),
+                // so the engine never runs its residue -- and a dispatcher in
+                // some other rule's file is not its business.
+                if !defines_a_method(&p_root, &prepared) {
+                    would.retain(|o| o.context != Context::Dynamic);
+                }
                 if would.is_empty() {
                     continue;
                 }

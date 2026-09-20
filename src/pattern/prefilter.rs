@@ -97,7 +97,7 @@ impl Filter {
     /// anchors on nothing -- and it cost the blind-spot report on every file
     /// the required literals alone could not admit.
     pub(crate) fn for_pattern(root: &Node<'_>, prepared: &Prepared) -> Self {
-        Filter::new(&required_of(prepared), &residue::anchors(root, prepared))
+        Filter::new(&required_of(prepared), &residue::reach(root, prepared))
     }
 
     /// The two sets supplied separately, which is how the residue side came to
@@ -109,8 +109,18 @@ impl Filter {
                 .iter()
                 .map(|r| memchr::memmem::Finder::new(r.as_bytes()).into_owned())
                 .collect(),
+            // `send` subsumes `public_send`, `method` subsumes `define_method`:
+            // under an `any` test a literal containing another in the set can
+            // never be the one that decides, and the prefilter reads every byte
+            // of the repository once per searcher. Derived from the set rather
+            // than curated, so it cannot fall out of step with it.
             residue: residue
                 .iter()
+                .filter(|a| {
+                    !residue
+                        .iter()
+                        .any(|b| b.len() < a.len() && memchr::memmem::find(a, b).is_some())
+                })
                 .map(|a| memchr::memmem::Finder::new(a.as_slice()).into_owned())
                 .collect(),
         }
@@ -170,6 +180,29 @@ mod tests {
         let filter = Filter::new(&required("return nil"), &[]);
         assert!(filter.may_contribute(b"def a; return nil; end"));
         assert!(!filter.may_contribute(b"def a; 1; end"));
+    }
+
+    /// Trimming the subsumed searchers may not change the answer, only the
+    /// number of passes over the file.
+    #[test]
+    fn a_subsuming_residue_literal_never_decides() {
+        let of = |residue: &[Vec<u8>]| Filter::new(&required("$R.display_name"), residue);
+        let full = of(&[b"send".to_vec(), b"public_send".to_vec(), b"try".to_vec()]);
+        let trimmed = of(&[b"send".to_vec(), b"try".to_vec()]);
+        for source in [
+            &b"public_send(:x)"[..],
+            b"__send__(:x)",
+            b"foo.try(:x)",
+            b"display_name",
+            b"nothing here",
+        ] {
+            assert_eq!(
+                full.may_contribute(source),
+                trimmed.may_contribute(source),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
     }
 
     /// `for_pattern` reads the required literals off the *substituted* source,

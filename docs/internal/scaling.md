@@ -38,9 +38,19 @@ Two properties keep it honest:
 - **Conservative by construction.** A file is skipped only when it provably cannot
   contribute, and a pattern with no literal text (`$A.$B`) filters nothing.
 - **Residue is checked separately.** A match needs *every* required literal; residue needs
-  only the anchor, and is reported from files a rule does *not* match — a declaration file,
-  say. Checking those conjunctively would silently drop exactly the blind-spot report the
-  design exists to produce.
+  only one of its own, and is reported from files a rule does *not* match — a declaration
+  file, say. Checking those conjunctively would silently drop exactly the blind-spot report
+  the design exists to produce.
+
+Residue's literals are the anchor **and, where the pattern moves a definition, the
+dispatchers** — `send`, `public_send`, `try`, `method` and the rest of `DISPATCHERS`.
+`public_send("display_#{attr}")` holds no part of `display_name`, so a dispatcher split
+into its own file was dropped before parsing and its blind spot with it. This is the one
+place the prefilter is deliberately blunt, and it costs: `check 'Account#display_name'`
+over discourse goes 0.80 s → 1.25 s, and a common name (`User#name`, 1,940 files changed)
+3.0 s → 3.3 s. Two things keep it from being worse — each rule's residue pass is gated on
+that rule's own filter rather than walking every tree once per rule, and a residue literal
+containing another in the set is dropped, since under an `any` test it can never decide.
 
 ## We are at grep speed, which is the floor
 

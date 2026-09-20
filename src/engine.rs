@@ -831,7 +831,15 @@ impl Engine {
         }
         let parsed = ruby_prism::parse(current);
         let mut found = Vec::new();
-        for (rule, prepared) in self.rules.iter().zip(&self.prepareds) {
+        for (index, (rule, prepared)) in self.rules.iter().zip(&self.prepareds).enumerate() {
+            // The same gate the match walk uses, for the same reason: a file
+            // holding none of this rule's literals holds none of its residue
+            // either, and a pack of ten rules otherwise walks every tree ten
+            // times. The filter's residue side is exactly what `residue::find`
+            // searches for, so this cannot reject a file that would report.
+            if !self.filters[index].may_contribute(current) {
+                continue;
+            }
             let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
             let p_node = p_parsed.node();
             let Some(p_root) = matcher::pattern_root(&p_node) else {

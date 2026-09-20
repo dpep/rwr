@@ -3283,3 +3283,35 @@ fn find_carries_the_suppression_audit_into_json() {
         "{doc}"
     );
 }
+
+/// A dispatcher in a file of its own is still reported.
+///
+/// `public_send("display_#{attr}")` contains no part of `display_name`, so the
+/// prefilter's required literals cannot admit the file and its anchor cannot
+/// either -- only the dispatcher can. The identical code in one file was
+/// reported all along, which is why splitting it is the test worth having:
+/// a decorator, a serializer or a form object beside the model it reaches is
+/// ordinary app structure, not an edge case.
+#[test]
+fn a_dynamic_reach_is_reported_from_a_file_of_its_own() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("account.rb"),
+        "class Account\n  def display_name\n    \"x\"\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.path().join("dispatch.rb"),
+        "class Account\n  def dynamic_call(attr)\n    public_send(\"display_#{attr}\")\n  end\nend\n",
+    )
+    .expect("write");
+
+    let out = rwr(&[
+        "find",
+        "Account#display_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let account = stderr(&out);
+    assert!(account.contains("could not account for"), "{account}");
+    assert!(account.contains("dispatch.rb"), "{account}");
+}

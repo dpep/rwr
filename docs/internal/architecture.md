@@ -117,11 +117,20 @@ which is why the range discipline exists rather than relying on it.
 
 **The prefilter is conservative by construction.** A file is skipped only when it
 *provably* cannot contribute. The subtle half: a **match** needs every required
-literal, but **residue** needs only the anchor, and residue lives in files the
+literal, but **residue** needs only one of its own, and residue lives in files the
 rule does not match. `may_contribute` checks the two disjunctively. Collapse them
 and you silently drop the blind-spot report the product exists to produce.
-(`residue::tests::an_anchor_is_always_one_of_the_required_literals` pins why the
-engine can pass no anchors today, and names the fix for the day that changes.)
+
+Residue's side of that disjunction is `residue::reach` — the anchor, plus the
+dispatchers where the pattern moves a definition. A computed name is a blind spot
+with a location (D85) and the bytes that locate it are the dispatcher's, never the
+anchor's, so the anchor alone cannot admit the file a `public_send` sits in.
+`Filter::for_pattern` derives both sets from the one prepared pattern, because
+they were separate arguments once and the engine passed `&[]` for the second in
+every run it ever made. The test that stood guard asserted the anchor was always
+a required literal — true, by coincidence, and so it never went red;
+`residue::tests::the_prefilter_admits_every_file_residue_would_report_from`
+asserts the property instead.
 
 **Criteria are applied inside the search (Q13).** A node can admit several
 bindings and only a later one may satisfy `where:`. A `Verdict::BadBinding`
