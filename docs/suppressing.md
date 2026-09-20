@@ -54,6 +54,11 @@ A reason may follow `--`. Rule ids are required: a bare `# rwr:ignore` is
 reported as malformed and suppresses nothing, because a blanket ignore is one no
 staleness check can audit.
 
+The marker has to **open the comment**: `# rwr:ignore style/no-sleep` is a directive,
+`# TODO: add rwr:ignore style/no-sleep here` is a note to yourself. A comment that merely mentions
+the marker suppresses nothing, so writing about the convention never silences the code you were
+writing about. A space after the `#` is optional.
+
 There is deliberately **no `disable`/`enable` block form**. A forgotten
 terminator silently suppresses the rest of a file, which is the invisible blind
 spot rwr exists to refuse. If you need a wider exception than a statement, the

@@ -29,6 +29,38 @@ only calls and symbols, so it pointed you at symbols while a `definition` — th
 means the rewrite you just applied does not hold together — went unnamed and could fall inside the
 "and N more".
 
+**Columns are counted in characters, not bytes.** On a line carrying a non-ASCII character before
+the match — an accented name, an i18n string, a curly quote pasted from a word processor — every
+column was reported past where it is, in the text report and in `-j` alike. Anything storing rwr
+columns will disagree with the new ones on those lines.
+
+**`# rwr:ignore` is read only when the marker opens the comment.** A comment *about* the convention,
+or a `# TODO: add rwr:ignore style/x here`, used to silence the site it described and report its
+remaining words as rule ids nothing has. `#rwr:ignore` with no space still works; a directive
+written inside an `=begin`/`=end` block is no longer read as one. Measured across rails, discourse
+and mastodon: all 233 real `rubocop:` directives open their comment, none sits mid-comment.
+
+**A rule id written twice on one directive is counted once**, instead of printing that comment's
+`file:line` twice in the stale report. The stale and unknown lists also name their remainder when
+truncated, as every other capped list already did, and count rule ids rather than directives — a
+directive naming three dead ids is three rows, and now says so.
+
+**Fixed: a scoped run decided what was in scope by the span it matched, not the bytes it writes.**
+A rename matches a whole `def … end`, so an edit anywhere in a method body pulled the signature into
+scope and rewrote a line the scope never named — defeating the documented CI gate, where a rule with
+two thousand pre-existing sites is not supposed to fail a pull request that added three. Scope is now
+the union of the edit ranges (D105, following D15's conflict unit). **If you relied on a scoped run
+reaching a definition from a change inside its body, name the definition's line instead.**
+
+**A scoped run that rewrites a site spanning lines the scope did not name now says so** — on stderr,
+and as `wrote_beyond_scope` in `-j`. A site is rewritten whole or not at all. The field is absent
+when nothing widened, so an unscoped document is unchanged.
+
+**`--diff` and friends scope the sites, not the residue.** The account of what rwr could not reach is
+computed over each whole file it read, and never moves the exit code (D106).
+
+**`PATH:N` past the end of a file is an error (exit 2)** rather than a silent clean no-match.
+
 **Fixed: a qualified designator answered about a class in a different namespace.**
 `rwr check 'Sales::Account#display_name' -r full_name app/billing` reported a rewrite in
 `Billing::Account` — the class the path scope had explicitly excluded. Widening a short name to the

@@ -639,11 +639,14 @@ fn report_suppressions(
         // cannot keep silencing anything -- its finding is already gone -- so
         // what is left is tidying, and tidying does not block a commit.
         eprintln!(
-            "rwr: {} stale rwr:ignore directive(s) -- nothing left to accept there:",
+            "rwr: {} stale rwr:ignore rule id(s) -- nothing left to accept there:",
             stale.len()
         );
         for d in stale.iter().take(RESIDUE_DETAIL_CAP) {
             eprintln!("  {}:{}: {} -- delete the comment", d.file, d.line, d.rule);
+        }
+        if stale.len() > RESIDUE_DETAIL_CAP {
+            eprintln!("  ... and {} more", stale.len() - RESIDUE_DETAIL_CAP);
         }
     }
     if !unknown.is_empty() {
@@ -651,7 +654,7 @@ fn report_suppressions(
         // thinks: it silenced nothing, and whatever it meant to accept is
         // still live. A suppression's one forbidden outcome is silence.
         eprintln!(
-            "rwr: {} rwr:ignore directive(s) name a rule this run does not have, \
+            "rwr: {} rwr:ignore rule id(s) name a rule this run does not have, \
              so they suppressed nothing:",
             unknown.len()
         );
@@ -666,6 +669,9 @@ fn report_suppressions(
                     d.file, d.line, d.rule
                 ),
             }
+        }
+        if unknown.len() > RESIDUE_DETAIL_CAP {
+            eprintln!("  ... and {} more", unknown.len() - RESIDUE_DETAIL_CAP);
         }
     }
     for d in malformed {
