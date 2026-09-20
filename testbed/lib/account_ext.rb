@@ -36,6 +36,11 @@ class Account
   end
 
   class << self
+    # GT:notice -- a macro in a singleton body configures Account.display_name,
+    # which the `def` below then overrides. The same line in the class body
+    # would define the instance method; here it must be reported, never moved.
+    attr_accessor :display_name
+
     # `Account.display_name` is the label the admin menu prints. It shares a
     # name with the instance method and shares nothing else: renaming the
     # instance method leaves this one exactly where it is.
