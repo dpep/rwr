@@ -1722,6 +1722,15 @@ instructions, not prose. They are read, never matched, never rewritten, and neve
 residue. **Directives suppress findings and edits; they cannot touch the residue report**, which
 is the account of blind spots and is the product.
 
+*Amended: "never counted as residue" was an intention, not a fact.* The residue pass read every
+comment as prose, so a directive was reported as `comment` residue — and because a directive
+names the id it suppresses, `# rwr:ignore Account#display_name` reported *itself*, raising the
+headline blind-spot number by one and labelling itself as something a human should review. It
+could not be drained without deleting the suppression it documents. Both passes now read a
+comment through one predicate, `suppress::is_directive`, so neither can decide it is an
+instruction while the other decides it is prose. A *malformed* directive is still an instruction:
+it names no rule and is reported as malformed, but it is no more prose than a well-formed one.
+
 **The unit is the node, not the line.** A directive attaches to its own line when code precedes
 it and otherwise to the next line carrying code (comment lines skipped so it reaches past a doc
 block; a blank line ends the search, per D35's adjacency). It then covers the *outermost node

@@ -99,6 +99,11 @@ namespace, case or separator, which is a typo rather than another pack's id.
 **Touch the residue report.** Directives suppress findings and edits. The account
 of what rwr could not see is the product, and nothing here can quiet it.
 
+The directive comment is not residue either, in the other direction: it is an
+instruction to rwr rather than prose about the code, so it neither counts toward
+the blind-spot total nor asks to be reviewed — which would have been a blind spot
+you could only drain by deleting the suppression.
+
 ## Which id to write
 
 A directive names whatever id the run prints, and that depends on how the rule

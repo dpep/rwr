@@ -573,6 +573,14 @@ pub(crate) fn in_comments(
         let Some(text) = source.get(start..end) else {
             continue;
         };
+        // A directive is an instruction addressed to rwr, not prose about the
+        // code, so it is not a blind spot (D72). Skipped here rather than
+        // filtered later, because a directive names the id it suppresses --
+        // so it reported *itself* as residue a human should review, and the
+        // only way to drain it was to delete the suppression.
+        if crate::suppress::is_directive(&String::from_utf8_lossy(text)) {
+            continue;
+        }
         // The innermost class or module whose body contains the comment.
         let scope = enclosing
             .iter()
@@ -1187,6 +1195,42 @@ mod tests {
         // Scoped by position, since a comment has no place in the tree to read
         // its scope from -- without this every comment escapes class scoping.
         assert_eq!(found[0].scope, vec!["Account".to_string()]);
+    }
+
+    /// A directive is an instruction addressed to rwr, not prose about the
+    /// code, so it is not a blind spot (D72). It was counted as one -- and
+    /// since a directive names the very id it suppresses, it raised the
+    /// headline blind-spot number by one and could not be drained without
+    /// deleting the suppression it documents.
+    #[test]
+    fn a_directive_is_not_residue() {
+        let src =
+            "class Account\n  # rwr:ignore Account#display_name\n  def display_name; 1; end\nend\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let found = in_comments(&parsed, &[b"display_name".to_vec()], src.as_bytes());
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// A malformed one is still an instruction: it names no rule, so it is
+    /// reported as malformed, but it is no more prose than a well-formed one.
+    #[test]
+    fn a_malformed_directive_is_not_residue_either() {
+        let src = "# rwr:ignore -- display_name is fine here\nx = 1\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        assert!(in_comments(&parsed, &[b"display_name".to_vec()], src.as_bytes()).is_empty());
+    }
+
+    /// ...but prose that merely mentions the marker is prose, and still a
+    /// blind spot. The narrowest way this fix could have gone wrong is by
+    /// excluding every comment that says `rwr:ignore` anywhere in it.
+    #[test]
+    fn prose_mentioning_the_marker_is_still_residue() {
+        let src = "# we never write rwr:ignore for display_name here\nx = 1\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        assert_eq!(
+            in_comments(&parsed, &[b"display_name".to_vec()], src.as_bytes()).len(),
+            1
+        );
     }
 
     /// Whole identifiers only. `display_names` is a different word, and a

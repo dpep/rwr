@@ -126,6 +126,39 @@ fn stem(id: &str) -> String {
 
 const MARKER: &str = "rwr:ignore";
 
+/// The text after `rwr:ignore`, when a comment opens with the marker.
+///
+/// The marker opens the comment or it is not an instruction. Accepting it
+/// anywhere meant a comment documenting the convention -- or a `# TODO: add
+/// rwr:ignore style/x here` -- silenced the very site it described, and spent
+/// its remaining words as rule names. RuboCop, ESLint and Semgrep all draw the
+/// line here. An embdoc body starts `=begin` rather than `#`, so this excludes
+/// those too.
+fn body(comment: &str) -> Option<&str> {
+    let rest = comment
+        .strip_prefix('#')
+        .map(str::trim_start)?
+        .strip_prefix(MARKER)?;
+    // ...and it is a whole word: `rwr:ignored` is English, and reading it as
+    // the marker left `d` behind as a rule name.
+    (rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c == ',')).then_some(rest)
+}
+
+/// Whether a comment is an instruction addressed to rwr rather than prose.
+///
+/// D72's "never counted as residue" half, and the *only* reader of a directive's
+/// text besides [`directives`] -- so a comment cannot be an instruction to the
+/// suppression pass and prose to the residue pass. It was: a directive names the
+/// id it suppresses, so `# rwr:ignore Account#display_name` was reported as a
+/// blind spot, raising the headline number by one and un-drainable without
+/// deleting the suppression it documents.
+///
+/// A malformed directive is still an instruction. It names no rule and is
+/// reported as such; it is no more prose than a well-formed one.
+pub(crate) fn is_directive(comment: &str) -> bool {
+    body(comment).is_some()
+}
+
 /// Read every directive in a source.
 ///
 /// A directive attaches to the line it sits on when there is code before it, and
@@ -152,24 +185,7 @@ pub(crate) fn directives(
             &source[location.start_offset()..location.end_offset().min(source.len())],
         )
         .into_owned();
-        // The marker opens the comment or it is not an instruction. Accepting
-        // it anywhere meant a comment documenting the convention -- or a
-        // `# TODO: add rwr:ignore style/x here` -- silenced the very site it
-        // described, and spent its remaining words as rule names. RuboCop,
-        // ESLint and Semgrep all draw the line here. An embdoc body starts
-        // `=begin` rather than `#`, so this excludes those too.
-        let Some(rest) = text
-            .strip_prefix('#')
-            .map(str::trim_start)
-            .and_then(|body| body.strip_prefix(MARKER))
-        else {
-            continue;
-        };
-        // ...and it is a whole word: `rwr:ignored` is English, and reading it
-        // as the marker left `d` behind as a rule name.
-        if !rest.is_empty() && !rest.starts_with(|c: char| c.is_whitespace() || c == ',') {
-            continue;
-        }
+        let Some(rest) = body(&text) else { continue };
         let line = crate::source::line_col(source, location.start_offset()).0;
 
         // A reason is the natural thing to write next to a suppression, and
