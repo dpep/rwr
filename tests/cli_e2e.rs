@@ -3315,3 +3315,34 @@ fn a_dynamic_reach_is_reported_from_a_file_of_its_own() {
     assert!(account.contains("could not account for"), "{account}");
     assert!(account.contains("dispatch.rb"), "{account}");
 }
+
+/// A rename written as a macro accounts for what it missed, like `def` does.
+///
+/// `attr_reader :display_name` -> `attr_reader :full_name` moves the definition
+/// and breaks every caller, and it used to report `residue: []` and exit 0. The
+/// same rename spelled as a `def` pattern named all of them, which is what makes
+/// it a defect rather than a limit.
+#[test]
+fn a_macro_rename_accounts_for_what_it_missed() {
+    let dir = fixture(concat!(
+        "class Account\n",
+        "  attr_reader :display_name\n",
+        "end\n",
+        "\n",
+        "class Report\n",
+        "  def render(account)\n",
+        "    account.display_name\n",
+        "  end\n",
+        "end\n",
+    ));
+    let out = rwr(&[
+        "check",
+        "attr_reader :display_name",
+        "-r",
+        "attr_reader :full_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let account = stderr(&out);
+    assert!(account.contains("could not account for"), "{account}");
+    assert!(account.contains("account.display_name"), "{account}");
+}

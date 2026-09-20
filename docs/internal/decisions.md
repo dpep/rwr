@@ -2475,3 +2475,13 @@ which is why this survived: the flagship path was covered and the hand-written o
 
 `def $M($A); $B; end` still anchors on nothing, correctly: the name is a metavariable, so there is no
 one name the rule is about.
+
+**Amended: the macro definers anchor too.** D97 fixed one of four spellings. `defines_a_method` counts
+every `DEFINERS` macro -- `attr_reader :display_name` moves the name exactly as `def` does -- and
+`anchors` had no arm for them, so `attr_reader :display_name` -> `attr_reader :full_name` printed
+`residue: []` with every caller broken and unmentioned. The shape rules below the `def` arm rejected
+all three remaining spellings for ordinary reasons: `define_method(:x) { $B }` on the block,
+`attr_reader :x` and `alias_method :$A, :x` on an argument that is a literal rather than a
+metavariable. A definer's anchors are the names its literal symbol and string arguments spell; a
+placeholder argument fixes no name, which is `def $M`'s answer again. Not reached: `enum status: {...}`,
+whose names are hash keys, and `Account.class_eval { attr_reader :x }`, which is not a definer call.

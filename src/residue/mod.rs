@@ -315,6 +315,25 @@ fn may_produce(node: &Node<'_>, anchors: &[Vec<u8>]) -> bool {
     })
 }
 
+/// The method name a literal argument spells, if it spells one.
+///
+/// `attr_reader :display_name` and `alias_method "new", "old"` both name
+/// methods; `attr :x, true` carries an argument that is not a name at all, and
+/// `enum status: { ... }` a hash whose keys are names this does not reach.
+fn literal_name(node: &Node<'_>) -> Option<Vec<u8>> {
+    let name = match node {
+        Node::SymbolNode { .. } => node.as_symbol_node()?.unescaped().to_vec(),
+        Node::StringNode { .. } => node.as_string_node()?.unescaped().to_vec(),
+        _ => return None,
+    };
+    (!name.is_empty()).then_some(name)
+}
+
+/// Whether a name is one of the pattern's placeholders rather than a name.
+fn is_placeholder_text(name: &[u8], prepared: &Prepared) -> bool {
+    std::str::from_utf8(name).is_ok_and(|text| prepared.bindings.contains_key(text))
+}
+
 /// Whether a node is a literal the anchor scan can already see.
 fn is_literal_name(node: &Node<'_>) -> bool {
     match node {
@@ -362,6 +381,27 @@ pub(crate) fn anchors(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
     };
     if call.message_loc().is_none() || matcher::placeholder_name(pattern, prepared).is_some() {
         return Vec::new();
+    }
+
+    // A macro definer names what it creates in its arguments, and
+    // `defines_a_method` already counts it -- so without this the rule claimed
+    // completeness with nothing to search for, and `residue: []` meant "nothing
+    // was looked for" while reading as "nothing was left over". D97 fixed that
+    // for `def` and left `attr_reader`, `define_method` and `alias_method`
+    // behind; the shape rules below reject all three, on a block or on an
+    // argument that is a literal rather than a metavariable.
+    if DEFINERS.contains(&call.name().as_slice()) {
+        let Some(arguments) = call.arguments() else {
+            return Vec::new();
+        };
+        return arguments
+            .arguments()
+            .iter()
+            .filter_map(|a| literal_name(&a))
+            // A placeholder stands for whatever it matched, so it fixes no name
+            // -- the answer `def $M` gives.
+            .filter(|name| !is_placeholder_text(name, prepared))
+            .collect();
     }
     // A real receiver or argument makes the rule about a shape. Blocks are
     // structure too: `$R.each { |$P| $B }` is not a rule about `each`.
@@ -732,6 +772,44 @@ mod tests {
         // Nothing static to reason from: unknown is not impossible.
         assert!(reaches("x"));
         assert!(reaches("\"#{x}\""));
+    }
+
+    /// A macro definer names what it creates in its arguments, so a rename
+    /// written that way has the same account to give as the `def` spelling.
+    ///
+    /// D97 gave `def` an anchor and left the macros without one, though
+    /// `defines_a_method` counts them: the rule claimed completeness, had
+    /// nothing to search for, and printed `residue: []` -- which reads as
+    /// "nothing was left over" and meant "nothing was looked for".
+    #[test]
+    fn a_macro_definer_anchors_on_the_names_it_defines() {
+        let names = |pattern: &str| {
+            let prepared = prepare::prepare(pattern).expect("prepares");
+            let parsed = ruby_prism::parse(prepared.source.as_bytes());
+            let node = parsed.node();
+            let root = matcher::pattern_root(&node).expect("one expression");
+            anchors(&root, &prepared)
+                .into_iter()
+                .map(|a| String::from_utf8_lossy(&a).into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(names("attr_reader :display_name"), ["display_name"]);
+        assert_eq!(
+            names("attr_accessor :display_name, :label"),
+            ["display_name", "label"]
+        );
+        // A block is structure here, not a reason to give up: the name is the
+        // argument, exactly as it is without one.
+        assert_eq!(
+            names("define_method(:display_name) { $B }"),
+            ["display_name"]
+        );
+        assert_eq!(names("alias_method :$A, :display_name"), ["display_name"]);
+        // Nothing fixed to anchor on -- the answer `def $M` gives.
+        assert!(names("attr_reader :$A").is_empty());
+        // Not a definer, so the shape rules apply and `delegate` is not a name.
+        assert!(names("delegate :display_name, to: :owner").is_empty());
     }
 
     /// A computed name is located by the dispatcher's bytes, never the
