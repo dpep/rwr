@@ -1,55 +1,78 @@
 # `pluck` selects one column and skips instantiating models; `map(&:col)` loads
-# every record in full to read one attribute from each.
-description: '`map(&:col)` instantiates every record to read one column; `pluck` selects just the column.'
+# every record in full to read one attribute from each. When that is what is
+# happening, the win is large.
+#
+# **A lint, not a rewrite, and the reason is measured.** Four separate things
+# have to be true before the edit is safe -- the receiver is a relation, the
+# symbol names a column, that column's reader is not overridden, and the method
+# has no side effect -- and rwr can see none of them. It is not a caveat the
+# pattern can be narrowed around either: `Account.all.map(&:display_name)` is a
+# genuine relation and a genuine column and still changes its answer.
+#
+# Measured on two corpora, a third of the sites name something that is plainly
+# not a column at all: of 656 matched symbols on rails, 211 are `to_s`,
+# `to_i`, `to_sym`, `inspect`, `strip`, `first`, `chr`, `class`, `length` and
+# the like; of 278 on mastodon, 88 are. Both ratios land at 32%. A rewrite that
+# is wrong at a third of its sites is not a rewrite, and `pluck(:to_s)` raises
+# `ActiveRecord::StatementInvalid` on a real relation.
+#
+# So it reports and proposes nothing. Each of the four conditions is checkable
+# by a human standing at the site, which is the difference between a caveat and
+# a warning nobody can act on.
+description: >-
+  `map(&:col)` instantiates every record to read one column; on a relation
+  `pluck` selects just the column. A candidate to check, not a defect -- see
+  the caveat for the four things that must hold first.
 unsafe: >-
-  Assumes an ActiveRecord relation. On a plain Array this needs ActiveSupport's
-  `Array#pluck`, and on an already-loaded relation `map` reads memory where
-  `pluck` issues a fresh query.
+  Four conditions, none of them visible to rwr. (1) The receiver must be an
+  unloaded relation: on a loaded one `map` reads memory where `pluck` issues a
+  fresh query. (2) On a plain Array the two are not equivalent even with
+  ActiveSupport loaded -- `Enumerable#pluck` is `map { |e| e[key] }`, a
+  subscript, so it fits an array of Hashes and raises on
+  `Array(params[:id]).map(&:to_i)`. (3) The symbol must name a *column*:
+  `pluck(:to_s)` raises `StatementInvalid`. (4) It must name no side effect and
+  no overridden reader -- `map(&:save!)` saves every record and `pluck(:save!)`
+  saves none, and a model whose attribute reader falls back to another column
+  answers `map(&:col)` from Ruby and `pluck(:col)` from the raw column.
 match: $R.map(&:$COL)
-rewrite: $R.pluck(:$COL)
 tests:
   - input: |
       a = Model.all.map(&:name)
-    output: |
-      a = Model.all.pluck(:name)
-  # Safe navigation is part of the receiver, so it survives the rewrite.
+    finds: 1
+  # Safe navigation is part of the receiver, so the site still reads.
   - input: |
       a = relation&.map(&:name)
-    output: |
-      a = relation&.pluck(:name)
+    finds: 1
   # Only `map`. `flat_map` flattens and `each` returns the receiver; neither is
   # what `pluck` does.
   - input: |
       a = relation.flat_map(&:name)
       relation.each(&:name)
-    unchanged: true
+    finds: 0
   # A block-pass that is not a symbol literal names no column.
   - input: |
       a = relation.map(&COLUMN)
       b = relation.map(&blk)
-    unchanged: true
+    finds: 0
   # The long-hand block is a different shape; only `&:sym` promises one send.
   - input: |
       a = relation.map { |x| x.name }
-    unchanged: true
+    finds: 0
   # No receiver, no relation to pluck from.
   - input: |
       a = map(&:name)
-    unchanged: true
-  # RED, deliberately -- a defect the `unsafe:` note does not cover. The note
-  # is about the *receiver* (Array vs relation); nothing constrains the
-  # *symbol*. `&:save!` names a side effect, and `pluck` performs none of it:
-  # the records are never saved and the run still exits clean. Ten sites of
-  # this shape across two corpora (`map(&:delete)`, `map(&:join)`,
-  # `map(&:call)`, `map(&:create!)`).
+    finds: 0
+  # Condition (4), and why this is no longer a rewrite: `&:save!` names a side
+  # effect and `pluck` performs none of it. Ten sites of this shape across two
+  # corpora (`map(&:delete)`, `map(&:join)`, `map(&:call)`, `map(&:create!)`).
+  # Reported, because a reader can see `save!` is not a column; never edited.
   - input: |
       relation.map(&:save!)
-    unchanged: true
-  # RED, deliberately -- a genuine relation and a genuine column, and the
-  # rewrite still changes the values. A model that overrides its own attribute
-  # reader answers `map(&:col)` from Ruby and `pluck(:col)` from the raw
-  # column, so the two agree textually and differ in meaning. Found live in a
-  # real app, feeding a search index.
+    finds: 1
+  # Condition (4) again, and the case no pattern can exclude: a genuine
+  # relation and a genuine column whose reader is overridden, so `map` and
+  # `pluck` return different values. Found live in a real app, feeding a search
+  # index.
   - input: |
       class Account < ApplicationRecord
         def display_name
@@ -58,4 +81,4 @@ tests:
       end
 
       names = Account.all.map(&:display_name)
-    unchanged: true
+    finds: 1
