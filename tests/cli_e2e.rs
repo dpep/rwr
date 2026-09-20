@@ -3236,3 +3236,48 @@ fn a_suppression_naming_no_known_rule_is_reported() {
     assert!(err.contains("does not have"), "{err}");
     assert!(err.contains("did you mean `no_puts`"), "{err}");
 }
+
+/// `find -j` carries the suppression audit it already printed in text.
+///
+/// The same drift as the template account: the four directive outcomes went to
+/// stderr on every verb and only one of them reached `find`'s document, so an
+/// agent searching with a designator was told a directive had silenced a site
+/// but never that another directive named a rule nothing has.
+#[test]
+fn find_carries_the_suppression_audit_into_json() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    std::fs::write(
+        path.join("app.rb"),
+        "class Account\n  def display_name\n    @n\n  end\nend\n\
+         \nAccount.new.display_name # rwr:ignore Account#display_name\n\
+         Account.new.display_name # rwr:ignore acount/display-name\n",
+    )
+    .expect("write");
+
+    let out = run_in(path, &["find", "Account#display_name", ".", "-j"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    for field in [
+        "suppressed",
+        "stale_suppressions",
+        "unknown_suppressions",
+        "malformed_directives",
+    ] {
+        assert!(doc[field].is_array(), "{field} always present: {doc}");
+    }
+    let unknown = doc["unknown_suppressions"].as_array().expect("present");
+    assert_eq!(unknown.len(), 1, "{doc}");
+    assert_eq!(unknown[0]["rule"], "acount/display-name", "{doc}");
+
+    // A bare pattern names no rule, so it reads no directives -- the fields are
+    // present and empty rather than missing.
+    let out = run_in(path, &["find", "$R.display_name", ".", "-j"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(
+        doc["unknown_suppressions"]
+            .as_array()
+            .expect("present")
+            .is_empty(),
+        "{doc}"
+    );
+}

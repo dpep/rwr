@@ -977,12 +977,10 @@ struct Matches<'a> {
     /// entirely -- so the account of what a search could not see was text-only,
     /// which is principle 3's failure in the plane where an agent acts (D95).
     residue: &'a [Residue],
-    /// Sites a `# rwr:ignore` directive held back.
-    ///
-    /// Carried because a suppression means "do not act", and `find` does not
-    /// act -- so dropping these would remove a real call site from the answer to
-    /// "where is this method", which is the one thing a search must not do.
-    suppressed: &'a [crate::suppress::Suppressed],
+    /// What the directives in the searched files did, in the same fields
+    /// `check` uses.
+    #[serde(flatten)]
+    audit: Audit<'a>,
     /// The files this run did not read, in the same fields `check` uses.
     #[serde(flatten)]
     unseen: Unseen<'a>,
@@ -1323,8 +1321,14 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
                         rwr_version: env!("CARGO_PKG_VERSION"),
                         matches: &found,
                         residue: &residues,
-                        // The pattern path has no rule to carry a directive.
-                        suppressed: &[],
+                        // A directive names a rule id and a bare pattern has
+                        // none, so this path reads no directives at all.
+                        audit: Audit {
+                            suppressed: &[],
+                            stale_suppressions: &[],
+                            unknown_suppressions: &[],
+                            malformed_directives: &[],
+                        },
                         unseen: Unseen {
                             template_residue: &template_residue,
                             // Every template: this path parses none of them.
@@ -1409,9 +1413,24 @@ struct Report<'a> {
     /// nobody asked, not that nothing was declined.
     #[serde(skip_serializing_if = "Option::is_none")]
     rejections: Option<&'a [Rejection]>,
+    #[serde(flatten)]
+    audit: Audit<'a>,
+    #[serde(flatten)]
+    unseen: Unseen<'a>,
+}
+
+/// What the `# rwr:ignore` directives in the searched files did.
+///
+/// Shared for the reason `Unseen` is: `find` printed all four of these in text
+/// and carried one of them into `-j`, which is the drift this changeset exists
+/// to close rather than repeat.
+#[derive(Debug, Serialize)]
+struct Audit<'a> {
     /// Findings a suppression accepted. Always present: a run that silenced
     /// something must say so in the machine-readable output too, or an agent
-    /// reads a clean tree.
+    /// reads a clean tree. `find` carries them for a second reason -- a
+    /// suppression means "do not act" and `find` does not act, so dropping one
+    /// would remove a real call site from the answer to "where is this method".
     suppressed: &'a [crate::suppress::Suppressed],
     /// Suppressions with nothing left to accept.
     stale_suppressions: &'a [crate::suppress::Stale],
@@ -1421,8 +1440,6 @@ struct Report<'a> {
     unknown_suppressions: &'a [crate::suppress::Unknown],
     /// Directives naming no rule.
     malformed_directives: &'a [crate::suppress::Malformed],
-    #[serde(flatten)]
-    unseen: Unseen<'a>,
 }
 
 /// What running the rules over one template produced.
@@ -2151,7 +2168,12 @@ fn cmd_apply(
                         rwr_version: env!("CARGO_PKG_VERSION"),
                         matches: &rows,
                         residue: &left_over,
-                        suppressed: &suppressed,
+                        audit: Audit {
+                            suppressed: &suppressed,
+                            stale_suppressions: &stale,
+                            unknown_suppressions: &unknown,
+                            malformed_directives: &malformed,
+                        },
                         unseen: Unseen {
                             template_residue: &left_over_text,
                             templates_skipped,
@@ -2177,10 +2199,12 @@ fn cmd_apply(
                 findings: &findings,
                 residue: engine.claims_completeness().then_some(left_over.as_slice()),
                 rejections: common.explain.then_some(rejections.as_slice()),
-                suppressed: &suppressed,
-                stale_suppressions: &stale,
-                unknown_suppressions: &unknown,
-                malformed_directives: &malformed,
+                audit: Audit {
+                    suppressed: &suppressed,
+                    stale_suppressions: &stale,
+                    unknown_suppressions: &unknown,
+                    malformed_directives: &malformed,
+                },
                 unseen: Unseen {
                     template_residue: &left_over_text,
                     // The templates that got *no* structural read, matching
