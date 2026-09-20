@@ -3942,6 +3942,60 @@ fn a_scoped_rename_does_not_reach_a_signature_the_scope_never_named() {
     );
 }
 
+/// The same thing through `--diff`, which is the spelling CI runs.
+///
+/// The `:N` form and a git hunk build the same scope, but only this path is the
+/// documented promise -- "a rule with two thousand pre-existing sites does not
+/// fail a pull request that added three" -- and it is the one that shipped
+/// broken. A pattern rule whose match span is its edit span could not catch it.
+#[test]
+fn a_body_edit_does_not_put_its_signature_in_the_diff_scope() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    let mut before = String::from("class Widget\n  def display_name\n");
+    for i in 1..=10 {
+        before.push_str(&format!("    j = {i}\n"));
+    }
+    before.push_str("    \"w\"\n  end\nend\n");
+    std::fs::write(path.join("widget.rb"), &before).expect("write");
+    std::fs::write(
+        path.join("rename.yml"),
+        "method: Widget#display_name\nrename: full_name\n",
+    )
+    .expect("write");
+    git(path, &["init", "-q", "--initial-branch=main", "."]);
+    git(path, &["config", "user.email", "t@e.st"]);
+    git(path, &["config", "user.name", "t"]);
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-qm", "base"]);
+
+    // The whole change: line 12, ten lines below the signature.
+    let after = before.replace("j = 10\n", "j = 99\n");
+    std::fs::write(path.join("widget.rb"), &after).expect("write");
+
+    let run = |verb: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args([verb, "rename.yml", ".", "--diff"])
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    let checked = run("check");
+    assert_eq!(
+        checked.status.code(),
+        Some(0),
+        "nothing to do: {}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+    run("rewrite");
+    assert_eq!(
+        std::fs::read_to_string(path.join("widget.rb")).expect("read"),
+        after,
+        "the signature was never in the change"
+    );
+}
+
 /// Edit-range scoping must not become containment: you cannot rewrite half an
 /// expression, so a multi-line atomic site named anywhere it writes is in scope.
 #[test]
