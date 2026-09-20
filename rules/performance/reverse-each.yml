@@ -46,10 +46,17 @@ tests:
       end
     finds: 1
 
-  # Safe navigation is a different call node and still the same shape.
+  # Safe navigation below the pattern root is NOT matched, since D115: a
+  # pattern's `.` matches `&.` only at the root. That rule exists because a
+  # rewrite below the root can change what consuming a short-circuited nil
+  # means -- which cannot happen here, because this rule proposes no edit.
+  # So this is a coverage gap in a lint, not a hazard: the site is real and
+  # goes unreported. Closing it means spelling the safe-navigated chain out as
+  # its own pattern, and the mixed spellings (`xs.reverse&.each`,
+  # `xs&.reverse.each`) multiply. Pinned as it behaves, not as it should.
   - input: |
       xs&.reverse&.each { |x| p x }
-    finds: 1
+    finds: 0
 
   # Anything between `reverse` and `each` makes the copy load-bearing.
   - input: |

@@ -1384,6 +1384,7 @@ mod tests {
             "a = xs.lines.join(<<~T)\n  -a\nT\nbaz\n",
         );
         assert_eq!(out.as_deref(), Ok("a = xs.lines\nbaz\n"));
+    }
 
     /// The plan itself, for assertions about sites and suggestions rather than
     /// about the rewritten text.

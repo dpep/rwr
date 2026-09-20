@@ -29,6 +29,58 @@ only calls and symbols, so it pointed you at symbols while a `definition` — th
 means the rewrite you just applied does not hold together — went unnamed and could fall inside the
 "and N more".
 
+**Every redundant pair of a hash now converts in a single pass.** `{ name: name, value: value }`
+converted `name`, reported `rewrote 1 site(s)` and exited 0 — a run that had done half the job looked
+finished, and nothing asked for the rerun that would finish it. One `style/hash-shorthand` pass now
+converts 196 sites on rails and 146 on mastodon where it converted 130 and 106, and leaves nothing
+behind: the same result the previous release reached only after five passes. More generally, wherever
+a pattern's `*$REST` or `**$REST` can sit in more than one place, each placement is its own match, so
+`find` reports one per placement rather than one per node (D118).
+
+**A review suggestion now covers the line rather than the site.** Where two changes land on one line,
+each suggestion was rendered against an otherwise untouched line, so applying one reverted the other.
+`at` in `-j` carries one entry per run of changed lines; `at.len()` may now be smaller than the site
+count.
+
+**A pattern whose call carries a trailing argument no longer refuses, and no longer rewrites
+wrongly.** `$R.select { |$P| $B }.first($A)` refused with a parse error about a hash literal, on
+source containing no hash — a call's absent slots are not counted, so the pattern's argument list and
+the template's block both looked like the second child and were paired. The same mispairing the other
+way was silent: `$R.map { |$P| $P.$M }` → `$R.pluck($M)` wrote `xs.pluck name` at exit 0, which is not
+the parenthesized call the template asks for. Both are correct now (D119).
+
+**`performance/pluck` reports instead of rewriting.** Nothing can tell rwr whether a symbol names a
+column, and measured on two corpora about a third of matched symbols plainly do not — 211 of 656 on
+rails, 88 of 278 on mastodon. `map(&:save!)` became `pluck(:save!)`, which saves nothing, and a model
+that overrides an attribute reader returned different values. Its caveat was also wrong about
+ActiveSupport: `Enumerable#pluck` is `map { |e| e[key] }`, a subscript, so it fits an array of Hashes
+and raises on `Array(params[:id]).map(&:to_i)`. It now names four conditions checkable at the site.
+
+**`performance/relation-count` is gone.** `Model.group(:kind).to_a.size` is an Integer and `.count` is
+a Hash, silently, and the rule language cannot exclude a chained `group`. It had nothing to weigh
+against that: 0 sites on mastodon, and all 76 on rails are in ActiveRecord's own tests asserting on an
+array they meant to materialise (D117).
+
+**`performance/sum` names every way it changes the answer**, and `performance/relation-size` sees a
+string condition. **`performance/possible-n-plus-one` covers more iterators** — `detect`, `group_by`,
+`partition`, `sort_by`, `min_by`, `max_by`, and `each_with_index`, which needed a rule of its own
+because a block's arity is part of its shape. `find_each` is deliberately excluded: it took a real app
+from 91 findings to 133, and 35 of the 42 new ones were visibly eager-loaded already.
+
+**A finding that spans lines is reported whole.** A leading-dot chain came back as its first line — the
+bare receiver — for a site reaching through three calls. The offsets in `-j` were right all along.
+
+**A rule with no `rewrite:` no longer warns that it rewrote**, and `check` says "would rewrite".
+
+**`same_name_as` no longer reads `a()` as a read of `a`**, so `style/hash-shorthand` leaves
+`{ a: a() }` alone. With a method and a local of the same name in scope, the shorthand prefers the
+local, so the rewrite changed which one the program reached (D116).
+
+**A pattern's `.` no longer matches `&.` below the pattern root.** `style/inverse-any` was rewriting
+`!xs&.any? { … }` to `xs&.none? { … }`, which flips the guard on a nil receiver, and the same
+mechanism turned `x = x&.+(1)` into `x += 1`. A rename still reaches safe-navigated call sites and
+still preserves `&.`; a rule that wants `&.` in a nested position writes it in the pattern (D115).
+
 **Fixed: rewriting an expression containing a heredoc ate the newline after its terminator.**
 Deleting or replacing a heredoc argument fused the following statement onto the replacement —
 `foo(<<~EOS) … EOS` then `baz` rewrote to `barbaz`, with `baz` becoming an argument. The result
