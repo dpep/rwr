@@ -611,7 +611,7 @@ impl Engine {
                                     explain,
                                     ..self.criteria(index, ctx)
                                 };
-                                let (mut hits, declined) = matcher::search_explaining(
+                                let (hits, declined) = matcher::search_explaining(
                                     &p_root,
                                     &parsed.node(),
                                     prepared,
@@ -632,32 +632,99 @@ impl Engine {
                                         }),
                                     });
                                 }
+                                // The scope, then the directives -- one pass,
+                                // because the order is the whole point and two
+                                // passes let it be reordered by accident.
+                                //
                                 // Accepted findings drop out before anything
                                 // else looks at them, so `check` and `rewrite`
-                                // cannot disagree about which sites exist.
-                                if !directives.is_empty() {
-                                    hits.retain(|m| {
-                                        let (start, _) = rewrite::effective_range(&m.node);
-                                        let (line, _) = source::line_col(&current, start);
-                                        let id = rule.id.as_deref();
-                                        match crate::suppress::covering(&directives, id, start) {
-                                            None => true,
-                                            Some(d) => {
-                                                used.insert((
-                                                    d.index,
-                                                    id.unwrap_or_default().to_string(),
-                                                ));
-                                                suppressed.push(crate::suppress::Suppressed {
-                                                    file: label.to_string(),
-                                                    line,
-                                                    rule: rule.id.clone(),
-                                                    source: "directive",
-                                                });
-                                                false
-                                            }
-                                        }
+                                // cannot disagree about which sites exist. But
+                                // a *scope* decides first: a site the run was
+                                // never going to report cannot be "accepted" by
+                                // a directive, and counting it made a `--diff`
+                                // gate's acceptance number the whole file's
+                                // rather than the change's -- the one number in
+                                // the report a reviewer is meant to act on.
+                                let id = rule.id.as_deref();
+                                let constants =
+                                    only.map(|_| rule.constant_captures()).unwrap_or_default();
+                                let mut kept = Vec::with_capacity(hits.len());
+                                for hit in hits {
+                                    let (start, _) = rewrite::effective_range(&hit.node);
+                                    let covering =
+                                        crate::suppress::covering(&directives, id, start);
+                                    // The lines this site is accountable for,
+                                    // planned once: the scope decides on them
+                                    // and so does the widening report below, and
+                                    // a second plan for the second question
+                                    // would be free to disagree (D105).
+                                    let lines = only.and_then(|_| {
+                                        accountable_span(
+                                            &hit,
+                                            &p_root,
+                                            prepared,
+                                            rule.rewrite.as_deref(),
+                                            &current,
+                                            &constants,
+                                        )
+                                        .map(|(s, e)| {
+                                            (
+                                                source::line_col(&current, s).0,
+                                                source::line_col(&current, e).0,
+                                            )
+                                        })
                                     });
+                                    // Unscoped runs hold everything; a scoped
+                                    // one holds a site whose edit it names. No
+                                    // lines at all means the rule leaves this
+                                    // site untouched, so no scope holds it.
+                                    let in_scope = match (only, lines) {
+                                        (None, _) => true,
+                                        (Some(o), Some((first, last))) => {
+                                            o.changed.touches(o.absolute, first, last)
+                                        }
+                                        (Some(_), None) => false,
+                                    };
+                                    if let Some(d) = covering {
+                                        used.insert((d.index, id.unwrap_or_default().to_string()));
+                                    }
+                                    if !in_scope {
+                                        // Out of scope is out of the audit in
+                                        // both directions: not accepted, and
+                                        // not stale either -- the finding its
+                                        // directive accepts is still there, it
+                                        // is simply not this run's to report.
+                                        continue;
+                                    }
+                                    if covering.is_some() {
+                                        let (line, _) = source::line_col(&current, start);
+                                        suppressed.push(crate::suppress::Suppressed {
+                                            file: label.to_string(),
+                                            line,
+                                            rule: rule.id.clone(),
+                                            source: "directive",
+                                        });
+                                        continue;
+                                    }
+                                    // A site that cannot be rewritten in half
+                                    // writes lines the scope never named.
+                                    // Correct, and not something to discover
+                                    // afterwards from a diff. Only for a site
+                                    // that survives: a suppressed one is not
+                                    // written, so it widens nothing.
+                                    if let (Some(o), Some((first, last))) = (only, lines)
+                                        && rule.rewrite.is_some()
+                                        && !o.changed.holds(o.absolute, first, last)
+                                    {
+                                        widened.push(Widened {
+                                            file: label.to_string(),
+                                            line: first,
+                                            last,
+                                        });
+                                    }
+                                    kept.push(hit);
                                 }
+                                let hits = kept;
                                 // A rewrite that brings in a name already
                                 // bound as a local here would produce
                                 // `full_name = full_name`: valid Ruby, quietly
@@ -679,43 +746,6 @@ impl Engine {
                                             ));
                                         }
                                     }
-                                }
-                                if let Some(only) = only {
-                                    let constants = rule.constant_captures();
-                                    let mut wider: Vec<(usize, usize)> = Vec::new();
-                                    hits.retain(|m| {
-                                        let span = accountable_span(
-                                            m,
-                                            &p_root,
-                                            prepared,
-                                            rule.rewrite.as_deref(),
-                                            &current,
-                                            &constants,
-                                        );
-                                        let Some((start, end)) = span else {
-                                            return false;
-                                        };
-                                        let (first, _) = source::line_col(&current, start);
-                                        let (last, _) = source::line_col(&current, end);
-                                        if !only.changed.touches(only.absolute, first, last) {
-                                            return false;
-                                        }
-                                        // A site that cannot be rewritten in
-                                        // half writes lines the scope never
-                                        // named. Correct, and not something to
-                                        // discover afterwards from a diff.
-                                        if rule.rewrite.is_some()
-                                            && !only.changed.holds(only.absolute, first, last)
-                                        {
-                                            wider.push((first, last));
-                                        }
-                                        true
-                                    });
-                                    widened.extend(wider.into_iter().map(|(line, last)| Widened {
-                                        file: label.to_string(),
-                                        line,
-                                        last,
-                                    }));
                                 }
                                 // A rule that does not say which class it means
                                 // may be renaming across several. Recorded here,

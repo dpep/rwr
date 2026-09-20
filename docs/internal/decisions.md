@@ -3022,3 +3022,37 @@ and loses only its SARIF note.
 requirement someone actually has, rather than one rwr assumed. Even then the honest shape is a
 converter over `rwr check -j`, outside the binary, so the second contract is not rwr's to keep in
 sync.
+
+## D108 - A scope decides before the suppression audit does
+**Decided.** Extends D105 and D106 to the one report they had not reached.
+
+The suppression `retain` ran before the scope `retain`, so a `--diff` run counted acceptances
+from lines the diff never carried. `rwr check all --diff` on a file whose only change was line 6
+reported "1 finding(s) accepted by rwr:ignore directive(s)" for a directive on line 2 -- the
+acceptance count was the whole file's rather than the change's, and that count is the one number
+in the report a reviewer is meant to act on. The same held for an explicit `file:line` scope.
+
+**Out of scope is out of the audit, in both directions.** A site the run was never going to
+report cannot be *accepted* -- nothing was silenced, because nothing was going to be said. Nor is
+its directive *stale*: the finding it accepts is still there, just not this run's to see. Calling
+it stale would have printed "delete the comment" about a live suppression, which is a worse lie
+than the count it replaced. So a covered-but-unscoped site marks its directive used and is
+reported nowhere.
+
+This is what the whole-file case already did. A `--diff` run drops untouched *files* before
+parsing, so a directive in one was already neither counted nor called stale; a directive on an
+untouched *line* of a touched file now answers the same way. The two were the same question
+getting different answers because they were decided in different places.
+
+**One pass, not two.** The scope test and the directive test now run in the same loop over the
+hits, because the order between them is the whole point and two passes leave it free to be
+reordered by accident. The site's accountable lines are planned once and serve both the scope
+decision and D106's widening notice, so those cannot disagree either.
+
+**Consequence: the local-collision guard now sees the scoped set.** It ran between the two
+retains, so it used to refuse a whole file for a collision at a site the run was not going to
+touch. Narrower, and in the right direction.
+
+*Reverses if:* a caller wants a scoped run's audit to cover the whole file deliberately -- a
+"what is this file's total suppression debt" question, which is a different question and wants
+its own command rather than a scoped run that quietly answers it.

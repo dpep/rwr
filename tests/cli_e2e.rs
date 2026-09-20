@@ -1163,6 +1163,80 @@ fn diff_scoping_ignores_pre_existing_sites() {
     );
 }
 
+/// A scope decides before the suppression audit does.
+///
+/// The suppression `retain` ran first, so a directive outside `--diff` was
+/// counted as having accepted a finding the run was never going to report. A
+/// `--diff` gate's acceptance count was the whole file's rather than the
+/// change's -- and that count is the one number in the report a reviewer is
+/// meant to act on.
+///
+/// Out of scope is out of the audit in both directions: not accepted, and not
+/// stale either, because the finding it accepts is still there.
+#[test]
+fn the_suppression_audit_respects_the_run_scope() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    let base =
+        "def old\n  return nil  # rwr:ignore style/return-nil\nend\n\ndef untouched\n  1\nend\n";
+    std::fs::write(path.join("app.rb"), base).expect("write");
+    git(path, &["init", "-q", "--initial-branch=main", "."]);
+    git(path, &["config", "user.email", "t@e.st"]);
+    git(path, &["config", "user.name", "t"]);
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-qm", "base"]);
+
+    // Only line 6 changes. The directive at line 2 is nowhere near it.
+    std::fs::write(path.join("app.rb"), base.replace("  1\n", "  2\n")).expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "style/return-nil", ".", "--diff", "-j"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(
+        doc["suppressed"].as_array().map(Vec::len),
+        Some(0),
+        "an acceptance outside the diff is not this run's: {doc}"
+    );
+    assert_eq!(
+        doc["stale_suppressions"].as_array().map(Vec::len),
+        Some(0),
+        "nor is the directive stale -- its finding is still there: {doc}"
+    );
+
+    // Unscoped, the same directive is accepted and counted exactly as before.
+    let whole = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "style/return-nil", ".", "-j"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    let doc: serde_json::Value = serde_json::from_slice(&whole.stdout).expect("json");
+    assert_eq!(doc["suppressed"].as_array().map(Vec::len), Some(1), "{doc}");
+}
+
+/// The same question with an explicit `file:line` scope, which is the other
+/// spelling of "these lines only".
+#[test]
+fn a_line_scope_also_bounds_the_suppression_audit() {
+    let dir = fixture(
+        "def old\n  return nil  # rwr:ignore style/return-nil\nend\n\ndef other\n  return nil\nend\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["check", "style/return-nil", "fixture.rb:5-7", "-j"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(doc["suppressed"].as_array().map(Vec::len), Some(0), "{doc}");
+    assert_eq!(
+        doc["stale_suppressions"].as_array().map(Vec::len),
+        Some(0),
+        "{doc}"
+    );
+}
+
 /// `--since main` is `main...HEAD`, not `main..HEAD`. Two-dot reports whatever
 /// the base gained meanwhile as though this branch had written it.
 #[test]

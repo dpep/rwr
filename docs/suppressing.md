@@ -35,6 +35,11 @@ rwr check all --since "origin/$GITHUB_BASE_REF"   # what this branch introduces
 Nothing is recorded anywhere. Pre-existing sites are out of scope this run and
 back in scope the moment someone touches their lines.
 
+A scope bounds the suppression report too: a directive on a line the change
+never touched is not counted as having accepted anything, and is not reported
+stale either — its finding is still there, just not this run's to see. So a
+`--diff` gate's acceptance count is the change's, not the whole file's.
+
 ## `# rwr:ignore`
 
 ```ruby
