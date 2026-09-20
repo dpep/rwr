@@ -47,7 +47,7 @@ The document is one shape across the verbs:
 ```
 {schema, rwr_version, residue, template_residue, templates_skipped,
  unparsed, unreadable, suppressed, stale_suppressions, unknown_suppressions,
- malformed_directives}
+ malformed_directives, template_directives?}
   + {matches, interpreted}   on find
   + {changed, findings}      on check and rewrite
 ```
@@ -62,6 +62,7 @@ Current `schema` is `6`. What each blind-spot field means:
 | `templates_skipped`, `template_residue` | a template rwr cannot parse (Haml), text-searched | check by hand — grep-grade evidence |
 | `stale_suppressions` | rwr ran that rule and it fired nowhere | delete the comment |
 | `unknown_suppressions` | rwr never ran that rule — the id is wrong | the finding is probably still live; fix the id, which `did_you_mean` often names |
+| `template_directives` | a `rwr:ignore` in a template, which rwr does not honour | the site was not suppressed; move the exception onto the Ruby |
 
 `unparsed` and `unreadable` are the same blind spot with opposite fixes. Neither
 changes the exit code: eighty matches plus one unreadable vendored file is a
@@ -415,11 +416,34 @@ Rule ids are required: a bare `# rwr:ignore` is reported as malformed and
 suppresses nothing. A reason may follow `--`:
 `# rwr:ignore style/no-sleep -- flaky in CI, see PIE-4`. `style/no-sleep` is a rule of your own, not one the pack ships — a directive names whatever rule id fired. `rewrite` honours directives exactly as `check` does.
 
+Where a broad directive and a narrow one both cover a finding, the **narrower**
+one accepts it and the broader is reported stale.
+
+**A rename cannot be accepted in part.** A rename is one edit across a
+definition and every call site, so a directive on either end would leave the
+other calling a method that no longer exists. `check` and `rewrite` both refuse
+the whole run at **exit 5**, writing nothing, and name the directive. Delete it
+to rename every site; or, if that site means a different method of the same
+name, name the class it belongs to instead. Rules that move no definition —
+`style/return-nil` and the like — and `find`, which writes nothing, are
+unaffected.
+
+**Directives do not work in templates** (`.erb`, `.haml`, `.slim`). ERB is read
+by stitching its tag bodies into one Ruby program, which discards the HTML
+between them, so a directive's scope no longer means what was written; Haml and
+Slim are not parsed at all. One written there is reported rather than silently
+ignored, under `template_directives`. Put the exception on the Ruby instead.
+
+**A scope bounds the audit.** Under `--diff`, `--since` or `file:line`, a
+directive outside the scope is neither counted as accepted nor reported stale,
+so the acceptance number is the change's rather than the whole file's.
+
 **The id to write is the one the run prints.** A rule file's id is its stem
 (`rename.yml` → `rename`), a rule in a pack is its path (`style/return-nil`), and
-a designator on the command line is itself (`Account#display_name`). So the same
-rename suppresses under a different id depending on which form ran it. If unsure,
-run it and read the id out of `-j`.
+a designator on the command line is itself (`Account#display_name`) — that form
+is for `find`, since a rename refuses. So the same rename suppresses under a
+different id depending on which form ran it. If unsure, run it and read the id
+out of `-j`.
 
 Every run says how many findings were accepted, which directives have nothing
 left to accept (`stale_suppressions` — delete the comment), and which name a rule
@@ -539,7 +563,7 @@ vulnerability, and Code Scanning files it as one. See `docs/github-actions.md`.
 | 2 | usage error |
 | 3 | the pattern or rule is wrong — including an unknown field, a constraint on a capture the pattern never binds, or a template metavariable that was never captured |
 | 4 | retryable — an edit sat inside a wider one; **run again** |
-| 5 | refused — ambiguity, and zero edits were made. All three verbs |
+| 5 | refused — the request cannot be answered honestly, and zero edits were made. All three verbs |
 
 `check` inverts polarity deliberately so a clean tree does not block a commit,
 which is what makes it usable in a pre-commit hook or CI.
