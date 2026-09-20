@@ -1465,6 +1465,15 @@ mod tests {
                 Designator::Unsupported { name: got } => assert_eq!(got, name, "{arg}"),
                 other => panic!("{arg} read as {other:?}"),
             }
+            // The message the caller prints is written here, so `find` --
+            // which refuses before any rule is loaded -- cannot word it
+            // differently from `check`.
+            let why = RuleError::Unsupported {
+                method: arg.to_string(),
+                name: name.to_string(),
+            }
+            .to_string();
+            assert!(why.contains("cannot build a rename for"), "{why}");
         }
     }
 
