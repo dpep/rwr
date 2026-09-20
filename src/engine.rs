@@ -219,6 +219,49 @@ pub(crate) struct Only<'a> {
     pub(crate) absolute: &'a std::path::Path,
 }
 
+/// The bytes rwr is accountable for at one site -- the unit a scope decides on.
+///
+/// D15 settled that the *conflict* unit is the edit range rather than the match
+/// range; scoping asks the same question and gets the same answer (D105). A
+/// rename's match is the whole `def ... end`, so scoping on the match span let
+/// an edit ten lines into a body pull the signature into scope and rewrite it.
+///
+/// A rule that proposes no rewrite writes nothing, and what it is accountable
+/// for is what it *reports*: the whole matched span, which is what its finding
+/// carries as `byte_start`/`byte_end`.
+///
+/// `None` is a site the rule leaves untouched -- no bytes, so no scope holds it.
+fn accountable_span(
+    hit: &matcher::Match<'_>,
+    pattern_root: &ruby_prism::Node<'_>,
+    prepared: &prepare::Prepared,
+    template: Option<&str>,
+    source: &[u8],
+    constants: &[String],
+) -> Option<(usize, usize)> {
+    let Some(template) = template else {
+        return Some(rewrite::effective_range(&hit.node));
+    };
+    match rewrite::plan(
+        std::slice::from_ref(hit),
+        pattern_root,
+        prepared,
+        template,
+        source,
+        constants,
+    ) {
+        Ok(planned) => planned
+            .edits
+            .iter()
+            .map(|e| (e.start, e.end))
+            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d))),
+        // No edit range to scope by. The matched span is the superset the old
+        // behaviour used, so the site survives and the run's own plan reports
+        // the refusal -- dropping it here would turn one into silence.
+        Err(_) => Some(rewrite::effective_range(&hit.node)),
+    }
+}
+
 /// What one source had to say.
 pub(crate) enum ScanOutcome {
     /// The source did not parse. `check` skips it; a fixture must fail rather
@@ -613,8 +656,19 @@ impl Engine {
                                     }
                                 }
                                 if let Some(only) = only {
+                                    let constants = rule.constant_captures();
                                     hits.retain(|m| {
-                                        let (start, end) = rewrite::effective_range(&m.node);
+                                        let span = accountable_span(
+                                            m,
+                                            &p_root,
+                                            prepared,
+                                            rule.rewrite.as_deref(),
+                                            &current,
+                                            &constants,
+                                        );
+                                        let Some((start, end)) = span else {
+                                            return false;
+                                        };
                                         let (first, _) = source::line_col(&current, start);
                                         let (last, _) = source::line_col(&current, end);
                                         only.changed.touches(only.absolute, first, last)

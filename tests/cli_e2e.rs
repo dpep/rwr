@@ -3882,6 +3882,103 @@ fn the_triage_footer_names_a_definition_left_behind() {
     );
 }
 
+/// The scope unit is what a rewrite *writes*, not what it matched (D105).
+///
+/// A rename's matched node is the whole `def ... end`, so scoping on the match
+/// span let an edit anywhere in a body drag the signature in -- a line the
+/// scope never named, rewritten with nothing said. That defeats the documented
+/// CI story by construction.
+#[test]
+fn a_scoped_rename_does_not_reach_a_signature_the_scope_never_named() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    let mut body = String::from("class Widget\n  def display_name\n");
+    for i in 1..=10 {
+        body.push_str(&format!("    j = {i}\n"));
+    }
+    body.push_str("    \"w\"\n  end\nend\n");
+    std::fs::write(path.join("widget.rb"), &body).expect("write");
+    let rule = path.join("rename.yml");
+    std::fs::write(&rule, "method: Widget#display_name\nrename: full_name\n").expect("write");
+
+    // Line 12 is `j = 10`, ten lines below the signature on line 2.
+    let run = |verb: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args([verb, rule.to_str().unwrap(), "widget.rb:12"])
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    let checked = run("check");
+    assert_eq!(
+        checked.status.code(),
+        Some(0),
+        "the signature is not in scope: {}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+
+    let rewritten = run("rewrite");
+    let after = std::fs::read_to_string(path.join("widget.rb")).expect("read");
+    assert_eq!(after, body, "the file must be untouched: {after}");
+    assert_eq!(
+        rewritten.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&rewritten.stdout)
+    );
+
+    // The signature's own line is still in scope when the scope names it.
+    let named = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", rule.to_str().unwrap(), "widget.rb:2"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    let after = std::fs::read_to_string(path.join("widget.rb")).expect("read");
+    assert!(
+        after.contains("def full_name"),
+        "{} / {after}",
+        String::from_utf8_lossy(&named.stdout)
+    );
+}
+
+/// Edit-range scoping must not become containment: you cannot rewrite half an
+/// expression, so a multi-line atomic site named anywhere it writes is in scope.
+#[test]
+fn a_multi_line_site_is_in_scope_from_any_line_it_writes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    let source = "x = 1\nresult = things\n  .select { |t| t.active? }\n  .first\ny = 2\n";
+    let run = |arg: &str| {
+        std::fs::write(path.join("app.rb"), source).expect("write");
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args([
+                "rewrite",
+                "$R.select { |$X| $B }.first",
+                "-r",
+                "$R.find { |$X| $B }",
+                arg,
+            ])
+            .current_dir(path)
+            .output()
+            .expect("binary runs");
+        std::fs::read_to_string(path.join("app.rb")).expect("read")
+    };
+
+    // Line 3 holds the `.select`, line 4 the `.first`: both are written.
+    for named in ["app.rb:3", "app.rb:4"] {
+        let after = run(named);
+        assert!(after.contains(".find {"), "{named} is in scope: {after}");
+    }
+    // Line 5 sits below the whole expression, which writes nothing there.
+    let after = run("app.rb:5");
+    assert_eq!(after, source, "nothing outside the site: {after}");
+    // Line 2 holds the receiver, which a minimal diff leaves alone: the site's
+    // bytes were already there, so a change to line 2 did not introduce it.
+    let after = run("app.rb:2");
+    assert_eq!(after, source, "no bytes written on line 2: {after}");
+}
+
 /// A line past the end of the file is a mistake, not a clean "no match".
 ///
 /// `0` and `10-5` both refuse and say why; `999` on a five-line file scoped the

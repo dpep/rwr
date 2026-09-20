@@ -2808,3 +2808,50 @@ the one that hid, and it is the same vacuous pass that made a nonexistent path a
 The check reads the file it names and counts its lines, counting a final line with no trailing
 newline. A file rwr cannot read is left alone: the walk reports it as a blind spot, and inventing a
 range error there would name the wrong problem.
+
+## D105 - A scope decides on the bytes a rule writes, not the span it matched
+**Decided.** Extends D15 from conflicts to scoping. Fixes a defect that defeated the documented
+CI story by construction.
+
+`Changed::touches` was handed `effective_range(&m.node)` -- the **matched** span. For a rename the
+matched node is the whole `def ... end`, so an edit anywhere in a body pulled the signature into
+scope: a fifteen-line method whose only change was `j = 10` -> `j = 99` on line 12 had its line-2
+signature rewritten, reported honestly as "rewrote 1 site(s)", and the rewritten line never appeared
+in the diff that authorised it. `widget.rb:3-3` reproduced it identically, so this was not a hunk
+parsing bug. The promise in `getting-started.md` -- "a rule with two thousand pre-existing sites
+does not fail a pull request that added three" -- does not survive a rule that reaches ten lines out
+of the region it was given.
+
+**D15 already answered this question for a different purpose.** Its conflict unit is the edit range
+rather than the match range, because edits are minimal and two nested matches usually write disjoint
+bytes. Scoping asks the same question -- *which span is the one that counts?* -- and was answering it
+the other way. `accountable_span` now plans the site and takes the union of its edits.
+
+**It is the unit that was wrong, not the overlap test.** `touches` stays overlap rather than
+containment, and `diff.rs`'s comment defending that stays correct. You cannot rewrite half an
+expression: `things` / `.select { |t| ... }` / `.first` named on its `.select` line writes its
+`.first` line too, and that is still the change's site. Under edit-range scoping it stays in scope,
+because the edit overlaps the named line. The receiver on the first line is *not* written, because
+the diff is minimal -- so a change confined to that line does not claim the site, which is the same
+rule read from the other end.
+
+**Where there is no rewrite, the unit is what the rule reports.** A finding rule and a bare `find`
+pattern write nothing; what they are accountable for is the span they *publish*, which is exactly
+the `byte_start`/`byte_end` of the finding. So they keep match-span scoping -- and the two answers
+agree rather than diverging, because in both cases the unit is the bytes rwr claims. The difference
+is visible and defensible: a finding about a whole method is about its body too, so editing the body
+makes it yours; a rename claims only the signature, and writes only the signature.
+
+**A refusal keeps the site.** When the plan cannot be computed -- a partial deletion, a
+discontiguous capture -- there is no edit range, so `accountable_span` falls back to the matched
+span, which is the superset the old behaviour used. The run's own plan then reports the refusal.
+Dropping the site instead would convert a refusal into silence, which principle 2 forbids.
+
+**Cost.** The probe plans one site at a time, so a scoped run pays one extra template parse per
+candidate site in a file the scope already admits; unscoped runs do not pay it at all. Measured on
+a 2,476-line discourse model with thirteen sites, a scoped run is not slower than the unscoped one
+it is compared against -- the probe sits below the noise floor of process start and hierarchy
+build, and the sites it filters out skip the real plan entirely.
+
+*Reverses if:* a rewrite is ever computed as a structural diff with no single byte range per site,
+in which case the unit becomes the set of ranges rather than their union.
