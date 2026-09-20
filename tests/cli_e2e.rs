@@ -2397,6 +2397,108 @@ fn suppressions_are_always_in_structured_output() {
 /// The template pass used to `continue` past both a `plan` refusal and a
 /// cross-tag `splice` refusal -- no count, no report, no exit code -- while the
 /// `.rb` path reported the same refusal and exited 5. "Never silently drop an
+/// A directive may not accept half a rename.
+///
+/// A rename is one edit spread over a definition and its call sites. A
+/// directive covering either end suppressed that end only and the other end
+/// still moved, so `rewrite` wrote Ruby that raises `NoMethodError` and exited
+/// **0** -- while `check` on the same tree exited 1, so a preview-then-apply CI
+/// shape reported success on the apply. That is the half-applied edit DESIGN.md
+/// names ast-grep for, reached through the very id `docs/suppressing.md` says
+/// to write.
+///
+/// There is no honest partial answer, so the run refuses whole and writes
+/// nothing: a refusal costs a round trip, a partial write costs a revert.
+#[test]
+fn a_directive_may_not_split_a_rename_in_half() {
+    // Either end of the rename: on the definition, and on the call site.
+    for (which, account, use_rb) in [
+        (
+            "on the definition",
+            "class Account\n  # rwr:ignore Account#display_name\n  def display_name\n    \"x\"\n  end\nend\n",
+            "a = Account.new\nputs a.display_name\n",
+        ),
+        (
+            "on the call site",
+            "class Account\n  def display_name\n    \"x\"\n  end\nend\n",
+            "a = Account.new\nputs a.display_name  # rwr:ignore Account#display_name\n",
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path();
+        std::fs::write(path.join("account.rb"), account).expect("write");
+        std::fs::write(path.join("use.rb"), use_rb).expect("write");
+
+        let run = |verb: &str| {
+            Command::new(env!("CARGO_BIN_EXE_rwr"))
+                .args([verb, "Account#display_name", "-r", "full_name", "."])
+                .current_dir(path)
+                .output()
+                .expect("binary runs")
+        };
+
+        let out = run("rewrite");
+        assert_eq!(out.status.code(), Some(5), "{which}: {}", stderr(&out));
+        assert_eq!(
+            std::fs::read_to_string(path.join("account.rb")).expect("read"),
+            account,
+            "{which}: a refusal writes nothing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("use.rb")).expect("read"),
+            use_rb,
+            "{which}: a refusal writes nothing"
+        );
+        // It names the directive, because deleting it is the way forward.
+        assert!(stderr(&out).contains("rwr:ignore"), "{which}");
+
+        // `check` is the preview of `rewrite` (D29), so it gives the same
+        // answer. It used to exit 1 while the apply exited 0.
+        let preview = run("check");
+        assert_eq!(
+            preview.status.code(),
+            out.status.code(),
+            "{which}: the preview must not disagree with the apply"
+        );
+    }
+}
+
+/// The guard is about renames, not about directives. A rule that rewrites
+/// without moving a definition has independent sites, which is exactly what a
+/// directive is for -- suppressing one must go on working.
+#[test]
+fn a_directive_on_a_rule_that_moves_no_definition_still_suppresses() {
+    let dir = fixture(
+        "def a\n  return nil  # rwr:ignore style/return-nil\nend\ndef b\n  return nil\nend\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "style/return-nil", "fixture.rb"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    assert!(after.contains("return nil  #"), "suppressed: {after}");
+    assert!(after.contains("def b\n  return\n"), "rewrote: {after}");
+}
+
+/// `find` reports and writes nothing, so nothing can be split: a directive
+/// there still suppresses, and is still counted.
+#[test]
+fn find_still_honours_a_directive_on_a_rename_designator() {
+    let dir = fixture(
+        "class Account\n  # rwr:ignore Account#display_name\n  def display_name\n    \"x\"\n  end\nend\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["find", "Account#display_name", "fixture.rb", "-j"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    assert_ne!(out.status.code(), Some(5), "{}", stderr(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(doc["suppressed"].as_array().map(Vec::len), Some(1), "{doc}");
+}
+
 /// A directive in a template is not honoured -- and is reported, so it is not
 /// silently inert.
 ///

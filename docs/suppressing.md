@@ -91,6 +91,34 @@ rule is probably mis-scoped — narrow it instead.
 `rewrite` honours directives exactly as `check` does, because `check` is its
 preview.
 
+## A rename cannot be accepted in part
+
+A rename is **one edit** spread over a definition and every call site. Accept
+one end and the other end still moves, leaving code that calls a method which no
+longer exists — so rwr refuses the whole run rather than writing half of it:
+
+```
+rwr: refused: 1 rwr:ignore directive(s) accept part of a rename. A rename is one edit across a
+definition and every call site, so accepting part of it leaves the rest calling a method that no
+longer exists. Nothing was written.
+  app/models/account.rb:3: Account#display_name
+rwr: delete the directive to rename every site -- or, if that site means a different method of the
+same name, name the class it belongs to instead.
+```
+
+Exit 5, and nothing on disk changed. `check` refuses identically, so the preview
+never disagrees with the apply.
+
+Two ways forward. If you meant "do not rename this method at all", delete the
+directive and do not run the rename. If you meant "this site is a *different*
+method that happens to share the name", say which class you meant —
+`Billing::Account#display_name` — and rwr will leave the others alone.
+
+This applies only to rules that **move a definition**. A rule like
+`style/return-nil` rewrites sites that do not refer to each other, so accepting
+one is exactly what a directive is for, and `find` writes nothing at all — both
+honour directives as usual.
+
 ## What a suppression can never do
 
 **Silence itself.** Every run says how many findings were accepted and which
@@ -138,6 +166,10 @@ was named:
 | a rule file | its `id:`, or the file's stem — `rename.yml` is `rename` |
 | a rule in a pack directory | its path within the pack — `style/return-nil` |
 | a method designator on the command line | the designator itself — `Account#display_name` |
+
+A designator id is the one to write for `rwr find`. Under `check` or `rewrite`
+with `-r`, the same directive refuses the run — see above; a rename has no
+half.
 
 So the same rename suppresses under `rename` from a file and under
 `Account#display_name` inline, and CI logs name it differently depending on which

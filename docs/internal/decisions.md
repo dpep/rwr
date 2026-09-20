@@ -1777,7 +1777,9 @@ standing enforcement, and an ad-hoc query is exploration by someone who typed th
 seconds ago.
 
 **`rewrite` honours directives identically to `check`**, because `check` is the preview of
-`rewrite` (D29) and a preview that disagreed would be a lie. Draining is spelled by fixing the
+`rewrite` (D29) and a preview that disagreed would be a lie. *Amended: they did disagree.* A
+directive accepting one end of a rename let `rewrite` write the other end and exit 0 while `check`
+exited 1. D110 resolves it by refusing that run from both verbs. Draining is spelled by fixing the
 code, not by a flag. Deletion (D66) takes a directive with it for free: a trailing one is on the
 match's own line and a leading one is a comment directly above, both already inside the unit.
 
@@ -3101,3 +3103,65 @@ correct command.
 *Reverses if:* a root ever means something other than "walk this" -- a per-root rule set or
 severity, say -- at which point two overlapping roots would carry different instructions for the
 same file and the answer becomes a refusal.
+
+## D110 - A directive may not accept half a rename; the run refuses
+**Decided.** Amends D72.
+
+```
+# account.rb
+class Account
+  # rwr:ignore Account#display_name
+  def display_name; "x"; end
+end
+# use.rb
+puts Account.new.display_name
+```
+
+`rwr rewrite 'Account#display_name' -r full_name .` rewrote `use.rb`, left the definition alone,
+and **exited 0**. The result raises `NoMethodError`. The directive on the call site instead breaks
+it the other way.
+
+Three things make this the worst defect of the arc. It is a **half-applied edit**, which DESIGN.md
+names ast-grep for by name and principle 2 forbids. It exited **0** while `check` on the same tree
+exited 1, so the preview-then-apply CI shape rwr documents reported success on the apply -- and
+D29 says `check` is the preview of `rewrite` and a preview that disagreed would be a lie. And it
+was reached through the id `docs/suppressing.md` explicitly tells you to write.
+
+**The run refuses whole, at exit 5, having written nothing.**
+
+*Why not exit non-zero and say the rename is partial.* The tree is still broken; the exit code
+only tells you so. Recovery is a manual revert rather than a round trip, and there is no code that
+fits: 1 means "there is work to do", 4 means a rerun makes progress and a rerun does not -- the
+directive is still there. Worse, `check` would have to report the same partial answer for D29 to
+hold, so the preview would have to promise a broken tree rather than prevent one.
+
+*Why not honour the directive across the whole rule.* One directive would then silently cancel a
+repo-wide rename from a file nobody opened -- the blanket blind spot this decision already
+refuses for a bare `# rwr:ignore`, and the non-local reach that ruled out `disable`/`enable`
+blocks. It is not even statable: the directive's effect would depend on which paths the run
+walked, so `rewrite ... app/models` and `rewrite ... .` would answer differently about the same
+comment.
+
+*Why refusal is the right shape.* Principle 1 is "refuse rather than guess", and the input here is
+not ambiguous but **jointly unsatisfiable**: "rename this method everywhere" and "do not touch
+this site" cannot both hold when the sites are one edit. A refusal costs a round trip; a partial
+write costs a revert. And it is the only one of the three answers under which `check` and
+`rewrite` give the same answer *and* that answer is true.
+
+**The discriminator is that the run moves a definition**, derived from the same per-rule answer
+residue uses for completeness -- because it is the same fact. A rule that rewrites without moving
+a definition (`return nil` -> `return`) has independent sites, which is exactly what a directive
+is for, and that path is untouched. `find` writes nothing, so nothing can be split: it still
+honours directives and still counts them.
+
+**Run-level, not per-file.** `ScanOutcome::Refused` declines one source and lets the others
+through, which here would write the same broken tree with a louder message. The check sits before
+the write loop, so nothing has been written when it fires.
+
+**No installed base to break.** `rg 'rwr:ignore'` over rails, discourse and mastodon: zero
+occurrences. There is no frequency argument for or against this, and nobody's workflow depends on
+the exit-0 behaviour.
+
+*Reverses if:* renames gain a way to be partial *and correct* -- an alias left behind at the old
+name, say -- at which point accepting one site has a meaning that runs, and the answer becomes
+that alias rather than a refusal.

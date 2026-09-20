@@ -1931,6 +1931,47 @@ fn cmd_apply(
         format!("{} files changed", outcomes.len())
     });
 
+    // A rename is one edit spread over a definition and its call sites, so a
+    // directive accepting either end leaves the other end calling a method that
+    // no longer exists. `rewrite` wrote exactly that and exited 0 while `check`
+    // on the same tree exited 1, so a preview-then-apply CI shape reported
+    // success on the apply -- the half-applied edit DESIGN.md names ast-grep
+    // for, reached through the id `docs/suppressing.md` tells you to write.
+    //
+    // There is no honest partial answer, so the run refuses whole: a refusal
+    // costs a round trip, a partial write costs a revert. Run-level rather than
+    // a per-file `ScanOutcome::Refused`, which declines one file and lets the
+    // rest through -- the same broken tree with a louder message. Before the
+    // write loop, so nothing has been written when it fires.
+    if engine.renames_a_definition() {
+        let accepted: Vec<&crate::suppress::Suppressed> = outcomes
+            .iter()
+            .flat_map(|o| o.scanned.suppressed.iter())
+            .collect();
+        if !accepted.is_empty() {
+            eprintln!(
+                "rwr: refused: {} rwr:ignore directive(s) accept part of a rename. A rename \
+                 is one edit across a definition and every call site, so accepting part of it \
+                 leaves the rest calling a method that no longer exists. Nothing was written.",
+                accepted.len()
+            );
+            for s in accepted.iter().take(RESIDUE_DETAIL_CAP) {
+                match &s.rule {
+                    Some(rule) => eprintln!("  {}:{}: {rule}", s.file, s.line),
+                    None => eprintln!("  {}:{}", s.file, s.line),
+                }
+            }
+            if accepted.len() > RESIDUE_DETAIL_CAP {
+                eprintln!("  ... and {} more", accepted.len() - RESIDUE_DETAIL_CAP);
+            }
+            eprintln!(
+                "rwr: delete the directive to rename every site -- or, if that site means a \
+                 different method of the same name, name the class it belongs to instead."
+            );
+            return Exit::Refused.into();
+        }
+    }
+
     let mut refused = false;
     let mut changed: Vec<Changed> = Vec::new();
     for outcome in &outcomes {

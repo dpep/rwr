@@ -123,6 +123,15 @@ pub(crate) struct Engine {
     /// rewrites call sites leaves every name it did not touch working, so it
     /// has nothing to be incomplete about.
     claims_completeness: bool,
+    /// Whether this run *moves* a definition rather than only reporting one.
+    ///
+    /// The discriminator for an atomic edit: a renamed definition and its call
+    /// sites are one edit, so accepting part of it produces code that does not
+    /// run. A rule that rewrites without moving a definition -- `return nil` ->
+    /// `return` -- has independent sites, which is exactly what a directive is
+    /// for. Same per-rule answer as `claims_completeness`, narrowed to the rules
+    /// that write, because residue exists for precisely the reason this does.
+    renames_a_definition: bool,
     /// A rule set that names no class cannot tell `Account#display_name` from
     /// `Company#display_name`, so its matches are tallied by resolved receiver.
     unnarrowed: bool,
@@ -358,11 +367,22 @@ impl Engine {
             prepareds.push(p);
         }
 
-        let claims_completeness = prepareds.iter().any(|prepared| {
-            let parsed = ruby_prism::parse(prepared.source.as_bytes());
-            matcher::pattern_root(&parsed.node())
-                .is_some_and(|root| residue::defines_a_method(&root, prepared))
-        });
+        let defines: Vec<bool> = prepareds
+            .iter()
+            .map(|prepared| {
+                let parsed = ruby_prism::parse(prepared.source.as_bytes());
+                matcher::pattern_root(&parsed.node())
+                    .is_some_and(|root| residue::defines_a_method(&root, prepared))
+            })
+            .collect();
+        let claims_completeness = defines.iter().any(|d| *d);
+        // Derived from the same per-rule answer as completeness rather than
+        // asked again, because they are the same question: a set that moves a
+        // definition is a set whose sites reference each other.
+        let renames_a_definition = rules
+            .iter()
+            .zip(&defines)
+            .any(|(rule, defines)| *defines && rule.rewrite.is_some());
         let unnarrowed = !rules
             .iter()
             .any(|r| r.constraints.values().any(Constraint::narrows_by_receiver));
@@ -406,6 +426,7 @@ impl Engine {
             contained,
             filters,
             claims_completeness,
+            renames_a_definition,
             unnarrowed,
         })
     }
@@ -437,6 +458,12 @@ impl Engine {
 
     pub(crate) fn claims_completeness(&self) -> bool {
         self.claims_completeness
+    }
+
+    /// Whether this run's sites are one atomic edit rather than independent
+    /// ones -- true when it rewrites a definition, whose call sites go with it.
+    pub(crate) fn renames_a_definition(&self) -> bool {
+        self.renames_a_definition
     }
 
     /// Whether any rule needs this source read at all.
