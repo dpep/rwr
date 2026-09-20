@@ -2946,8 +2946,8 @@ in which case the unit becomes the set of ranges rather than their union.
 
 **A site is rewritten whole or not at all**, so a scope named on one of its lines gets the others
 written too. That is correct and it is not silent: `wrote_beyond_scope` lists each such site in
-`-j`, an unconditional stderr paragraph lists them in text, and the SARIF run carries the count as
-a note. Unconditional for the reason the suppression audit is -- a scope is a promise about which
+`-j` and an unconditional stderr paragraph lists them in text. (It also carried a count on the
+SARIF run, until D107 removed that output.) Unconditional for the reason the suppression audit is -- a scope is a promise about which
 lines may be touched, and a run that breaks it legitimately still has to say so. It is not an `-e`
 detail: `-e` answers "why was this candidate declined", and this is the opposite question.
 
@@ -2973,3 +2973,35 @@ information about the whole file. A reader will assume otherwise, so `getting-st
 
 *Reverses if:* residue ever gains receiver resolution good enough that an entry's location means
 something about the rule's sites, at which point "near the change" becomes a claim rwr can make.
+
+## D107 - SARIF comes out; `-j` is the only structured output
+**Decided.** `--sarif`, `Output::Sarif` and `src/cli/sarif.rs` are gone, with no deprecation
+window -- nothing was consuming them, so there was nothing to break.
+
+**A second output contract has to be kept in step with the first, by hand, forever.** Every field
+`-j` gained had to be decided again for SARIF, and the two documents drifted within days of each
+other twice. The cost is paid per change; the audience was zero.
+
+It also shipped three unfixed defects, and the worst of them is the one this tool exists to refuse:
+`rwr find '<pattern>' --sarif` wrote **zero bytes and exited 0**. A surface that silently produces
+nothing is indistinguishable from a clean run, which is principle 3 inverted -- and fixing it would
+have been work on a path nobody walked.
+
+**The channel it was built for turned out to be the wrong one anyway.** SARIF was recorded in
+DESIGN.md section 8 as the cheap path to pull-request annotations, and it was cheap. But every
+upload is attributed to GitHub Advanced Security, which is not renameable and files a `return nil`
+simplification as a security event; its annotations cannot carry a suggestion, so a rule that knows
+the fix can only describe it; and the comments cannot be deleted, even by an admin.
+`script/pr-suggest.sh` builds the review from `rwr check -j` instead, with an applicable
+`suggestion` block where a rule has one. That is the path in use.
+
+**Nothing the SARIF writer knew is lost.** It was a serializer over data `-j` already carries, and
+it modelled rwr's own subject badly: residue, unread files and unparsed templates are not defects,
+so they had to be demoted to `note` and to tool-execution notifications to avoid reading as
+findings. `-j` names them as what they are. D106's widening notice keeps its stderr and `-j` halves
+and loses only its SARIF note.
+
+*Reverses if:* a consumer appears that reads SARIF and cannot read `-j` -- a Code Scanning
+requirement someone actually has, rather than one rwr assumed. Even then the honest shape is a
+converter over `rwr check -j`, outside the binary, so the second contract is not rwr's to keep in
+sync.

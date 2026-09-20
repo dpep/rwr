@@ -117,24 +117,14 @@ account never fails the build on its own — residue does not move the exit code
 so a red build always points at a site, and the residue beside it is context.
 
 And where a site spans lines the change did not touch, the run says so: one line
-per site on stderr, `wrote_beyond_scope` in `-j`, and a note on the SARIF run.
-A site is rewritten whole or not at all.
+per site on stderr and `wrote_beyond_scope` in `-j`. A site is rewritten whole or
+not at all.
 
-## SARIF, if you want Code Scanning
+## Why not Code Scanning
 
-`--sarif` emits SARIF 2.1.0, which `github/codeql-action/upload-sarif` ingests:
-
-```yaml
-      - run: rwr check all --since "origin/$GITHUB_BASE_REF" --sarif > rwr.sarif
-        continue-on-error: true   # check exits 1 when there is work to do
-      - uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: rwr.sarif
-          category: rwr
-```
-
-This is **not** the recommended path for pull-request review, and it was tried
-first. Three things it does worse:
+rwr emits no SARIF, so there is nothing for
+`github/codeql-action/upload-sarif` to ingest. It did once, and that path was
+tried first. Three things it does worse than a review comment:
 
 - Every SARIF upload is attributed to **GitHub Advanced Security**, which is not
   renameable and overstates what these findings are.
@@ -142,12 +132,7 @@ first. Three things it does worse:
   only describe it.
 - Comments it leaves **cannot be deleted**, even by a repository admin.
 
-Where it does earn its place is outside pull requests: it is a standard other
-tools ingest, and Code Scanning tracks alerts, dismissals and branch state over
-time in a way an ephemeral review comment cannot.
-
-Levels, if you use it: a rewritable site or a finding is `warning`; residue is
-`note`, because it is not a defect in your code but a thing rwr could not reach.
-Blind spots with no line to point at — a file that would not parse — arrive as
-`toolExecutionNotifications` rather than results, since giving them an invented
-location would be inventing evidence.
+If you want rwr's findings in Code Scanning anyway, `rwr check -j` carries
+everything the SARIF run did — file, line, column, rule and description, plus
+the residue and unread-file account SARIF never modelled well — and
+`script/pr-suggest.sh` is a worked example of reading it.

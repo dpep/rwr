@@ -281,9 +281,11 @@ exit-code polarity (D22) and document it. It must honor `-j`/`-J` with stable
 field names, and land with an e2e assertion in the same change. If it evaluates
 rules against source it consumes `Engine` — a new verb is never a new evaluator.
 
-**A new output format** (SARIF is the recorded candidate). Extend `Output` and
-the `emit_*` seam; the data is already in `Report`. The trap is partial coverage:
-every command that prints must honor it, or the format is a lie in half the tool.
+**A new output format.** Extend `Output` and the `emit_*` seam; the data is
+already in `Report`. Two traps, and SARIF hit both before it was removed (D107):
+partial coverage -- every command that prints must honor it, or the format is a
+lie in half the tool -- and a second contract that has to be kept in step with
+`-j` by hand, forever, for however few consumers it has.
 
 **A new suppression source.** `Suppressed.source` and `Stale.source` already
 discriminate. Carry over the staleness symmetry: *a suppression whose finding is

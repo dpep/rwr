@@ -46,8 +46,8 @@ a zero was, a different method on a non-relation, `^` turning special. Not "the
 result is a little weaker", not "read it before you run it". `rspec/be-empty`
 ships plain for this reason: `eq([])` pins the type where `be_empty` does not, so
 the assertion gets weaker, but no input makes Ruby behave differently. That
-caveat lives in the rule's `description:`, which rides along to `-j`, SARIF and
-the pull-request comment.
+caveat lives in the rule's `description:`, which rides along to `-j` and the
+pull-request comment.
 
 The distinction is load-bearing because `--unsafe` is all-or-nothing. Every rule
 marked for a softer reason taxes the person who wanted one specific rewrite, and

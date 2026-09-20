@@ -3,8 +3,7 @@
 # `eq("")` for free -- a string literal compares by unescaped value (D36).
 #
 # Ships plain, with the caveat carried in each `description:` so it reaches
-# `-j`, SARIF and the pull-request comment rather than only a reader of this
-# file. What the rewrite drops is *assertion strength*: `eq([])` pins the type
+# `-j` and the pull-request comment rather than only a reader of this file. What the rewrite drops is *assertion strength*: `eq([])` pins the type
 # as well as the emptiness, so a subject that regressed from `[]` to `{}` fails
 # the original and passes the rewrite.
 #

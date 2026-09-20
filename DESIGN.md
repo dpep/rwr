@@ -389,15 +389,16 @@ Recorded so the design doesn't foreclose it. Not a roadmap.
   before building it.
 - **GitHub integration.** Done, and not the way this section first predicted.
   SARIF was recorded here as *the* cheap path to pull-request annotations; it
-  was cheap and it worked, and it is still the wrong channel for review. Every
+  was cheap and it worked, and it was still the wrong channel for review. Every
   upload is attributed to Advanced Security, which is not renameable and files a
   `return nil` simplification as a security event; its annotations cannot carry
   a suggestion; and the comments it leaves cannot be deleted. Inline review
   comments through the ordinary reviews API do the job better --
   `script/pr-suggest.sh`, with an applicable `suggestion` block where a rule
-  knows the fix. SARIF is kept for Code Scanning and other SARIF consumers,
-  which is a real audience and a different one. A Marketplace app remains
-  unjustified: nothing it would add has been asked for.
+  knows the fix. SARIF was kept beside it for the Code Scanning audience, went
+  unused, and was removed rather than maintained as a second output contract
+  (D107). A Marketplace app remains unjustified: nothing it would add has been
+  asked for.
 - **`rwr import`** - convert an ast-grep rule to canonical rwr syntax. Compatibility as a
   one-time conversion rather than a permanent second spelling; see D32's rejected-alias note.
   Build only if Phase 0 shows real migration demand.
