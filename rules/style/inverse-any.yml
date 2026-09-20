@@ -57,6 +57,12 @@
         a = !xs.any?(&blk)
       output: |
         a = xs.none?(&blk)
+    # Safe navigation declines here for the same reason it declines the block
+    # form: `!nil&.any?(&:ok?)` is true and `nil&.none?(&:ok?)` is nil, so the
+    # guard would flip. One mechanism, both spellings (D111).
+    - input: |
+        a = !xs&.any?(&:ok?)
+      unchanged: true
     # No block-pass at all. Bare, the two *are* inverses on Enumerable -- this
     # declines for reach, not for correctness. Widening it would be the real
     # risk: a bare `any?` is the spelling on objects that define one without a

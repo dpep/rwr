@@ -3165,3 +3165,87 @@ the exit-0 behaviour.
 *Reverses if:* renames gain a way to be partial *and correct* -- an alias left behind at the old
 name, say -- at which point accepting one site has a meaning that runs, and the answer becomes
 that alias rather than a refusal.
+
+## D111 - A pattern's `.` matches `&.` only at the pattern root
+
+`style/inverse-any` rewrote `!xs&.any? { |i| i.ok? }` to `xs&.none? { |i| i.ok? }`. Verified on
+Ruby 3.4.9: `!nil&.any? { |i| i.ok? }` is `true` and `nil&.none? { |i| i.ok? }` is `nil`. **A guard
+flips, the output parses, and the `&.` sits exactly where the author said the receiver may be nil.**
+The same mechanism turned `x = x&.+(1)` into `x += 1`, which raises where the original returned nil.
+
+The cause is that `&.` is not an atom. Node equality is variant + atoms + children (D36), a
+`CallNode`'s only atom is its name, and safe navigation is a flag -- so `.` and `&.` compared equal
+everywhere.
+
+**A pattern's `.` matches `&.` at the pattern root, and nowhere else. Below the root the two are
+different operators and do not match. A rule that wants the nested case writes `&.` and gets it.**
+
+*Why not stop preserving `&.` through the splice.* That is B8, and B8 is right: normalising `&.` to
+`.` ships a `NoMethodError` on nil. The bug is not what the splice writes, it is what the match
+accepted.
+
+*Why not make `.` never match `&.`.* Renames are the product's main use and they reach call sites
+through a pattern with a literal dot (`$R.name(*$A)`), so a blanket narrowing would drop every
+safe-navigated call site of every rename. Measured on rails, renaming a method with 14 `&.` call
+sites: 15 sites before, 15 after with the root exemption, and the `&.` preserved in each. A blanket
+rule would have given 1. The loss would at least have been *loud* -- residue collects any call whose
+name is an anchor and does not filter on safe navigation, so the dropped sites would be reported
+rather than silently missed -- but a rename that hands back 14 sites for a human to finish is not a
+rename.
+
+*Why the root is the right line, and not a heuristic.* `&.` decides whether the rest of its
+expression runs at all. **When the pattern root is the safe-navigated call, the match is exactly the
+guarded expression**, and any rewrite substitutes one call for another inside that same guard: the
+guard's scope is unchanged, so `nil&.display_name` and `nil&.full_name` are both nil. **When the
+call is nested, the pattern has matched an expression that *consumes* the guarded value**, and the
+rewrite is free to change what consuming it means -- which is precisely what negation, assignment
+and a guard do. The matcher cannot check that, because the template is not visible from where the
+match is made, so it refuses (principle 1) rather than guessing.
+
+*Why not a `where:` predicate the rule opts into.* No predicate can be written: by the time a rule
+could ask "was that an ordinary dot", the match has already been made and the finding already
+exists. The opt-in also points the wrong way -- it asks every future rule author to remember a
+hazard, and the ones who forget get the silent wrong rewrite. The root exemption defaults to safe
+and costs the common case nothing.
+
+**Zero corpus movement.** hash-shorthand, inverse-any and redundant-self-assign on rails and
+mastodon: 130/106, 0/1 and 6/0 sites, byte-identical before and after. The shapes this refuses do
+not occur in either corpus, which is the expected shape of the result -- it closes a correctness
+hole without costing a single legitimate conversion.
+
+*Reverses if:* the matcher gains sight of the rewrite template, at which point the honest question
+becomes "does this template keep the guarded value in the same position", and the root is a proxy
+for it rather than the rule itself.
+
+## D112 - "A bare name" is Prism's `VARIABLE_CALL` flag, not our reading of the call
+
+`same_name_as` treated `a()` as a read of `a`, so `style/hash-shorthand` rewrote `p({ a: a() })` to
+`p({ a: })`. With `def a = 99` and a local `a = 1` both in scope those are different programs -- 99
+against 1 -- and both parse.
+
+The predicate had already been wrong once, in the same direction: it matched `{ a: :a }` until a
+fix required one side to *read* the identifier. That fix was correct and incomplete, because
+`bare_name` accepted a `CallNode` whenever it had no receiver, no arguments and no block -- **all
+three of which `a()` satisfies. Its parens live in `opening_loc`, which the test never consulted**,
+and explicit parens are precisely how Ruby says "the method, not the local".
+
+**`bare_name` asks `call.is_variable_call()`.** Prism sets `VARIABLE_CALL` exactly when a call was
+parsed from a bare identifier that could have been a local read, which is the question being asked.
+
+*Why the flag rather than adding the parens check.* Because a third spelling would otherwise be
+waiting. This is the first principle about a cheap check that restates an expensive one: the parser
+already decides this, and re-deriving its answer from the fields that happen to be visible is how
+the predicate went wrong twice. Asking the parser cannot drift from the parser.
+
+**What the flag rules out, checked**: `a()`, `a(&blk)`, `a(*args)`, `self.a` and `a.()` are all
+declined; `{ name: name }`, `{ :name => name }`, `{ Name: Name }` (a constant read, which must keep
+matching) and both double-splat positions still convert. A local shadowed later in the scope needs
+no special case -- Ruby resolves a bare `a` before its assignment as a method call, and the
+shorthand resolves it the same way, so the two agree.
+
+**Zero corpus movement**: hash-shorthand is 130 sites on rails and 106 on mastodon, before and
+after. `{ a: a() }` is a shape nobody writes; it is a correctness hole rather than a frequency
+problem, which is why fixtures rather than corpus counts are what pin it.
+
+*Reverses if:* Prism's flag stops meaning "could have been a local read" -- pinned by
+`an_empty_argument_list_is_not_a_variable_call`, which fails if it does.

@@ -32,6 +32,18 @@ tests:
       a = 1
       h = { a: a() }
     unchanged: true
+  # The rest of the family, which the same predicate has to decline for the same
+  # reason: each carries something that makes it a call outright, and the
+  # shorthand would resolve a local first.
+  - input: |
+      h = { a: a(&blk) }
+    unchanged: true
+  - input: |
+      h = { a: a(*args) }
+    unchanged: true
+  - input: |
+      h = { a: a.() }
+    unchanged: true
   # An ivar is not the identifier the shorthand would read; `{name:}` would find
   # the method or local instead.
   - input: |

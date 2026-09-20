@@ -119,7 +119,19 @@ range may be touched. **Rewrite, touching only the identifier.** Ubiquitous.
 
 **B8. Safe navigation** (`account&.display_name`). *match, splice.* A rewrite
 that normalises `&.` to `.` introduces a `NoMethodError` on nil visible only in
-production. **Rewrite, preserving `&.` exactly.** Common.
+production. **Rewrite, preserving `&.` exactly** -- at the pattern root, where
+the match *is* the guarded call and the rewrite swaps one call for another
+inside the same guard. A rename reaches `a&.foo` and keeps the `&.`, which is
+the common case and the one this note was written for.
+
+**Below the root, a pattern's `.` does not match `&.` at all** (D111). There the
+pattern has matched an expression that *consumes* the short-circuited value, and
+what the template does with it is not visible to the matcher: `!xs&.any? { |i|
+i.ok? }` is `true` on a nil receiver where `xs&.none? { |i| i.ok? }` is `nil`, so
+`style/inverse-any` inverted a guard while the output still parsed. The same
+mechanism turned `x = x&.+(1)` into `x += 1`, which raises where the original
+returned nil. A rule that wants the nested case writes `&.` in the pattern and
+gets it. Common.
 
 **B9. Symbol-to-proc** (`map(&:display_name)`). *account.* A call by that name on
 each element, spelled as a symbol; the element type is usually unknowable. One of

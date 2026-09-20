@@ -37,3 +37,10 @@ tests:
   - input: |
       x = x + 1 rescue 0
     unchanged: true
+  # The same engine defect as `inverse-any`, reached by a rarer spelling:
+  # `nil&.+(1)` is nil where `nil + 1` raises, so `x += 1` is not the same
+  # program. Rare enough that nobody writes it, pinned because the mechanism is
+  # shared and a regression would show up here first (D111).
+  - input: |
+      x = x&.+(1)
+    unchanged: true
