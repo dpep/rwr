@@ -1,6 +1,19 @@
+# `inject(:+)` sends `+` once per element; `Array#sum` has a C fast path for
+# numerics. It stays a rewrite -- unlike `pluck`, every way it can go wrong is
+# either loud or an improvement -- but the caveat has to name all of them,
+# because the receiver's element type is the thing rwr cannot see and the
+# caller can.
 description: '`inject(:+)` is `sum`, which has a fast path for numerics.'
 unsafe: >-
-  `inject(:+)` returns nil for an empty collection; `sum` returns 0.
+  Only equivalent for a non-empty collection of numerics. On an empty one
+  `inject(:+)` returns nil and `sum` returns 0. On anything else `sum` raises,
+  because its accumulator starts at 0: `['a', 'b'].inject(:+)` is "ab" and
+  `['a', 'b'].sum` is a TypeError, and arrays of arrays fail the same way. On
+  floats it returns a *different number* and says nothing -- `sum` compensates
+  for rounding and `inject` does not, so [0.1, 0.2, 0.3] gives 0.6 rather than
+  0.6000000000000001. And on an ActiveRecord relation `sum` is ActiveRecord's
+  method rather than Enumerable's: with no block it goes to the database
+  instead of reducing the records.
 match: $R.$RED(:+)
 where:
   $RED:
@@ -25,13 +38,14 @@ tests:
       a = xs.inject(:*)
       b = xs.inject { |acc, x| acc + x }
     unchanged: true
-  # RED, deliberately -- the `unsafe:` note covers only the empty collection.
-  # For a *non-empty* one of anything but numerics the rewrite raises, and the
-  # receiver here says so on its own line: `["a", "b"].inject(:+)` is "ab",
-  # while `sum` starts its accumulator at 0 and dies with `TypeError: String
-  # can't be coerced into Integer`. Arrays of arrays fail the same way, and
-  # arrays of floats return a different number, because `sum` compensates for
-  # rounding and `inject` does not. Verified on Ruby 3.4.
+  # PINNED, not endorsed. This rewrite turns working code into a TypeError, and
+  # the receiver says so on its own line -- but nothing in the rule language
+  # can decline it. `is:` asserts a node kind and cannot be negated, and
+  # `type_not:` only excludes receivers it can *resolve*, so demanding one here
+  # would drop `xs.inject(:+)` along with it -- every real receiver is a bare
+  # local. So the caveat carries it: the rule is held back unless `--unsafe`,
+  # and the reason prints next to this diff.
   - input: |
       a = ['a', 'b'].inject(:+)
-    unchanged: true
+    output: |
+      a = ['a', 'b'].sum
