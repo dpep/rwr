@@ -129,8 +129,10 @@ impl Signatures {
         // pass, where a finder per spelling cost a scan of the corpus each.
         let opener = memchr::memmem::Finder::new(b"sig ").into_owned();
         // A `T::Struct` may declare typed fields with no `sig` block anywhere in
-        // the file, so the opener alone would skip it. `T::` costs a second scan
-        // and appears in no untyped codebase at all.
+        // the file, so the opener alone would skip it. Three raw bytes, so any
+        // constant ending in T hits: `REST::` admits 240 mastodon files, `AST::`
+        // and `JWT::` 21 discourse ones, all for nothing. Measured at 2.6ms and
+        // 6.5ms -- a couple of percent of a run, and kept.
         let typed = memchr::memmem::Finder::new(b"T::").into_owned();
 
         let found: Vec<Vec<Signed>> = sources

@@ -1261,6 +1261,21 @@ space, Discourse parses zero files. Five runs each: 159-164ms with the signature
 pages in parallel before the scan needs them. The profile's phase table over-attributes here,
 and reading it alone would have said the feature cost 190ms.
 
+**The `T::` half of the prefilter is not free, and no local corpus has a signature at all** —
+amended, correcting the paragraph above. "Discourse parses zero files" was true of the `sig `
+finder alone; `T::` was added afterwards, for a `T::Struct` that declares typed fields with no
+`sig` block. It is a raw three-byte search, so **any** constant ending in `T` followed by `::`
+hits it: mastodon parses 240 files and finds nothing — every one of them `REST::…` — and
+discourse parses 21, on `AST::` and `JWT::`. Measured at 2.6 ms of a 166 ms run on mastodon and
+6.5 ms of 1.7 s on discourse; rails parses 0 files at 0.8 ms. A couple of percent, so the
+prefilter stays as it is and the claim is what changes.
+
+Worth recording beside it: **the three local corpora contain zero Sorbet signatures** — no `sig`
+block and no `extend T::Sig` in any of rails, discourse or mastodon. That is the honest frequency
+answer for this whole surface. Every correctness finding about it comes from fixtures, because no
+corpus on this machine exercises it; the 64%/graph_weaver numbers above remain the only
+measurement from a repository that actually uses Sorbet.
+
 **RBI files are out of scope for now.** `sorbet/rbi/gems/*.rbi` describes *dependencies*,
 which would reach a different and larger class of receiver, and `.rbi` is parseable Ruby so
 the same machinery would work. It is not built because nothing has asked for it yet, and
