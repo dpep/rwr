@@ -118,6 +118,12 @@ Where a site lives inside a heredoc or a template body, the marker sits on the
 opening line instead -- a heredoc body has nowhere to put a Ruby comment. One
 marker per line: the scorer reads the first `GT:` on a line and stops.
 
+A marker covers its own line and the one below it, and no further. A marker above a two-line
+site therefore lands on the first line and leaves the second unscored — so a fixture whose
+interesting statement is the *second* line (`account = Klass.new`, then `account.method`) is
+silently not measured, and the suite stays green for a reason nobody intended. Put the marker
+on the line that matters, or trailing on it.
+
 ## What it cannot measure
 
 **Precision at scale.** A fixture its own author wrote proves nothing about

@@ -7,6 +7,51 @@ a fixture repo, and must produce the effect their verb promises rather than mere
 shipped broken: a `-d` deletion that deleted nothing, and a residue illustration the engine could not
 produce. An example that is illustrative rather than runnable marks its fence ```sh ignore.
 
+**Fixed: a qualified designator answered about a class in a different namespace.**
+`rwr check 'Sales::Account#display_name' -r full_name app/billing` reported a rewrite in
+`Billing::Account` — the class the path scope had explicitly excluded. Widening a short name to the
+single class whose qualified name ends with it is the rule for an *unqualified* name only, and it was
+being applied to any name whose last segment had one candidate. So any run that could not see the
+class you named — a path-scoped run, or one whose file failed to parse — quietly answered about its
+namesake, at exit 0. A written namespace is now taken at its word. **Rerun any rename you ran with a
+qualified designator over a subset of the tree.**
+
+**Fixed: a rename rewrote the call sites of every class sharing its class's last segment.** With a
+top-level `Account` and a `Billing::Account`, `rwr rewrite 'Account#display_name' -r full_name`
+rewrote both classes' calls and only one class's definition — a `NoMethodError` at exit 0 with an
+empty residue list. Where several namespaced classes share a name and none is top-level, it rewrote
+the call sites of all of them and the definitions of none. A receiver is now spelled
+`Billing::Account`, as the definition side has spelled it since the last release. Classes living
+under a shared last segment are 23% of rails, 10% of discourse and 24% of mastodon. **For
+hand-written rules, `type: Account` no longer matches a receiver written `Billing::Account` —
+qualify the constraint, or add `subclasses: true` so the hierarchy is built. Rerun any rename of a
+method on a class whose name is not unique.**
+
+**Fixed: a rename missed every call that passed an argument.** `Widget#label` reached `w.label` and
+not `w.label("y")`, reporting the latter as residue — so for a method with a required argument the
+definition moved and every call site was handed back to you. Roughly a quarter of explicit-receiver
+calls in rails, discourse and mastodon carry an argument list; on discourse, `Guardian#can_see?` went
+from 1 site and 226 residue entries to 101 sites across 25 files. Explicit-receiver, `send`/
+`public_send` and implicit-self calls all take an argument list now, at no measurable cost — the file
+prefilter admits exactly the same files. **Rerun any rename of a method that takes arguments; its
+report was not complete.** Calls carrying a *block*, a block argument, or a receiverless `send` are
+still reported rather than rewritten.
+
+**Fixed: `style/hash-shorthand` turned a symbol into a method call.** `{ a: :a }` was rewritten to
+`{ a: }`, which calls a method `a` instead of holding the symbol — a different program, and one that
+still parses, so nothing downstream caught it. It shipped in `rwr rewrite all`, with no flags.
+`same_name_as:` now requires one side to be an expression that *reads* the identifier, which is the
+correspondence it was written for. Across rails, discourse and mastodon this removes 28 wrong
+rewrites. **If you ran `rwr rewrite all` or this rule, check your diff for `{ key: }` where the value
+used to be `:key`.**
+
+**Fixed: a namespaced class-method designator refused to run.** `rwr find 'Foo::Bar.connection'`
+exited 3 with "pattern is not valid Ruby" in all three verbs, after correctly announcing what it had
+read — because `def Foo::Bar.connection` is a Ruby syntax error and rwr built that pattern
+internally. The receiver is parenthesised now. `Foo::Bar#connection` was unaffected; only the
+class-method form was broken, which is the form the previous release's advice to "qualify an
+ambiguous name" pushed you toward.
+
 **Fixed: renaming an instance method rewrote the class method's macros.**
 `attr_accessor`, `define_method`, `alias_method` and the visibility macros inside
 `class << self` configure the *class* method of that name, so an instance rename
