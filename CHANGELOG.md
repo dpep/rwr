@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+The shell examples in `README.md`, `docs/` and the Claude skill are now run by the test suite against
+a fixture repo, and must produce the effect their verb promises rather than merely exit 0. Two had
+shipped broken: a `-d` deletion that deleted nothing, and a residue illustration the engine could not
+produce. An example that is illustrative rather than runnable marks its fence ```sh ignore.
+
 **Fixed: renaming an instance method rewrote the class method's macros.**
 `attr_accessor`, `define_method`, `alias_method` and the visibility macros inside
 `class << self` configure the *class* method of that name, so an instance rename

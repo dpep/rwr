@@ -213,7 +213,7 @@ call is a reach wherever it lives.
 The classless form has no class to scope by, which makes it the wide net:
 
 ```sh
-rwr find '#display_name' app/     # every mention, spec descriptions included
+rwr find '#display_name'          # every mention, spec descriptions included
 ```
 
 If you want every stale mention of a name across a repo, that is the command —
@@ -376,7 +376,7 @@ rwr check all app/x.rb:3-15         # those lines, named directly
 ```
 
 `--diff` takes **no value** — `--diff main` reads `main` as a path. Use `--since`
-for a revision. In CI that is `--since "$GITHUB_BASE_REF"`, which is more correct
+for a revision. In CI that is `--since "origin/$GITHUB_BASE_REF"`, which is more correct
 than the default branch for a PR targeting a release branch.
 
 `--since main` alone is commit-to-commit, so your uncommitted work sits outside
@@ -512,7 +512,7 @@ silently matches nothing.
 ## Reporting into a pull request
 
 ```sh
-rwr check all --since "$GITHUB_BASE_REF" --sarif > rwr.sarif
+rwr check all --since "origin/$GITHUB_BASE_REF" --sarif > rwr.sarif
 ```
 
 SARIF 2.1.0, which `github/codeql-action/upload-sarif` turns into annotations.

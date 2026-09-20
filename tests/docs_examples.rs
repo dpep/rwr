@@ -448,6 +448,12 @@ fn build_fixture(root: &Path) {
     git(root, &["add", "-A"]);
     git(root, &["commit", "-qm", "base"]);
 
+    // The CI examples say `--since "origin/$GITHUB_BASE_REF"`, and an
+    // actions/checkout workspace has the base branch only as a remote ref. A
+    // fixture with just a local `main` passes the bare spelling and the
+    // `origin/` one alike, which is how two docs came to disagree about it.
+    git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
     git(root, &["checkout", "-q", "-b", "feature"]);
     let company = root.join("app/models/company.rb");
     write(company.clone(), &format!("{COMPANY_RB}{BRANCH_RB}"));

@@ -209,7 +209,7 @@ ones do not.
 | | Scope |
 |---|---|
 | `--diff` | what is not committed yet, untracked files included — the pre-commit case |
-| `--since main` | what this branch introduces, `main...HEAD` — the CI case, where `--since "$GITHUB_BASE_REF"` is the recipe |
+| `--since main` | what this branch introduces, `main...HEAD` — the CI case, where `--since "origin/$GITHUB_BASE_REF"` is the recipe |
 | `--since main --diff` | both: the merge base against the working tree |
 | `app/x.rb:3-15` | those lines, named directly. `:3` is a single line, and it is the `file:line` rwr prints |
 

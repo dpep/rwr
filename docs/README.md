@@ -19,3 +19,9 @@ The [README](../README.md) is the tour; these are the details.
 
 Design notes, decisions and research live in [internal/](internal/) — the
 reasoning behind the tool rather than instructions for using it.
+
+The shell examples in these guides, in `README.md` and in the Claude skill are **run by the test
+suite** (`tests/docs_examples.rs`) against a fixture repo, and each must produce the effect its verb
+promises — not merely exit 0. Two examples had shipped broken before that gate existed. If an
+example is illustrative rather than runnable, mark its fence ```sh ignore; a `<placeholder>` in the
+line, or a line that does not start with `rwr`, is skipped already.

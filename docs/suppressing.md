@@ -29,7 +29,7 @@ The finding then does not exist — it is not counted, not reported, and not deb
 
 ```sh
 rwr check all --diff                       # not committed yet
-rwr check all --since "$GITHUB_BASE_REF"   # what this branch introduces
+rwr check all --since "origin/$GITHUB_BASE_REF"   # what this branch introduces
 ```
 
 Nothing is recorded anywhere. Pre-existing sites are out of scope this run and

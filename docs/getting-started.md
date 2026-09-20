@@ -178,7 +178,7 @@ scoped this way: a call is a reach wherever it lives.
 The classless form has no class to scope by, which makes it the wide net:
 
 ```sh
-rwr find '#display_name' app/     # every mention, spec descriptions included
+rwr find '#display_name'          # every mention, spec descriptions included
 ```
 
 rwr deliberately does not put a confidence number on these. Measured against the
@@ -230,7 +230,7 @@ pre-existing sites does not fail a pull request that added three:
 
 ```sh
 rwr check all --diff                          # not committed yet
-rwr check all --since "$GITHUB_BASE_REF"      # what this branch introduces
+rwr check all --since "origin/$GITHUB_BASE_REF"   # what this branch introduces
 rwr check all --since main --diff             # both
 rwr check all app/x.rb:3-15                   # or name the lines yourself
 ```
