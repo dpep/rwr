@@ -3249,3 +3249,81 @@ problem, which is why fixtures rather than corpus counts are what pin it.
 
 *Reverses if:* Prism's flag stops meaning "could have been a local read" -- pinned by
 `an_empty_argument_list_is_not_a_variable_call`, which fails if it does.
+
+## D118 - Every valid binding on a node is a match; the split point is a real choice
+
+**Decided.** Supersedes the second half of Q13. `{ name: name, value: value, verified_at:
+verified_at }` converted one pair, reported `rewrote 1 site(s)` and exited 0 -- so the caller had
+no reason to run again, and the diff was a third of a conversion. That is the failure this codebase
+names ast-grep and Synvert for, and it was ours.
+
+**The cause was not the overlap test.** D15's conflict unit is already the edit range, and D105
+already extended it to scoping; `plan` sorts by edit range, drops only what a wider edit contains,
+and refuses on partial overlap. None of it ran, because the alternatives never existed: `walk`
+pushed the first binding that satisfied the rule and `break`, so `find` reported one match on that
+hash and `plan` was handed one. A diagnosis of "both matches overlap" would have relaxed a test
+that was correct.
+
+**A match is a node *and* a binding.** Where a flanking sequence metavariable makes the split point
+a choice -- `{**$B, $K: $V, **$A}` over a three-pair hash -- each choice binds a different pair, and
+they are three matches, not one reported thrice. D15 already says `find` is observation and
+suppressing a nested match would be a lie; suppressing an alternative binding is the same lie one
+axis over.
+
+**Enumeration is not the auto-fixpoint D15 bans.** Q13 declined this citing `foo($A) ->
+foo(bar($A))`, which matches its own output and diverges. That argument does not reach here:
+bindings are enumerated against the original tree, the set is finite and computed once, and no
+output is ever re-matched. Divergence needs re-matching output. The mechanism is the one Q13 built
+for rejections -- a taken split is forbidden and the node re-matched -- and it terminates for the
+same reason: a list has finitely many splits.
+
+**The existing machinery then decides, and both of its answers are honest.** Minimal edits over
+distinct pairs touch disjoint bytes of the shared parent, so D15 lets them all through. Where a
+template diverges and each binding re-renders the whole node, the edits genuinely conflict: all but
+the outermost are dropped, counted, and reported as `N further match(es) sat inside a rewritten
+range; rerun to apply them` at exit 4. No new reporting was needed -- the counts were always
+derived from the matches, and the matches were what was missing.
+
+**A suggestion is per line, not per site.** Two pairs of one hash are two sites sharing one line,
+and each `Site` rendered its own pair converted against an otherwise untouched line -- so applying
+either GitHub suggestion reverted the other. `at` now groups by the lines an edit lands on, so
+`at.len() <= sites` and each entry carries what that line actually becomes.
+
+**Measured**, hash-shorthand, one pass: rails 130 -> 196 sites, mastodon 106 -> 146, leftover
+41 and 28 -> zero. The baseline needed five passes on each corpus to converge, and its fixpoint is
+byte-identical to the single pass -- so this converts nothing new, it stops hiding what it had
+already found.
+
+*Reverses if:* a pattern is found whose bindings are not finite, or whose enumeration is quadratic
+on a shape that occurs -- at which point the cap becomes a budget and has to be reported when hit,
+rather than the backstop it is.
+
+## D119 - Children correspond by slot, not by index
+
+**Decided.** `generated::children` compacts absent optional fields away, so equal arity is not
+evidence that two child lists line up. A `CallNode` carries an optional receiver, argument list and
+block: `$R.select { |$P| $B }.first($A)` and `$R.detect { |$P| $B }` are both two-child calls, one
+holding an argument list where the other holds a block. `align` paired them by index.
+
+**Both directions were wrong and only one was loud.** Unwrapping, the block's text was spliced into
+the argument's span and `verify` refused with `unexpected '{', expecting '}' or a key in the hash
+literal` -- a parse error about a hash, on source containing no hash, three steps from the cause and
+exactly the misdirection D99 exists to remove. The other way round, `$R.map { |$P| $P.$M }` ->
+`$R.pluck($M)` localized the template's argument list onto the target's block and wrote
+`xs.pluck name`: valid Ruby, exit 0, and not the parenthesized call the template describes. A check
+that only fires when the wrong splice happens not to parse is not a check.
+
+**Corresponding slots hold corresponding kinds**, so `align` declines a pair whose pattern and
+template nodes are different kinds and neither is a metavariable. The placeholder exemption is what
+keeps this from rejecting every rule that rewrites one shape into another; the alignment then falls
+through to `unwrap_to_subtree`, which finds the real correspondence. `.first($A)` now rewrites
+rather than refusing, and the control without the argument is unchanged.
+
+*Why not read the slots from Prism directly.* That is the better fix and it is a generator change:
+`children()` would have to keep a slot tag, which `script/gen-compare.py` can emit and every caller
+would then thread through. The kind check is derived from the same nodes rather than from a list of
+node kinds maintained by hand, so it does not drift -- but it is a proxy, and it accepts a pair of
+same-kind nodes in different slots, which no node in Prism currently offers.
+
+*Reverses if:* `children()` learns to carry its slots, at which point the comparison is the slot
+itself and the kind check is redundant.

@@ -1771,9 +1771,27 @@ fn walk<'pr>(
             criteria.sigs,
         ) {
             Verdict::Ok => {
-                state.out.push(candidate);
                 attempts.clear();
-                break;
+                // A flanking sequence metavariable makes the split point a real
+                // choice, and each choice is a distinct match on the same node:
+                // every pair of `{name: name, value: value}` matches
+                // `{**$B, $K: $V, **$A}`. Forbidding the split just taken makes
+                // the next iteration pick another, and terminates because a list
+                // has finitely many splits. Nothing to re-choose without one, so
+                // a pattern carrying no sequence stops here and pays nothing.
+                let splits: Vec<(String, String)> = candidate
+                    .env
+                    .iter()
+                    .filter(|(_, bound)| matches!(bound, Bound::Many(_)))
+                    .map(|(key, bound)| (key.clone(), fingerprint(bound)))
+                    .collect();
+                state.out.push(candidate);
+                if splits.is_empty() {
+                    break;
+                }
+                for (key, taken) in splits {
+                    forbidden.entry(key).or_default().push(taken);
+                }
             }
             // Wrong place, not wrong binding -- no rebinding can fix it.
             verdict @ (Verdict::WrongScope(_) | Verdict::Bug(_)) => {
@@ -2460,6 +2478,65 @@ end
         // search must move on to `size: size` rather than reporting nothing.
         let src = "x = {name:, size: size}\n";
         let parsed = ruby_prism::parse(src.as_bytes());
+        assert_eq!(
+            search(&p_root, &parsed.node(), &prepared, &criteria).len(),
+            1
+        );
+    }
+
+    /// Q13 settled that a *rejected* binding is retried. It also asserted that
+    /// several *valid* bindings on one node are reported once and need a second
+    /// pass -- which made a hash of same-name pairs convert one pair per run
+    /// while the run reported success. The split point of a flanking sequence
+    /// metavariable is a real choice, and each choice is a distinct match.
+    #[test]
+    fn every_valid_binding_on_one_node_is_a_match() {
+        let prepared = prepare("{**$B, $K: $V, **$A}").expect("prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let p_root = pattern_root(&p_node).expect("single expression");
+
+        let mut constraints = HashMap::new();
+        constraints.insert(
+            "$K".to_string(),
+            Constraint {
+                same_name_as: Some("$V".into()),
+                ..Default::default()
+            },
+        );
+        let scope = Scope::default();
+        let hierarchy = Hierarchy::default();
+        let sigs = crate::sigs::Signatures::default();
+        let contained = std::collections::HashMap::new();
+        let criteria = Criteria {
+            explain: false,
+            constraints: &constraints,
+            contained: &contained,
+            scope: &scope,
+            hierarchy: &hierarchy,
+            sigs: &sigs,
+        };
+
+        let src = "x = {name: name, value: value, verified_at: verified_at}\n";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let hits = search(&p_root, &parsed.node(), &prepared, &criteria);
+        assert_eq!(hits.len(), 3, "one match per convertible pair");
+
+        // Distinct pairs, not the same one reported three times.
+        let mut keys: Vec<String> = hits
+            .iter()
+            .map(|m| match m.env.get("K") {
+                Some(Bound::Name(n)) => String::from_utf8_lossy(n).into_owned(),
+                other => panic!("$K should bind an identifier, got {other:?}"),
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["name", "value", "verified_at"]);
+
+        // A pair the constraint declines is still declined, so enumeration has
+        // not turned into "report every split".
+        let mixed = "x = {name: name, value: other}\n";
+        let parsed = ruby_prism::parse(mixed.as_bytes());
         assert_eq!(
             search(&p_root, &parsed.node(), &prepared, &criteria).len(),
             1

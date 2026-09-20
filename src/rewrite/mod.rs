@@ -507,53 +507,55 @@ pub(crate) fn plan(
     let mut sites: Vec<usize> = kept.iter().map(|(i, _)| *i).collect();
     sites.sort_unstable();
     sites.dedup();
-    // Where each surviving site starts, and what its lines become.
+    // Where each change sits, and what its lines become.
     //
     // A count tells a reader how much there is; a location tells a CI annotation
     // where to point; and the replacement text is what lets a review comment
-    // carry an *applicable* suggestion rather than a description of one. All
-    // three were being computed and discarded.
+    // carry an *applicable* suggestion rather than a description of one.
     //
     // Expanded to whole lines because that is the unit a suggestion replaces --
     // GitHub's `suggestion` block substitutes the commented lines entire, so a
     // byte-range replacement would need the rest of the line reconstructed
-    // anyway.
-    let mut at: Vec<Site> = sites
-        .iter()
-        .filter_map(|index| {
-            let mine: Vec<&Edit> = kept
-                .iter()
-                .filter(|(i, _)| i == index)
-                .map(|(_, e)| e)
-                .collect();
-            let start = mine.iter().map(|e| e.start).min()?;
-            let end = mine.iter().map(|e| e.end).max()?;
-            let from = source[..start]
-                .iter()
-                .rposition(|b| *b == b'\n')
-                .map_or(0, |n| n + 1);
-            let to = source[end..]
-                .iter()
-                .position(|b| *b == b'\n')
-                .map_or(source.len(), |n| end + n);
-
-            // The site's own edits applied to its own lines, so the result is
-            // what those lines become and nothing else moves.
+    // anyway. Which is also why the grouping is by *line* and not by match: two
+    // pairs of one hash are two sites sharing one line, and rendering each
+    // against the untouched line makes applying either revert the other.
+    let mut spans: Vec<(usize, usize, Vec<&Edit>)> = Vec::new();
+    for (_, edit) in &kept {
+        let from = source[..edit.start]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |n| n + 1);
+        let to = source[edit.end..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(source.len(), |n| edit.end + n);
+        match spans.last_mut() {
+            // `kept` is ordered by start, so only the previous group can reach
+            // this edit's lines.
+            Some(last) if from <= last.1 => {
+                last.1 = last.1.max(to);
+                last.2.push(edit);
+            }
+            _ => spans.push((from, to, vec![edit])),
+        }
+    }
+    let at: Vec<Site> = spans
+        .into_iter()
+        .map(|(from, to, mut mine)| {
+            // Applied back to front so each edit's offsets stay valid.
+            mine.sort_by_key(|e| std::cmp::Reverse(e.start));
             let mut text = source[from..to].to_vec();
-            let mut ordered: Vec<&&Edit> = mine.iter().collect();
-            ordered.sort_by_key(|e| std::cmp::Reverse(e.start));
-            for edit in ordered {
+            for edit in mine {
                 let (a, b) = (edit.start - from, edit.end - from);
                 text.splice(a..b, edit.text.bytes());
             }
-            Some(Site {
+            Site {
                 start: from,
                 end: to,
                 replacement: String::from_utf8_lossy(&text).into_owned(),
-            })
+            }
         })
         .collect();
-    at.sort_by_key(|s| s.start);
     let mut paired: Vec<SiteCaptures> = sites
         .iter()
         .filter_map(|index| {
@@ -591,7 +593,8 @@ pub(crate) struct Planned {
     /// for one site, so reporting `edits.len()` overstates what a reader sees
     /// in the diff.
     pub sites: usize,
-    /// Each changed site: the lines it occupies and what they become.
+    /// Each changed run of lines and what it becomes -- one per suggestion, so
+    /// sites sharing a line are one entry and `at.len() <= sites`.
     pub at: Vec<Site>,
     /// Matches skipped because a wider edit covered them. Non-zero means a
     /// rerun will make further progress -- the retryable outcome (exit 4).
@@ -1044,6 +1047,16 @@ fn align<'a, 'pr>(
                 }
             }
             None => {
+                // Equal arity is not evidence that the lists line up.
+                // `children()` drops absent optional slots, so `.first($A)` and
+                // `.detect { |$P| $B }` are both two-child calls -- one holding
+                // an argument list where the other holds a block. Pairing those
+                // by index splices the block's text into the argument's span,
+                // and nothing downstream can tell: `verify` reported a parse
+                // error about a hash literal, on source with no hash in it.
+                if diverges(p, t, prepared, t_prepared) {
+                    return None;
+                }
                 triples.push((p, t, x_kids.get(cursor)?));
                 cursor += 1;
             }
@@ -1052,6 +1065,17 @@ fn align<'a, 'pr>(
     // Every target child must be accounted for; a leftover means the alignment
     // is a guess rather than a correspondence.
     (cursor == x_kids.len()).then_some(triples)
+}
+
+/// Whether two children that `align` would pair are different kinds of thing,
+/// and so cannot be the same slot of their parent.
+///
+/// A metavariable stands for any node, so it never diverges -- which is what
+/// keeps this from rejecting every rule that rewrites one shape into another.
+fn diverges(p: &Node<'_>, t: &Node<'_>, prepared: &Prepared, t_prepared: &Prepared) -> bool {
+    matcher::placeholder_name(p, prepared).is_none()
+        && matcher::placeholder_name(t, t_prepared).is_none()
+        && std::mem::discriminant(p) != std::mem::discriminant(t)
 }
 
 /// Replace one target node with its corresponding template node, rendered.
@@ -1207,6 +1231,25 @@ mod tests {
         let out = apply(source.as_bytes(), &planned.edits);
         verify(&out)?;
         Ok(out)
+    }
+
+    /// The plan itself, for assertions about sites and suggestions rather than
+    /// about the rewritten text.
+    fn planned(pattern: &str, template: &str, source: &str) -> Planned {
+        let prepared = prepare::prepare(pattern).expect("pattern prepares");
+        let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let p_node = p_parsed.node();
+        let p_root = matcher::pattern_root(&p_node).expect("single expression");
+
+        let parsed = ruby_prism::parse(source.as_bytes());
+        assert_eq!(parsed.errors().count(), 0, "source does not parse");
+        let hits = matcher::search(
+            &p_root,
+            &parsed.node(),
+            &prepared,
+            &matcher::Criteria::none(),
+        );
+        plan(&hits, &p_root, &prepared, template, source.as_bytes(), &[]).expect("plans")
     }
 
     /// A prefix operator's name and a `.method` name are both `message_loc`,
@@ -1474,6 +1517,44 @@ mod tests {
         verify(&out).expect("still parses");
     }
 
+    /// The same rule one axis over: several bindings on *one* node. Each pair
+    /// of a hash is a separate match of `{**$B, $K: $V, **$A}`, and their
+    /// minimal edits touch disjoint bytes of the shared parent -- so D15 lets
+    /// all of them through and the hash converts in a single pass.
+    #[test]
+    fn several_bindings_on_one_node_all_apply() {
+        let src = "h = {name: name, value: value, verified_at: verified_at}\n";
+        let out = rewrite("{**$B, $K: $V, **$A}", "{**$B, $K:, **$A}", src).unwrap();
+        assert_eq!(out, "h = {name:, value:, verified_at:}\n");
+    }
+
+    /// A `Site` is a suggestion a reviewer clicks, and GitHub substitutes the
+    /// commented lines entire -- so one line must yield one suggestion carrying
+    /// what that line actually becomes. Per-match sites on a shared line each
+    /// rendered their own pair converted and the others left alone, so applying
+    /// one reverted the rest.
+    #[test]
+    fn sites_sharing_a_line_are_one_suggestion() {
+        let planned = planned(
+            "{**$B, $K: $V, **$A}",
+            "{**$B, $K:, **$A}",
+            "h = {a: a, b: b}\n",
+        );
+        assert_eq!(planned.sites, 2, "both pairs converted");
+        let texts: Vec<&str> = planned.at.iter().map(|s| s.replacement.as_str()).collect();
+        assert_eq!(texts, ["h = {a:, b:}"], "one line, one suggestion");
+    }
+
+    /// And the merge is by shared lines, not by "same rule": two hashes on
+    /// different lines stay two suggestions, each showing only its own line.
+    #[test]
+    fn sites_on_separate_lines_stay_separate() {
+        let src = "h = {a: a}\nk = {b: b}\n";
+        let planned = planned("{**$B, $K: $V, **$A}", "{**$B, $K:, **$A}", src);
+        let texts: Vec<&str> = planned.at.iter().map(|s| s.replacement.as_str()).collect();
+        assert_eq!(texts, ["h = {a:}", "k = {b:}"]);
+    }
+
     /// A rewrite that *unwraps* -- the template corresponds to a subtree of the
     /// pattern -- still edits minimally. `.first` is deleted and `select`
     /// renamed, so the chain's layout and the block's spelling survive.
@@ -1482,6 +1563,45 @@ mod tests {
         let src = "x = accounts\n  .select { |a| a.b }\n  .first\n";
         let out = rewrite("$R.select { |$P| $B }.first", "$R.detect { |$P| $B }", src).unwrap();
         assert_eq!(out, "x = accounts\n  .detect { |a| a.b }\n");
+    }
+
+    /// `children()` drops absent optional slots, so two calls can carry the
+    /// same number of children and mean different things: `.first($A)` holds an
+    /// argument list where `.detect { |$P| $B }` holds a block. Paired by index,
+    /// the block's text was spliced into the argument's span, and the only
+    /// complaint came from `verify` three steps later -- a parse error about a
+    /// hash literal, on source with no hash in it.
+    #[test]
+    fn a_trailing_argument_does_not_pair_with_a_block() {
+        let src = "a = xs.select { |x| x.ok? }.first(2)\n";
+        let out = rewrite(
+            "$R.select { |$P| $B }.first($A)",
+            "$R.detect { |$P| $B }",
+            src,
+        )
+        .unwrap();
+        assert_eq!(out, "a = xs.detect { |x| x.ok? }\n");
+    }
+
+    /// The same mispairing the other way round, and there it is *silent*: a
+    /// template's argument list localized onto the target's block wrote
+    /// `xs.pluck name` -- valid Ruby at exit 0, and not the parenthesized call
+    /// the template describes. `verify` only catches the direction that happens
+    /// not to parse, which is why the guard belongs in the alignment.
+    #[test]
+    fn a_block_does_not_pair_with_an_argument_list() {
+        let src = "a = xs.map { |x| x.name }\n";
+        let out = rewrite("$R.map { |$P| $P.$M }", "$R.pluck($M)", src).unwrap();
+        assert_eq!(out, "a = xs.pluck(name)\n");
+    }
+
+    /// The control the defect was found against: the same rewrite without the
+    /// trailing argument, which always worked.
+    #[test]
+    fn the_same_unwrap_without_an_argument_still_works() {
+        let src = "a = xs.select { |x| x.ok? }.first\n";
+        let out = rewrite("$R.select { |$P| $B }.first", "$R.detect { |$P| $B }", src).unwrap();
+        assert_eq!(out, "a = xs.detect { |x| x.ok? }\n");
     }
 
     /// A `do ... end` block survives a rewrite whose template is written with

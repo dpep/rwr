@@ -75,12 +75,21 @@ tests:
       h = { **before, name: name, **after }
     output: |
       h = { **before, name:, **after }
-  # RED, and left red on purpose: a second pair in the same hash is dropped.
-  # Both matches cover the whole hash node, so they overlap and only one
-  # survives -- and the run says `rewrote 1 site(s)` and exits 0, so the caller
-  # believes it is done. Every edit made is correct; the diff is simply half a
-  # conversion, which is the shape a reviewer sends back.
+  # Every pair of one hash converts in a single pass. Each is its own match --
+  # the splat's split point is a real choice, and each choice binds a different
+  # pair -- and their edits touch disjoint bytes, so D15 lets them all through.
+  # This converted one pair per run until D115, while reporting success.
   - input: |
       h = { name: name, value: value }
     output: |
       h = { name:, value: }
+  - input: |
+      h = { name: name, value: value, verified_at: verified_at }
+    output: |
+      h = { name:, value:, verified_at: }
+  # A pair the predicate declines does not stop its neighbours converting, and
+  # does not convert itself.
+  - input: |
+      h = { name: name, value: other, verified_at: verified_at }
+    output: |
+      h = { name:, value: other, verified_at: }
