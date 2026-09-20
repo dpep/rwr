@@ -77,5 +77,36 @@ A stale directive does not fail the build — its finding is already gone, so wh
 remains is tidying — but it is never invisible. This is the mechanism that stops
 a suppression list becoming a permanent monument to work nobody did.
 
+**Name a rule the run does not have and it says that too**, as
+`unknown_suppressions`, separately from stale:
+
+```
+rwr: 1 rwr:ignore directive(s) name a rule this run does not have, so they suppressed nothing:
+  app/models/order.rb:14: style/return_nil -- did you mean `style/return-nil`?
+```
+
+The two mean opposite things. **Stale**: rwr ran that rule and it fired nowhere,
+so the comment is finished work — delete it. **Unknown**: rwr never ran that rule
+at all, so nothing was suppressed and whatever the comment meant to accept is
+probably still live. The suggestion appears when the id differs only by
+namespace, case or separator, which is a typo rather than another pack's id.
+
 **Touch the residue report.** Directives suppress findings and edits. The account
 of what rwr could not see is the product, and nothing here can quiet it.
+
+## Which id to write
+
+A directive names whatever id the run prints, and that depends on how the rule
+was named:
+
+| How you ran it | The id |
+|---|---|
+| a rule file | its `id:`, or the file's stem — `rename.yml` is `rename` |
+| a rule in a pack directory | its path within the pack — `style/return-nil` |
+| a method designator on the command line | the designator itself — `Account#display_name` |
+
+So the same rename suppresses under `rename` from a file and under
+`Account#display_name` inline, and CI logs name it differently depending on which
+one the job runs. Pick one form per repository and a directive written today
+still works next month. If in doubt, run the command and read the id back out of
+`-j`.

@@ -2,71 +2,95 @@
 
 ## Unreleased
 
-**Fixed: renaming an instance method rewrote the class method's macros.** `attr_accessor`,
-`define_method`, `alias_method` and the visibility macros inside `class << self` configure the *class*
-method of that name, so an instance rename that rewrote them broke every class-method caller — and
-reported `residue: []` while doing it. A class-method rename now reaches them, which it previously could
-not. **Rerun any rename of a method whose class also defines one of the same name in `class << self`.**
+**Fixed: renaming an instance method rewrote the class method's macros.**
+`attr_accessor`, `define_method`, `alias_method` and the visibility macros inside
+`class << self` configure the *class* method of that name, so an instance rename
+that rewrote them broke every class-method caller — and reported `residue: []`
+while doing it. The enclosing body now settles which method table a macro lands
+on, so a class rename reaches them, which it previously could not. **Rerun any
+rename of a method whose class also defines one of the same name in
+`class << self`.**
 
-**A class designator resolves against the classes the run can see.** `Account#display_name` finds
-`Billing::Account` where that is the only Account, and means only the top-level one where both exist.
-Previously a namespaced class was unreachable by its short name, `subclasses: true` was inert for one,
-and a top-level rename reached subclasses of its namespaced namesake — on rails, 84% of classes are
-namespaced. **If you relied on a short designator reaching a namespaced class that shares its name with
-a top-level one, qualify it.** Where several classes share a last segment and none is top-level, the
-short name now matches none of them rather than guessing between them — qualify it.
+**A class designator resolves against the classes the run can see.** An
+unqualified name means the class of exactly that name if the run can see one, and
+otherwise the single class whose qualified name ends with it: `Account#display_name`
+finds `Billing::Account` where that is the only Account, and means only the
+top-level one where both exist. Previously a namespaced class was unreachable by
+its short name, `subclasses: true` was inert for one, and a top-level rename
+reached subclasses of its namespaced namesake — on rails, 84% of classes are
+namespaced. Where several classes share a last segment and none is top-level, the
+short name now matches none of them rather than choosing between them. **If you
+relied on a short designator reaching a namespaced class that shares its name
+with a top-level one, qualify it.**
 
-**A designator naming an operator or writer method is refused.** `Account#==` and `User#name=` used to
-fall through to the pattern path, where `#` opens a Ruby comment and the argument silently became the
-bare constant `Account` — a different question, answered at exit 0. All three verbs now refuse at exit 5
-with the same message. Renaming operators and writers is not yet supported; the refusal says so instead
-of answering something else.
+**A designator naming an operator or writer method is refused.** `Account#==` and
+`User#name=` used to fall through to the pattern path, where `#` opens a Ruby
+comment and the argument silently became the bare constant `Account` — a
+different question, answered at exit 0. All three verbs now refuse at exit 5 with
+the same message. Renaming operators and writers is not yet supported; the
+refusal says so instead of answering something else.
 
-**Fixed: a dynamic reach in a file of its own was never reported.** `public_send("display_#{attr}")`
-contains no part of `display_name`, so a file holding only a computed reach was dropped before it was
-ever parsed — and its blind spot with it. The same code written beside the definition was reported all
-along, which is why this survived: splitting a dispatcher from the definition it reaches, as a
-decorator, a serializer or a form object does, is ordinary app structure. 50 files in rails and 55 in
-discourse contain such a reach. **Rerun any rename whose report you trusted as complete.**
+**Fixed: a dynamic reach in a file of its own was never reported.**
+`public_send("display_#{attr}")` contains no part of `display_name`, so a file
+holding only a computed reach was dropped before it was ever parsed — and its
+blind spot with it. The same code written beside the definition was reported all
+along, and splitting a dispatcher from the definition it reaches — a decorator, a
+serializer, a form object — is ordinary app structure: 50 files in rails and 55
+in discourse hold such a reach. **Rerun any rename whose report you trusted as
+complete.**
 
-The prefilter now searches for the dispatchers as well as the name, which makes a rename slower on a
-large repository: `check` over discourse costs roughly half a second more for an uncommon name. The
-account of what a run could not see is worth that.
+The prefilter now searches for the dispatchers as well as the name, which makes a
+rename slower on a large repository: `check` over discourse costs roughly half a
+second more for an uncommon name. The account of what a run could not see is
+worth that.
 
-**Fixed: a rename written as `attr_reader`, `define_method` or `alias_method` reported an empty residue
-list.** 0.6.8 fixed this for a bare `def` pattern (D97) and left the four macro spellings behind: the
-rule claimed to account for the rename, had no name to search for, and printed `residue: []` — which
-reads as "nothing left over" and meant "nothing was looked for", with every caller broken and
-unmentioned. The identical rename spelled as `def` reported all of them. **Rerun any rename written as
-a macro pattern.**
+**Fixed: a rename written as `attr_reader`, `define_method` or `alias_method`
+reported an empty residue list.** 0.6.8 fixed this for a bare `def` pattern (D97)
+and left the four macro spellings behind: the rule claimed to account for the
+rename, had no name to search for, and printed `residue: []` — which reads as
+"nothing left over" and meant "nothing was looked for", with every caller broken
+and unmentioned. The identical rename spelled as `def` reported all of them.
+**Rerun any rename written as a macro pattern.**
 
-**A regexp naming the moved method is now reported as prose.** `/display_name/` is not a string, so
-nothing scanned it and a rename left every pattern written against the old name behind without a word.
-A regexp whose anchor abuts the name (`/\Adisplay_name\z/`) is still missed — the `\A` reads as part
-of the word.
+**A regexp naming the moved method is now reported as prose.** `/display_name/`
+is not a string, so nothing scanned it and a rename left every pattern written
+against the old name behind without a word. A regexp whose anchor abuts the name
+(`/\Adisplay_name\z/`) is still missed — the `\A` reads as part of the word.
 
-**`find` now reports what it could not see, the way `check` already did:** files that did not parse
-(`unparsed`), template occurrences found by text search (`template_residue`, `templates_skipped`), and
-the suppression audit. Previously a Ruby file with a syntax error was dropped from a `find` run with no
-signal on any stream, and the template hit `find` printed in text mode was absent from `-j`.
+**`find` now reports what it could not see, the way `check` already did:** files
+that did not parse (`unparsed`), template occurrences found by text search
+(`template_residue`, `templates_skipped`), and the suppression audit. Previously a
+Ruby file with a syntax error was dropped from a `find` run with no signal on any
+stream, and the template hit `find` printed in text mode was absent from `-j`.
 
-**New `unreadable` field on every report:** a file rwr could not open. It used to answer byte-for-byte
-as an empty file does, under every verb.
+**New `unreadable` field on every report:** a file rwr could not open. It used to
+answer byte-for-byte as an empty file does, under every verb.
 
-**New `unknown_suppressions` field:** a `# rwr:ignore` naming a rule the run does not have. It silenced
-nothing and said nothing; it now says so, and names the rule you probably meant when the id differs only
-by namespace, case or separator. This is kept separate from `stale_suppressions` on purpose — stale
-means rwr ran that rule and it fired nowhere, so delete the comment; unknown means rwr never ran it, so
-the finding it meant to accept may still be live.
+**New `unknown_suppressions` field:** a `# rwr:ignore` naming a rule the run does
+not have. It silenced nothing and said nothing; it now says so, and names the rule
+you probably meant when the id differs only by namespace, case or separator. This
+is kept separate from `stale_suppressions` on purpose — stale means rwr ran that
+rule and it fired nowhere, so delete the comment; unknown means rwr never ran it,
+so the finding it meant to accept may still be live.
 
-**`-J`/`--ndjson` is now the same document as `-j` on one line, for every verb.** `find -J` used to emit
-one bare row per match, which dropped residue and the unread files entirely. If you parse `find -J` line
-by line, read one object instead.
+**`-J`/`--ndjson` is now the same document as `-j` on one line, for every verb.**
+`find -J` used to emit one bare row per match, which dropped residue and the
+unread files entirely. If you parse `find -J` line by line, read one object
+instead.
 
-`--profile`'s `parsed` count no longer counts files that failed to parse, and names the `unparsed` and
-`unreadable` buckets.
+`--profile`'s `parsed` count no longer counts files that failed to parse, and
+names the `unparsed` and `unreadable` buckets.
 
 Report schema 5 → 6.
+
+Docs, from the same round of testing: the worked example for `prose` residue in
+`docs/getting-started.md` was a spec description, which the class-scoped form it
+demonstrated can never report — what scopes residue to a class, and that the
+classless `#display_name` is the wide net, is now written down. The residue report
+goes to **stderr**, which nothing said; the `-d` examples used a parameter list
+that matches only one arity; and `docs/internal/cli-conventions.md` described an
+NDJSON event stream with a `finished` terminator that has never existed, along
+with two flags that were never built.
 
 ## 0.6.8 — 2026-09-07
 

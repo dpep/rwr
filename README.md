@@ -19,7 +19,7 @@ rwr check all app/                     # every built-in rule, read-only
 rwr check all --since main             # only the lines this branch touched
 rwr check all app/x.rb:3-15            # only those lines
 rwr rewrite rule.yml app/              # apply
-rwr rewrite 'def legacy($A); $B; end' -d   # delete, doc comment and all
+rwr rewrite 'def legacy(*$A); $B; end' -d  # delete, doc comment and all
 rwr test my-rules/                     # run the rules' own fixtures
 ```
 
@@ -48,6 +48,13 @@ no file at all. Where a repository has Sorbet signatures, `sig { returns(X) }` i
 read as a return type, so a chain like `parser.document.name` resolves too — no
 RBI parser, no new file format, just Ruby already in the tree. On one real
 monolith 76% of methods carry a signature.
+
+An unqualified class name means the class of exactly that name if the run can see
+one, and otherwise the single class whose qualified name ends with it. Where
+several do — nine `…::LogSubscriber`s and no plain one — it means none of them,
+because choosing between `ActiveSupport::LogSubscriber` and
+`ActionView::LogSubscriber` is precisely the wrong rewrite this tool exists to
+refuse. Qualify the name to say which you meant.
 
 **It tells you what it missed.** Ruby dispatches through symbols, so a rename
 that reaches only call sites leaves `attr_accessor :display_name` behind and the
@@ -162,7 +169,9 @@ like edits do; a lint that exits 0 gates nothing.
 
 **Deletion** is `-d`, or an empty `rewrite:`; `-r ''` means the same. Removing a
 definition takes the doc comment above it and one of the blank lines that
-separated it, so the survivors keep their spacing.
+separated it, so the survivors keep their spacing. Write the parameter list as
+`(*$A)`: a pattern matches arity exactly, so `def legacy($A)` deletes only the
+one-parameter version and reports the rest as residue.
 
 A broken rule is refused before a file is read, naming the rule and the reason —
 an unknown field, a constraint on a capture the pattern never binds, a template
@@ -183,8 +192,15 @@ from the account is the dangerous direction.
 ## For agents, hooks and CI
 
 Everything that prints honors `-j`/`--json`, which emits one document —
-`{schema, rwr_version, changed, findings, residue, template_residue, templates_skipped, unparsed, suppressed, stale_suppressions, malformed_directives}`. `-J`/`--ndjson` streams instead: `find` writes a row per
-match, and `check`/`rewrite` write the report on a single line.
+`{schema, rwr_version, changed, findings, residue, template_residue, templates_skipped, unparsed, unreadable, suppressed, stale_suppressions, unknown_suppressions, malformed_directives}`,
+with `find` carrying `matches` and `interpreted` where the writing verbs carry
+`changed` and `findings`. `-J`/`--ndjson` is that same document on one line, for
+every verb.
+
+Prefer either over the text output in a script. In text mode the matches and the
+per-file counts go to stdout and the account of what rwr could *not* see goes to
+stderr, so a caller that captures stdout alone reads `rewrote 3 site(s)`, exit 0,
+and never learns which sites need a human.
 
 Scoping a run to the lines a change touched is what makes `check` adoptable on a
 codebase that has never run it: three new sites fail, two thousand pre-existing

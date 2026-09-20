@@ -46,14 +46,21 @@ implicit-self calls inside the class — and leaves `Company#display_name` alone
 Anything it could not tie to the method is reported as residue rather than
 claimed as a match.
 
+The enclosing body decides which method a macro configures: `attr_accessor
+:display_name` in the class body is `Account#display_name`, and the identical
+line inside `class << self` is `Account.display_name`. Same bytes, different
+method, so each designator reaches only its own.
+
 A pattern is Ruby and `#` starts a comment, so the notation is the only way to
 say this. Going the other way, the two-part form always means the method, so
 write `Account.display_name()` when you want the literal call shape.
 
 Operator and writer methods — `==`, `<=>`, `[]`, `display_name=` — are not
-supported through the notation yet. rwr names the offending method and refuses,
-rather than reading `Account#==` as a pattern, where it would silently have
-meant the bare constant `Account`.
+supported through the notation yet. rwr names the offending method and refuses at
+exit 5, rather than reading `Account#==` as a pattern, where it would silently
+have meant the bare constant `Account`. A plain pattern still finds the
+definition — `rwr find 'def ==(*$A); $B; end' app/` — but that is a shape match,
+without the receiver narrowing or the residue account the notation gives you.
 
 ### Namespaced classes
 
@@ -65,9 +72,16 @@ that has both.
 
 When several classes share a last segment and none is top-level — nine
 `…::LogSubscriber`s and no plain one — the short name matches none of them.
-Write the qualified name, `ActiveSupport::LogSubscriber#logger`, to say which
-you mean. Constants written in your source resolve the way Ruby resolves them,
-against the enclosing module nesting.
+Picking one would be a rename applied to the wrong class, which is the failure
+the whole tool exists to prevent, so rwr picks none and you write the qualified
+name: `ActiveSupport::LogSubscriber#logger`.
+
+**An ambiguous name looks exactly like a missing one** — zero sites, exit 1, and
+nothing saying why. So when a designator you expected to hit comes back empty,
+qualify it before concluding the method isn't there.
+
+Constants written in your source resolve the way Ruby resolves them, against the
+enclosing module nesting.
 
 ## Change something
 
@@ -81,7 +95,7 @@ rwr rewrite 'foo($A)' -r 'bar($A)' app/   # apply
 ## Delete something
 
 ```sh
-rwr rewrite 'def legacy_total; $B; end' -d app/
+rwr rewrite 'def legacy_total(*$A); $B; end' -d app/
 ```
 
 Deletion takes the whole unit — the definition, the comment written directly
@@ -89,6 +103,14 @@ above it, and one of the blank lines that separated it, so the survivors keep
 their spacing. `-r ''` means the same thing. A match that does not occupy whole
 lines is refused: deleting `a.name` out of `x = a.name` would leave `x = `,
 which swallows the line below and still parses.
+
+**Write the parameter list as `(*$A)`.** A pattern matches arity exactly, so
+`def legacy_total($A)` finds only the one-parameter version and `def legacy_total`
+only the zero-parameter one. `*$A` captures a run, so it covers every arity.
+Get it wrong and the method comes back as residue, the file keeps every byte,
+and — because `rewrite` never exits 1 — the run still exits 0. A deletion that
+deleted nothing and a deletion that worked have the same exit code, so read the
+output, not the status.
 
 ## Rename a method
 
@@ -126,6 +148,12 @@ finishing the rename.
 It prints unconditionally. The account of what rwr could not see is the product,
 not a diagnostic, so it is never behind a verbosity flag.
 
+**It prints on stderr.** The matches and the per-file counts go to stdout; the
+residue report, the blind-spot warnings and the `read … as` line go to stderr.
+A script that captures stdout alone sees `rewrote 3 site(s)` and exit 0, and
+never learns that four sites need a human. Capture both, or use `-j`, which puts
+everything in one document on stdout.
+
 Each entry carries a `context` saying what kind of occurrence it is, which is
 what to triage on:
 
@@ -135,10 +163,23 @@ what to triage on:
 | `symbol` | a symbol handed to something that dispatches (`delegate`, `send`, a serializer) | usually |
 | `definition` | another definition of the name | depends — an override breaks, an unrelated class's method does not |
 | `string` | a string that *is* the name | maybe — `send("x")` breaks, a SQL column does not |
-| `prose` | the name mentioned inside a longer string — an error message, a spec description | no, but it is now stale |
-| `comment` | the name in prose | no, but it is now stale |
+| `prose` | the name inside a longer string or regexp — `raise ArgumentError, "display_name needs a Router"` | no, but it is now stale |
+| `comment` | the name in a Ruby comment | no, but it is now stale |
 | `text` | found by text search in a template rwr cannot parse | weaker evidence than anything above |
 | `dynamic` | a dispatch on a *computed* name, in this class | unknowable — this is rwr saying it is blind here |
+
+**The class you name sets how far prose and comments are searched.** Those two
+are kept inside that class, its contributors and its subclasses — unscoped,
+renaming a name as ordinary as `name` would report every sentence in the
+repository containing the word. So `Account#display_name` reports the error
+message *inside* `Account` and not the spec description outside it. Calls are not
+scoped this way: a call is a reach wherever it lives.
+
+The classless form has no class to scope by, which makes it the wide net:
+
+```sh
+rwr find '#display_name' app/     # every mention, spec descriptions included
+```
 
 rwr deliberately does not put a confidence number on these. Measured against the
 testbed's ground truth, `definition` splits evenly between breaking and not, and
@@ -151,6 +192,23 @@ over. **Absent**: this rule moves no name, so there is nothing it could be
 incomplete about — a `return nil` → `return` rule has no leftovers by
 construction. Reading absent as empty gives "nothing to review", which is right;
 only a consumer asking whether a *rename* is complete needs the difference.
+
+## The rest of the blind spots
+
+Residue is what rwr read and could not attribute. Four more kinds of gap say what
+it never read at all, on every report from every verb:
+
+| Field | What it means |
+|---|---|
+| `unparsed` | a Ruby file with a syntax error — nothing in it was searched |
+| `unreadable` | a file rwr could not open, usually permissions — likewise |
+| `templates_skipped` / `template_residue` | a template rwr cannot parse (Haml), text-searched instead; grep-grade evidence |
+| `unknown_suppressions` | a `# rwr:ignore` naming a rule this run does not have, so it suppressed nothing — see [suppressing findings](suppressing.md) |
+
+`unparsed` and `unreadable` are the same blind spot with opposite fixes — one is
+the file's problem, the other your permissions' — which is why they are separate
+lists. Neither changes the exit code: eighty matches plus one unreadable vendored
+file is a successful run with a gap declared in it.
 
 ## Apply the built-in rules
 
@@ -189,7 +247,10 @@ rwr check all app/x.rb:3-15                   # or name the lines yourself
 | 5 | refused — ambiguity, and zero edits were made |
 
 `rewrite` never exits 1: having applied whatever there was to apply is success.
-It reports falling short with 4 or 5 instead. Only `rewrite` exits 4 — `check`
-writes nothing, so it has nothing to defer.
+It reports falling short with 4 or 5 instead. So a rewrite that matched nothing
+and a rewrite that changed the whole repository both exit 0 — branch on the
+output, not the status. Only `rewrite` exits 4; `check` writes nothing, so it has
+nothing to defer.
 
-Add `-j` (JSON) or `-J` (NDJSON) whenever something will parse the output.
+Add `-j` whenever something will parse the output. `-J` is the same document
+printed on a single line, for a consumer that reads line by line.

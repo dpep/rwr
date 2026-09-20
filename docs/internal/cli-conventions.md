@@ -13,22 +13,28 @@ JSON/exit-code contract, and the total absence of scoping in `DESIGN.md` §8.
 ## Structured output
 
 - `-j` / `--json` — a single object with named arrays, not a bare array.
-- `-J` / `--ndjson` — a **tagged event stream**, one compact object per line.
+- `-J` / `--ndjson` — **the same object, printed on one line**.
 - Mutually exclusive.
 - **Every command that prints anything honors both**, not just `find`.
 
-A homogeneous array cannot carry what rwr emits: matches, skipped files, residue
-occurrences, conflicts, and a summary are heterogeneous records. So `--json` follows
-semgrep's multi-array object shape, and `--ndjson` follows cargo's `--message-format json`:
-every line carries a discriminator — `match`, `edit`, `skip`, `residue`, `conflict`,
-`error`, `finished`.
+A homogeneous array cannot carry what rwr emits: matches, residue occurrences, unread files,
+the suppression audit and a summary are heterogeneous records. So `--json` follows semgrep's
+multi-array object shape.
 
-**The `finished` terminator is load-bearing.** An agent reading a truncated NDJSON stream —
-killed process, full disk — cannot otherwise distinguish "done, nothing more" from "died
-halfway." ripgrep ships the same thing as its `summary` message.
+**`-J` is `-j` on one line, for every verb** — not an event stream. A row-per-match shape was
+tried for `find` and reversed: a row has nowhere to put residue, the unread files or the
+suppression audit, so the flag the agent guidance tells callers to reach for was the one that
+dropped the blind-spot account. There is no discriminator and no `finished` terminator, and
+there never was one in the binary. A consumer that wants incremental rows is asking for a
+different product; a consumer that wants one parse per run gets it from either flag.
 
-Also adopt cargo's defensive-parsing guidance for consumers: only interpret a line as JSON
-if it starts with `{`, since a subprocess may write to the same stdout.
+Adopt cargo's defensive-parsing guidance for consumers: only interpret a line as JSON if it
+starts with `{`, since a subprocess may write to the same stdout.
+
+**Findings go to stdout, the account of blind spots to stderr** — in text mode. Matches and
+per-file counts are stdout; residue, unparsed/unreadable warnings, the suppression audit and
+the `read … as` line are stderr. `-j`/`-J` put all of it in the one document on stdout, which
+is the reason to prefer them in any script.
 
 - **Field names stay stable across commands.** A location is always
   `{file, line, col, byte_start, byte_end}`; a rule is always `rule`; captures are always
@@ -56,9 +62,14 @@ commit where a rule correctly matches nothing. ast-grep splits `run` (grep polar
 
 | Verb | 0 | 1 | 2 | 3 | 4 | 5 |
 |---|---|---|---|---|---|---|
-| `find` | matched | no match | error | pattern/rule parse error | — | — |
-| `rewrite` | matched / rewrote | no match | error | pattern/rule parse error | retryable | refused |
+| `find` | matched | no match | error | pattern/rule parse error | — | refused |
+| `rewrite` | applied, or nothing to apply | — | error | pattern/rule parse error | retryable | refused |
 | `check` | clean | violations found | error | pattern/rule parse error | — | refused |
+
+**`rewrite` never returns 1**, and `each_verb_keeps_its_polarity` pins that. Having applied
+whatever there was to apply is success; falling short is 4 or 5. The cost is that a caller
+cannot tell "rewrote nothing" from "rewrote everything" by status alone — it has to read the
+output, which is the trade the polarity buys.
 
 `3` separates a **pattern** parse failure from a **source file** parse failure — jq splits
 compile-time from runtime errors the same way, and the two need different responses: fix the
@@ -73,11 +84,13 @@ matched; rwr does not. DESIGN.md §4 says unparseable files are reported and ski
 matches plus one unreadable vendored file is **exit 0 with the skip in the JSON**. This
 differs from rg and must be documented, because callers will assume otherwise.
 
-`--exit-zero-on-no-match` (plus `RWR_EXIT_ZERO_ON_NO_MATCH`) is available and baked into the
-shipped hook definitions. Not the default.
-
-Document every code in `rwr help exit-codes`, not only here — jq's manual documents four of
-its five codes, and the undocumented one is a trap.
+**Not built, though this file used to claim otherwise:** `--exit-zero-on-no-match` /
+`RWR_EXIT_ZERO_ON_NO_MATCH`, the shipped hook definitions that were said to bake it in, and
+`rwr help exit-codes`. All three are proposals from `ux-research.md` that this file recorded
+in the present tense, and a user-testing round went looking for them on that word. They are
+worth building — jq's manual documents four of its five codes and the undocumented one is a
+trap — but until they exist, the codes are documented in `README.md`, `docs/getting-started.md`
+and `--help`, and nowhere else.
 
 ## Scoping
 
@@ -117,10 +130,11 @@ rq has `-e` / `--explain` to show the additive score breakdown behind a ranking,
 principle that **ranking is explainable**.
 
 rwr has no ranking, but the same principle transfers to the thing rwr must justify:
-**why a match was skipped, refused, or flagged.** `--explain` should print, per match, which
-constraint in the `where:` block rejected it, or which conflict suppressed it, or why a
-residue occurrence was classified as it was. This is the debugging surface for the refusal
-contract, and without it "rwr refused" is unactionable.
+**why a match was skipped, refused, or flagged.** `-e`/`--explain` prints, per match, which
+constraint in the `where:` block declined it, and which rules were held back and why. This is
+the debugging surface for the refusal contract, and without it "rwr refused" is unactionable.
+Still missing: the reason a residue occurrence was classified as it was, and `find -e -j`
+computes its rejections and then drops them from the document.
 
 ## Declarative flag conflicts
 

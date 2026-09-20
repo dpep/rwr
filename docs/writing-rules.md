@@ -115,13 +115,18 @@ matches nothing.
 
 | Key | Means |
 |---|---|
-| `id:` | what the rule is called in reports; defaults to the file's name, or its path within a pack |
+| `id:` | what the rule is called in reports; defaults to the file's stem, or its path within a pack |
 | `ruby:` | the lowest Ruby version this rule's *output* parses on |
 | `unsafe:` | why the rewrite can change behaviour (below) |
 | `tests:` | fixtures (below) |
 
 An unknown key is refused rather than ignored: `wher:` for `where:` would
 otherwise run the rule *without its constraint*.
+
+A designator given on the command line is its own id, so the same rename reports
+as `rename` from `rename.yml` and as `Account#display_name` inline — which
+matters when you write an `rwr:ignore` against it, or read it back out of a CI
+log. See [which id to write](suppressing.md#which-id-to-write).
 
 `ruby: "3.1"` holds the rule back on an older codebase. Nothing else can catch
 that — `{foo:}` is a syntax error before 3.1, and Prism parses the output
@@ -196,6 +201,12 @@ without it a fixture pins only what the rule rewrote. `residue:` on a rule that
 moves no name is refused — it would pass at zero forever. A case may assert
 several things at once, and all of them are checked. A pack that declares no
 fixtures at all is an error, not a pass.
+
+A rule only has residue to report when it knows which *one* name is moving. A
+pattern that spells the name does — `def display_name`, `attr_reader
+:display_name`. `def $M($A); $B; end` does not: the metavariable fixes no name,
+so the rule has nothing to search for, and `residue: 0` is the honest
+expectation rather than a sign it missed nothing.
 
 Refused rather than run, because each would let a fixture pass without claiming
 anything: a case that asserts nothing, `output:` together with `unchanged:`,
