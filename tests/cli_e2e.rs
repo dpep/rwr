@@ -3346,3 +3346,35 @@ fn a_macro_rename_accounts_for_what_it_missed() {
     assert!(account.contains("could not account for"), "{account}");
     assert!(account.contains("account.display_name"), "{account}");
 }
+
+/// A macro inside `class << self` configures the **class** method, so an
+/// instance rename must leave it alone and a class rename must reach it.
+///
+/// D94 gave the definition rules a singleton guard; D90's macro rules, added in
+/// the same release, were left unconstrained, so `Account#display_name` renamed
+/// `attr_accessor :display_name` in the singleton body -- a `NoMethodError` for
+/// every caller of `Account.display_name`. The round-trip property test passes
+/// byte-for-byte on that output, because the wrong rewrite is reversible.
+#[test]
+fn a_singleton_macro_belongs_to_the_class_method() {
+    let dir = fixture(
+        "class Account\n  def display_name\n    \"instance\"\n  end\n\n  class << self\n    \
+         attr_accessor :display_name\n    define_method(:display_name) { \"class\" }\n    \
+         private :display_name\n  end\nend\n",
+    );
+    let path = dir.path().to_str().expect("utf8");
+
+    let instance = rwr(&["check", "Account#display_name", "-r", "full_name", path]);
+    let text = String::from_utf8_lossy(&instance.stdout);
+    assert!(
+        text.contains("would rewrite 1 site"),
+        "only the instance `def` is this method: {text}"
+    );
+
+    let class = rwr(&["check", "Account.display_name", "-r", "full_name", path]);
+    let text = String::from_utf8_lossy(&class.stdout);
+    assert!(
+        text.contains("would rewrite 3 site"),
+        "the three singleton macros are the class method's: {text}"
+    );
+}

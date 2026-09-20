@@ -2492,3 +2492,36 @@ all three remaining spellings for ordinary reasons: `define_method(:x) { $B }` o
 metavariable. A definer's anchors are the names its literal symbol and string arguments spell; a
 placeholder argument fixes no name, which is `def $M`'s answer again. Not reached: `enum status: {...}`,
 whose names are hash keys, and `Account.class_eval { attr_reader :x }`, which is not a definer call.
+
+## D98 - A macro belongs to the method table of the body it sits in
+**Decided.** Fixes a wrong rewrite shipped by D90; narrows D90, changes nothing else.
+
+`attr_accessor :display_name` in a class body defines `Account#display_name`. The same line inside
+`class << self` defines `Account.display_name` -- a different method, with different callers. The
+line is byte-identical; only the enclosing body distinguishes them.
+
+D94 gave the *definition* rules an `in_singleton(false/true)` guard for exactly this reason. D90's
+*macro* rules shipped in the same release without one, so `rwr check 'Account#display_name'
+-r full_name` over a class whose `class << self` holds `attr_accessor`, `define_method` and
+`private` for the same name reported **four** sites and rewrote all four. Three of them configure
+the class method, and renaming them is a `NoMethodError` for every caller of `Account.display_name`.
+Exit 0, no residue, nothing said.
+
+**The allowlist and the body are one decision, not two.** D90 argued the allowlist decides *whose*
+method a symbol configures -- "every symbol the macro takes must land on the enclosing class". That
+is only half the question: which of the enclosing class's two method tables it lands on is the other
+half, and it is settled by the same lexical fact. So the two travel together now: the attr and
+visibility family reaches the instance table from the class body and the class table from
+`class << self`, `define_method`/`alias_method` likewise, and `private_class_method` /
+`public_class_method` -- the one pair that names a class method *from* the class body -- stays at
+`singleton: false` for the class rename.
+
+**The mirror mattered as much as the bug.** Before this, `define_method(:x)` inside `class << self`
+was rewritten by *either* rename, and the singleton `attr_accessor` only by the wrong one. A class
+rename now reaches the singleton body's macros, which it previously could not.
+
+**Why the suite was green.** `the_hash_form_stays_out_of_the_singleton` asserted on `rules[0]`; the
+unguarded rules were 5-9. And the identity/round-trip property test passes byte-for-byte on the
+wrong output, because renaming the wrong method is perfectly reversible. An assertion that a wrong
+behaviour also satisfies is worth nothing -- both tests now loop over every scoped rule, and the
+e2e fixture asserts the site *count* each direction.

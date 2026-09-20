@@ -735,37 +735,47 @@ impl MethodRename {
         // `attr_accessor :a, :display_name, :b` keeps its siblings and its
         // layout, because only the one symbol is spliced.
         if class.is_some() {
-            let macros = match kind {
-                Kind::Instance => [
-                    "attr",
-                    "attr_reader",
-                    "attr_accessor",
-                    "attr_writer",
-                    "private",
-                    "public",
-                    "protected",
-                    "module_function",
-                ]
-                .as_slice(),
-                // A class method's visibility is set by its own pair, and the
-                // attr family has no class-side spelling.
-                Kind::Class => ["private_class_method", "public_class_method"].as_slice(),
+            // Which body a macro has to sit in is part of *which method* it
+            // configures, so it belongs here with the allowlist. `attr_accessor
+            // :display_name` in the class body defines `Account#display_name`;
+            // the same line inside `class << self` defines `Account.display_name`,
+            // a different method with different callers. The macro rules shipped
+            // without the guard the definition rules got, so an instance rename
+            // rewrote both (D98).
+            const ON_THE_ENCLOSING_TABLE: &[&str] = &[
+                "attr",
+                "attr_reader",
+                "attr_accessor",
+                "attr_writer",
+                "private",
+                "public",
+                "protected",
+                "module_function",
+            ];
+            // The one pair that names a *class* method from the *instance*
+            // body, which is why it cannot share a singleton flag with the rest.
+            const FROM_THE_CLASS_BODY: &[&str] = &["private_class_method", "public_class_method"];
+            let groups: &[(&[&str], bool)] = match kind {
+                Kind::Instance => &[(ON_THE_ENCLOSING_TABLE, false)],
+                Kind::Class => &[(ON_THE_ENCLOSING_TABLE, true), (FROM_THE_CLASS_BODY, false)],
             };
-            let mut macro_names = HashMap::new();
-            macro_names.insert(
-                "$MACRO".to_string(),
-                Constraint {
-                    name: Some(macros.iter().map(|m| (*m).to_string()).collect()),
+            for (spellings, singleton) in groups {
+                let mut macro_names = HashMap::new();
+                macro_names.insert(
+                    "$MACRO".to_string(),
+                    Constraint {
+                        name: Some(spellings.iter().map(|m| (*m).to_string()).collect()),
+                        ..Default::default()
+                    },
+                );
+                rules.push(Rule {
+                    pattern: format!("$MACRO(*$BEFORE, :{name}, *$AFTER)"),
+                    rewrite: Some(format!("$MACRO(*$BEFORE, :{new}, *$AFTER)")),
+                    constraints: macro_names,
+                    scope: in_singleton(*singleton),
                     ..Default::default()
-                },
-            );
-            rules.push(Rule {
-                pattern: format!("$MACRO(*$BEFORE, :{name}, *$AFTER)"),
-                rewrite: Some(format!("$MACRO(*$BEFORE, :{new}, *$AFTER)")),
-                constraints: macro_names,
-                scope: scope(),
-                ..Default::default()
-            });
+                });
+            }
 
             // `define_method` and `alias_method` name one method in a fixed
             // position rather than a list, so the list form cannot reach them.
@@ -795,7 +805,10 @@ impl MethodRename {
                 rules.push(Rule {
                     pattern,
                     rewrite: Some(rewrite),
-                    scope: scope(),
+                    // Same singleton reasoning as the macros above: a
+                    // `define_method` in a singleton body defines the class
+                    // method, and either rename used to claim it.
+                    scope: in_singleton(kind == Kind::Class),
                     ..Default::default()
                 });
             }
@@ -1483,11 +1496,44 @@ mod tests {
         };
         let rules = rename.expand();
         assert_eq!(rules[0].pattern, "def display_name(*$P); $B; end");
-        assert_eq!(
-            rules[0].scope.singleton,
-            Some(false),
-            "an instance rename must decline a `class << self` definition"
-        );
+        // Every scoped rule, not just the first. Asserting on `rules[0]` alone
+        // is how the macro rules shipped unguarded for a release: they are
+        // rules 5-9, and the round-trip property test passes on their wrong
+        // output because the wrong rewrite is reversible.
+        for rule in rules.iter().filter(|r| r.scope.inside.is_some()) {
+            assert_eq!(
+                rule.scope.singleton,
+                Some(false),
+                "an instance rename must decline `class << self`: {}",
+                rule.pattern
+            );
+        }
+    }
+
+    /// The same `attr_accessor :display_name` defines `Account#display_name` in
+    /// the class body and `Account.display_name` in `class << self`. A rule
+    /// scoped to a class that leaves `singleton:` open therefore claims both,
+    /// and one of the two is always the wrong method. `def self.x` is the one
+    /// exemption: it names its own receiver, so the source says which table.
+    #[test]
+    fn every_class_scoped_rule_states_which_method_table_it_means() {
+        for method in ["Account#display_name", "Account.display_name"] {
+            let rules = MethodRename {
+                method: method.into(),
+                rename: Some("full_name".into()),
+            }
+            .expand();
+            for rule in rules
+                .iter()
+                .filter(|r| r.scope.inside.is_some() && !r.pattern.contains("def self."))
+            {
+                assert!(
+                    rule.scope.singleton.is_some(),
+                    "{method} leaves the method table open: {}",
+                    rule.pattern
+                );
+            }
+        }
     }
 
     #[test]
