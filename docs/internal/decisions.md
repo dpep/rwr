@@ -2630,6 +2630,27 @@ Measured -- classes living under a last segment shared by two or more classes: r
 (23%), discourse 687/7,066 (10%), mastodon 505/2,076 (24%). Mastodon's worst shared segment is
 `Account`, with 16.
 
+**A receiver is read where it is written** -- amended. The lexical rule above reached superclasses
+and mixins because each was written at a site that remembered it; a **bare constant receiver** was
+returned as written. `Account.new.display_name` inside `module Billing` was the top-level `Account`:
+rewritten by a rename of *that* class -- `NoMethodError`, exit 0, nothing in residue -- and filed as
+*residue* by a rename of `Billing::Account`. One name meaning two classes in one run, which is the
+split this decision exists to close. The same literal reading reached a receiver inferred from an
+assignment (`a = Account.new; a.display_name`), because that goes through `resolve_type` too.
+
+`resolve_type` now reads both constant shapes through `Hierarchy::written_at`, which is `resolve`
+with the match's own enclosing class.
+
+Measured incidence for this half is **zero**: 102 bare receivers on mastodon and 663 on rails resolve
+to a namespaced class while a top-level namesake exists, and none of them is a shape rwr resolves
+(`Name.klass_method`, `Name.new.instance_method`) where the namesake also defines the method. Fixed
+because the inconsistency is the bug, not because a corpus demanded it -- a rule applied in some
+places and not others is how this arrived, twice.
+
+The matcher's own unit tests could not see it: `applied` ran against an empty `Hierarchy`, where
+every name resolves to itself, so every question routed through it was a string comparison. It now
+builds one from the test's own source, as it already did for signatures.
+
 **One spelling, not two.** `hierarchy::constant_name` is now `matcher::qualified` re-exported rather
 than a second implementation, and `links` names every class through the matcher's own
 `scope_name_of` / `enclosing_class`. Two modules that spell a class differently are talking about

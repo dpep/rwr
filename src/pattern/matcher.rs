@@ -754,6 +754,7 @@ pub(crate) fn verdict(
                 singleton: found.singleton,
                 locals: &found.locals,
                 sigs,
+                hierarchy,
             };
             let Some(resolved) = resolve_type(node, &at) else {
                 return unresolved(false, None);
@@ -796,6 +797,7 @@ pub(crate) fn verdict(
                 singleton: found.singleton,
                 locals: &found.locals,
                 sigs,
+                hierarchy,
             };
             let Some(resolved) = resolve_type(node, &at) else {
                 return refused(None);
@@ -924,7 +926,11 @@ fn identifier_of(bound: &Bound<'_>) -> Option<Vec<u8>> {
 ///
 /// Covers locals and instance variables alike. Instance variables are 5.7% of
 /// rails call receivers and overwhelmingly assigned once in `initialize`.
-fn assigned_class(node: &Node<'_>) -> Option<(String, String)> {
+fn assigned_class(
+    node: &Node<'_>,
+    scope: &[String],
+    hierarchy: &Hierarchy,
+) -> Option<(String, String)> {
     let (name, value) = match node {
         Node::LocalVariableWriteNode { .. } => {
             let write = node.as_local_variable_write_node()?;
@@ -941,16 +947,19 @@ fn assigned_class(node: &Node<'_>) -> Option<(String, String)> {
         return None;
     }
     // `X.new` yields an *instance*, whatever the receiver's own kind was. The
-    // receiver here is a constant, which needs nothing from the surroundings.
+    // receiver is a constant, so locals and signatures have nothing to say --
+    // but the scope does, because which class `X` names depends on where it is
+    // written (D100).
     let empty = crate::sigs::Signatures::default();
     let locals = HashMap::new();
     let class = resolve_type(
         &call.receiver()?,
         &Where {
-            scope: &[],
+            scope,
             singleton: false,
             locals: &locals,
             sigs: &empty,
+            hierarchy,
         },
     )?;
     Some((
@@ -963,11 +972,16 @@ fn assigned_class(node: &Node<'_>) -> Option<(String, String)> {
 ///
 /// Ruby does not care what order methods appear in, so neither should rwr: a
 /// read written above the `initialize` that assigns it must still resolve.
-fn collect_ivars(class: &Node<'_>, locals: &mut HashMap<String, String>) {
+fn collect_ivars(
+    class: &Node<'_>,
+    locals: &mut HashMap<String, String>,
+    scope: &[String],
+    hierarchy: &Hierarchy,
+) {
     let mut stack = vec![generated::dup(class)];
     while let Some(node) = stack.pop() {
         if matches!(node, Node::InstanceVariableWriteNode { .. })
-            && let Some((name, class)) = assigned_class(&node)
+            && let Some((name, class)) = assigned_class(&node, scope, hierarchy)
         {
             locals.insert(name, class);
         }
@@ -1035,23 +1049,27 @@ pub(crate) struct Where<'a> {
     pub locals: &'a HashMap<String, String>,
     /// Return types stated by Sorbet signatures, when the repo has any.
     pub sigs: &'a crate::sigs::Signatures,
+    /// What the run knows about classes, for reading a written constant the way
+    /// Ruby reads it at this position (D100).
+    pub hierarchy: &'a Hierarchy,
 }
 
 pub(crate) fn resolve_type(node: &Node<'_>, at: &Where<'_>) -> Option<Receiver> {
     let (scope, singleton) = (at.scope, at.singleton);
     match node {
-        // A bare constant names the class *object*, so a call on it dispatches
-        // to a singleton method.
-        Node::ConstantReadNode { .. } => {
-            let name = node.as_constant_read_node()?.name().as_slice().to_vec();
-            String::from_utf8(name).ok().map(Receiver::Class)
-        }
-        // `Billing::Account` denotes a class called `Billing::Account`, spelled
-        // the way `scope_name_of` spells the declaration. Returning the last
-        // segment made every namesake one class on the call side -- and
-        // `same_class` short-circuits on string equality, so the hierarchy
-        // could not separate them afterwards (D100).
-        Node::ConstantPathNode { .. } => qualified(node).map(Receiver::Class),
+        // A constant names the class *object*, so a call on it dispatches to a
+        // singleton method. Spelled the way `scope_name_of` spells the
+        // declaration, and read where it was written: `Account` inside `module
+        // Billing` is `Billing::Account`, as it is for a superclass or a mixin.
+        // Taking either spelling literally made namesakes one class on the call
+        // side, and `same_class` short-circuits on string equality, so the
+        // hierarchy could not separate them afterwards (D100).
+        Node::ConstantReadNode { .. } | Node::ConstantPathNode { .. } => qualified(node)
+            .map(|written| {
+                at.hierarchy
+                    .written_at(&written, enclosing_class(scope).as_deref())
+            })
+            .map(Receiver::Class),
         // `self` is the class inside `def self.x` or `class << self`, and an
         // instance inside an ordinary method body.
         Node::SelfNode { .. } => scope.last().cloned().map(|n| {
@@ -1131,13 +1149,18 @@ pub(crate) fn resolve_type(node: &Node<'_>, at: &Where<'_>) -> Option<Receiver> 
 /// saying which it meant. `Account#display_name` and `Company#display_name` are
 /// different methods, and a rule with no `type:` constraint renames both at
 /// exit 0 -- the clean, confident, wrong rewrite that Q10 calls the real danger.
-pub(crate) fn receiver_class(found: &Match<'_>, sigs: &crate::sigs::Signatures) -> Option<String> {
+pub(crate) fn receiver_class(
+    found: &Match<'_>,
+    hierarchy: &Hierarchy,
+    sigs: &crate::sigs::Signatures,
+) -> Option<String> {
     let receiver = found.node.as_call_node()?.receiver()?;
     let at = Where {
         scope: &found.scope,
         singleton: found.singleton,
         locals: &found.locals,
         sigs,
+        hierarchy,
     };
     resolve_type(&receiver, &at).map(|r| r.class_name().to_string())
 }
@@ -1561,7 +1584,7 @@ fn walk<'pr>(
 ) {
     // Recorded before matching so an assignment is visible to uses that follow
     // it in the same body, which is the order source is written in.
-    if let Some((name, class)) = assigned_class(target) {
+    if let Some((name, class)) = assigned_class(target, &state.scope, criteria.hierarchy) {
         state.locals.insert(name, class);
     }
 
@@ -1639,7 +1662,7 @@ fn walk<'pr>(
         // rwr: a class's instance-variable assignments are collected up front
         // rather than discovered in source order, or `@account.foo` in a method
         // written above `initialize` would not resolve.
-        collect_ivars(target, &mut state.locals);
+        collect_ivars(target, &mut state.locals, &state.scope, criteria.hierarchy);
     }
     // A method body is a fresh *local* scope, so locals must not leak across it
     // -- but an instance variable belongs to the class and is typically
@@ -1758,9 +1781,12 @@ mod tests {
         let p_root = pattern_root(&p_result.node()).expect("single-statement pattern");
         let t_result = ruby_prism::parse(source.as_bytes());
         assert_eq!(t_result.errors().count(), 0, "target does not parse");
-        let hierarchy = Hierarchy::default();
-        // Built from the same source, so a test can exercise signature-driven
-        // resolution through the path a real run takes.
+        // Both built from the same source, so a test exercises class resolution
+        // and signature-driven resolution through the path a real run takes.
+        // The hierarchy used to be empty here, which made every question routed
+        // through it -- descent, aliases, and reading a constant where it was
+        // written -- a string comparison no unit test could tell apart.
+        let hierarchy = Hierarchy::from_source(source);
         let sigs = crate::sigs::Signatures::from_sources(&[crate::source::Source::Owned(
             source.as_bytes().to_vec(),
         )])
@@ -2777,6 +2803,28 @@ end
         assert_eq!(applied(&qualified, "Billing::Account.display_name\n"), 1);
         assert_eq!(applied(&qualified, "Sales::Account.display_name\n"), 0);
         assert_eq!(applied(&qualified, "Account.display_name\n"), 0);
+    }
+
+    /// A receiver written without its namespace means what Ruby means by it.
+    ///
+    /// D100's lexical rule reached superclasses and mixins; the bare-constant
+    /// receiver stayed literal, so `Account.new` inside `module Billing` was the
+    /// top-level namesake -- matched by a rule about the wrong class, and missed
+    /// by the rule about the right one. Both directions, because one name meant
+    /// two things in the same run.
+    #[test]
+    fn a_bare_receiver_is_read_where_it_is_written() {
+        let on = |class: &str| {
+            format!(
+                "match: $R.display_name\nwhere:\n  $R:\n    type: {class}\nrewrite: $R.full_name\n"
+            )
+        };
+        let source = "class Account\n  def display_name; end\nend\n\
+                      module Billing\n  class Account\n    def display_name; end\n  end\n  \
+                      class Invoice\n    def who\n      Account.new.display_name\n    end\n  \
+                      end\nend\n";
+        assert_eq!(applied(&on("Account"), source), 0, "not the top-level one");
+        assert_eq!(applied(&on("Billing::Account"), source), 1, "the sibling");
     }
 
     /// `Widget.new` is an instance; `Widget` is the class object. A constructor

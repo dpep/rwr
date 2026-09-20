@@ -363,6 +363,19 @@ impl Hierarchy {
         }
     }
 
+    /// The class a constant written in source names, read where it was written.
+    ///
+    /// The call side's half of D100's lexical rule. A superclass and a mixin
+    /// already go through `resolve`; a receiver did not, so `Account.new`
+    /// inside `module Billing` meant the top-level namesake there and
+    /// `Billing::Account` everywhere else in the same run.
+    pub(crate) fn written_at(&self, name: &str, enclosing: Option<&str>) -> String {
+        self.resolve(&Ref {
+            written: name.to_string(),
+            enclosing: enclosing.map(str::to_string),
+        })
+    }
+
     /// The class a bare name means, followed through any constant aliases.
     ///
     /// `Alias = Account` makes `Alias` a second name for one class, so every
@@ -759,6 +772,38 @@ mod tests {
         );
         assert!(h.contributes_to("Billing::Helpers", "Account"));
         assert!(!h.contributes_to("Helpers", "Account"));
+    }
+
+    /// A constant is read where it was written -- on the call side too.
+    ///
+    /// D100's lexical rule was applied to superclasses and mixins and not to a
+    /// receiver, so `Account.new` inside `module Billing` meant the top-level
+    /// namesake there and `Billing::Account` everywhere else in the same run.
+    /// Each case here is one widening cannot rescue: a top-level namesake
+    /// exists, so a literal reading gives a *different* answer rather than none.
+    #[test]
+    fn a_written_constant_is_read_where_it_was_written() {
+        let h = Hierarchy::from_source(
+            "class Account; end\nmodule Helpers\n  module Numeric; end\nend\n\
+             module Billing\n  class Account; end\n  module Helpers\n    module Numeric; end\n  \
+             end\nend",
+        );
+        assert_eq!(
+            h.written_at("Account", Some("Billing::Invoice")),
+            "Billing::Account"
+        );
+        assert_eq!(h.written_at("Account", None), "Account");
+        // A relative path is a written constant too.
+        assert_eq!(
+            h.written_at("Helpers::Numeric", Some("Billing::Invoice")),
+            "Billing::Helpers::Numeric"
+        );
+        // And a lexical position never makes a qualified name widen: the
+        // namespace written is the caller saying which namesake it meant.
+        assert_eq!(
+            h.written_at("Sales::Account", Some("Billing")),
+            "Sales::Account"
+        );
     }
 
     /// A file that mixes a module in without writing `class X < Y` is still

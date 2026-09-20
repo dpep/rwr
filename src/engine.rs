@@ -625,7 +625,8 @@ impl Engine {
                                 // warned about once at the end (Q10).
                                 if self.unnarrowed {
                                     for hit in &hits {
-                                        if let Some(class) = matcher::receiver_class(hit, &ctx.sigs)
+                                        if let Some(class) =
+                                            matcher::receiver_class(hit, &ctx.hierarchy, &ctx.sigs)
                                         {
                                             spread.push(class);
                                         }

@@ -3617,6 +3617,54 @@ fn an_ambiguous_short_name_rewrites_no_call_site() {
     );
 }
 
+/// A receiver written without its namespace means what Ruby means by it.
+///
+/// D100's rule covers every constant *written in source*, and the bare-constant
+/// receiver was the one place still reading it literally: `Account.new` inside
+/// `module Billing` is `Billing::Account`, and rwr called it the top-level
+/// `Account` in both directions -- rewriting the call under one designator and
+/// filing it as residue under the other.
+#[test]
+fn a_bare_constant_receiver_resolves_lexically() {
+    let source = "class Account\n  def display_name\n    \"top\"\n  end\nend\n\n\
+                  module Billing\n  class Account\n    def display_name\n      \"b\"\n    end\n  \
+                  end\n\n  class Invoice\n    def who\n      Account.new.display_name\n    \
+                  end\n  end\nend\n";
+
+    // (a) The top-level designator must not reach it.
+    let dir = fixture(source);
+    let out = rwr(&[
+        "rewrite",
+        "Account#display_name",
+        "-r",
+        "full_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    assert_eq!(
+        after.matches("full_name").count(),
+        1,
+        "only the top-level definition moves: {after} ({})",
+        stderr(&out)
+    );
+
+    // (b) And the namespaced one must, rather than filing it as residue.
+    let dir = fixture(source);
+    let out = rwr(&[
+        "rewrite",
+        "Billing::Account#display_name",
+        "-r",
+        "full_name",
+        dir.path().to_str().expect("utf8"),
+    ]);
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read back");
+    assert!(
+        after.contains("Account.new.full_name"),
+        "the call belongs to the class that encloses it: {after} ({})",
+        stderr(&out)
+    );
+}
+
 /// A rename reaches a call however its arguments are written, or not written.
 ///
 /// The call rules were `$R.{name}` and a bare `{name}`, which are the
