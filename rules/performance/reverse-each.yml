@@ -1,3 +1,12 @@
+# The two forms return different things: `each` returns its receiver, so
+# `xs.reverse.each {}` yields the reversed copy while `xs.reverse_each {}` yields
+# `xs` in its original order. Interchangeable only where the value is discarded,
+# and the pattern says nothing about that -- see the failing fixture below.
+#
+# The receiver hazard is the other way round from the obvious guess: `reverse`
+# lives on Array and String only, while `reverse_each` comes from Enumerable and
+# is on Hash, Range, Set and Enumerator too. String has no `each`, so every
+# receiver reaching this rule at runtime is already an Array.
 description: '`reverse.each` allocates a reversed copy; `reverse_each` iterates backwards in place.'
 match: $R.reverse.each { |$P| $B }
 rewrite: $R.reverse_each { |$P| $B }
@@ -6,3 +15,36 @@ tests:
       xs.reverse.each { |x| p x }
     output: |
       xs.reverse_each { |x| p x }
+
+  # FAILING. `each` returns the receiver, so the value of the expression flips
+  # from reversed to original order. Nothing in `where:` can say "the value is
+  # discarded", so the rule cannot currently decline these.
+  - input: |
+      a = xs.reverse.each { |x| p x }
+      xs.reverse.each { |x| p x }.first
+      consume(xs.reverse.each { |x| p x })
+    unchanged: true
+
+  - input: |
+      xs.reverse.each do |x|
+        p x
+      end
+    output: |
+      xs.reverse_each do |x|
+        p x
+      end
+
+  # `&.` has to survive on the surviving call, or a nil receiver starts raising.
+  - input: |
+      xs&.reverse&.each { |x| p x }
+    output: |
+      xs&.reverse_each { |x| p x }
+
+  # Anything between `reverse` and `each` makes the copy load-bearing.
+  - input: |
+      xs.reverse.uniq.each { |x| p x }
+    unchanged: true
+
+  - input: |
+      xs.reverse.map { |x| x }
+    unchanged: true

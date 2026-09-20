@@ -25,3 +25,47 @@ tests:
   - input: |
       thing.and_return(nil)
     unchanged: true
+
+  # The real-world shape: the chain broken across lines, whole `.and_return`
+  # line removed.
+  - input: |
+      allow(foo)
+        .to receive(:bar)
+        .and_return(nil)
+    output: |
+      allow(foo)
+        .to receive(:bar)
+
+  # A brace block binds to `receive`, so `receive(:bar) { 42 }` is not the node
+  # `receive($M)` and `contains:` declines it. The `do`/`end` spelling below is
+  # the same program and is *not* declined -- see the failing case after it.
+  - input: |
+      allow(foo).to receive(:bar) { 42 }.and_return(nil)
+    unchanged: true
+
+  # FAILING. "A stub returns nil already" only holds when nothing else in the
+  # chain has set an implementation. `contains: receive($M)` does not check
+  # that, so each of these silently changes what the stub returns. Verified
+  # against rspec-mocks 3.13:
+  #
+  #   and_yield(1)      -- without `.and_return(nil)` the stub returns the
+  #                        value of the block it yielded to
+  #   and_return(1)     -- the trailing `and_return` is what wins; removing it
+  #                        leaves the stub returning 1
+  #   and_raise(...)    -- worst of the three: `and_return(nil)` suppresses the
+  #                        raise, so removing it turns a nil into an exception
+  - input: |
+      allow(foo).to receive(:each).and_yield(1).and_return(nil)
+      allow(foo).to receive(:bar).and_return(1).and_return(nil)
+      allow(foo).to receive(:bar).and_raise(ArgumentError).and_return(nil)
+    unchanged: true
+
+  # FAILING, and a different cause: `do`/`end` binds the block to `to` rather
+  # than to `receive`, so the capture is the whole `allow(...).to ... end` and
+  # `contains: receive($M)` finds the bare `receive(:bar)` inside it. The stub
+  # returns 42 once the `and_return(nil)` is gone.
+  - input: |
+      allow(foo).to receive(:bar) do
+        42
+      end.and_return(nil)
+    unchanged: true

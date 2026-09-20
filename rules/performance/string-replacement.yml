@@ -25,3 +25,53 @@ tests:
   - input: |
       a = s.gsub(/x/, "y")
     unchanged: true
+
+  # `length:` counts characters of the *unescaped* value, which is the only
+  # reading that makes both of these right: `"\n"` is two characters of source
+  # and one of content, `"é"` is one character and two bytes.
+  - input: |
+      a = s.gsub("\n", " ")
+    output: |
+      a = s.tr("\n", " ")
+  - input: |
+      a = s.gsub("é", "e")
+    output: |
+      a = s.tr("é", "e")
+
+  # What `is: string` is for: the value is one character only at runtime, so
+  # there is nothing to check at rewrite time.
+  - input: |
+      a = s.gsub("#{x}", "y")
+    unchanged: true
+  - input: |
+      a = s.gsub(SEP, "_")
+    unchanged: true
+
+  # `""` is not one character, and a block or a `!` is a different method.
+  - input: |
+      a = s.gsub("a", "")
+    unchanged: true
+  - input: |
+      a = s.gsub("a") { |m| m.upcase }
+    unchanged: true
+  - input: |
+      s.gsub!("-", "_")
+    unchanged: true
+
+  - input: |
+      a = s&.gsub("-", "_")
+    output: |
+      a = s&.tr("-", "_")
+
+  # The `unsafe:` note above says `^` and `\` are not literals in `tr`. At
+  # `length: 1` they are: negation needs a character after the `^`, and a
+  # trailing backslash has nothing to escape. Checked against every
+  # single-character pair in ASCII -- none of them make `gsub` and `tr` differ.
+  - input: |
+      a = s.gsub("^", "*")
+    output: |
+      a = s.tr("^", "*")
+  - input: |
+      a = s.gsub("\\", "/")
+    output: |
+      a = s.tr("\\", "/")

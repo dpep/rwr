@@ -27,6 +27,20 @@
     - input: |
         expect(result).to eq([1])
       unchanged: true
+    # A negated expectation is the one rewrite that would invert the assertion,
+    # and both spellings of it have to stay out.
+    - input: |
+        expect(result).not_to eq([])
+        expect(result).to_not eq([])
+      unchanged: true
+    - input: |
+        expect(result).to eq([].freeze)
+      unchanged: true
+    # `%w[]` is an empty array literal by another name, and rewrites.
+    - input: |
+        expect(result).to eq(%w[])
+      output: |
+        expect(result).to be_empty
 
 - description: '`be_empty` says what is meant; it accepts any empty collection, where `eq({})` also pins a Hash.'
   match: expect($X).to eq({})
@@ -36,6 +50,12 @@
         expect(result).to eq({})
       output: |
         expect(result).to be_empty
+    - input: |
+        expect(result).to eq({ a: 1 })
+      unchanged: true
+    - input: |
+        expect(result).not_to eq({})
+      unchanged: true
 
 - description: '`be_empty` says what is meant; it accepts any empty collection, where `eq('''')` also pins a String.'
   match: expect($X).to eq('')
@@ -45,3 +65,36 @@
         expect(result).to eq("")
       output: |
         expect(result).to be_empty
+    - input: |
+        expect(result).to eq("x")
+      unchanged: true
+    - input: |
+        expect(result).not_to eq("")
+      unchanged: true
+    # Paren-less `eq ''` is how mastodon writes most of these.
+    - input: |
+        expect(account.public_key).to eq ''
+      output: |
+        expect(account.public_key).to be_empty
+
+    # FAILING, and an engine defect rather than a rule one: an empty heredoc has
+    # the same unescaped value as `''` (D36), so it matches -- and dropping the
+    # argument takes the heredoc body with it, one byte too far. The edit eats
+    # the newline after the terminator and fuses the next statement onto this
+    # one. `effective_range` extends over a heredoc's `closing_loc`, which
+    # includes that newline; `DiscontiguousCapture` does not fire because the
+    # heredoc is not being re-spliced, only deleted.
+    #
+    # Reduced, with no rule involved:
+    #   printf 'foo(<<~EOS)\n  body\nEOS\nbaz\n' > a.rb
+    #   rwr 'foo($X)' -r bar a.rb    # replacement: "barbaz"
+    #
+    # Ruby still parses the result, so `ruby -c` says nothing: `be_empty` simply
+    # swallows the next assertion as an argument.
+    - input: |
+        expect(result).to eq(<<~EOS)
+        EOS
+        expect(other).to eq(1)
+      output: |
+        expect(result).to be_empty
+        expect(other).to eq(1)
