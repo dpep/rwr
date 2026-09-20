@@ -3881,3 +3881,33 @@ fn the_triage_footer_names_a_definition_left_behind() {
         "the definition must be named, not left in `and N more`: {text}"
     );
 }
+
+/// A line past the end of the file is a mistake, not a clean "no match".
+///
+/// `0` and `10-5` both refuse and say why; `999` on a five-line file scoped the
+/// run to nothing and exited 1, which reads as "searched, found none".
+#[test]
+fn a_line_past_the_end_of_the_file_is_refused() {
+    let dir = fixture("def one\n  return nil\nend\n");
+    let run = |arg: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["find", "return nil", arg])
+            .current_dir(dir.path())
+            .output()
+            .expect("binary runs")
+    };
+
+    let past = run("fixture.rb:999");
+    assert_eq!(past.status.code(), Some(2), "{}", stderr(&past));
+    assert!(stderr(&past).contains("past its end"), "{}", stderr(&past));
+
+    // The last line is still a line, newline or not.
+    assert_eq!(run("fixture.rb:3").status.code(), Some(1));
+    let no_newline = fixture("x = 1\ny = 2");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["find", "y = 2", "fixture.rb:2"])
+        .current_dir(no_newline.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}

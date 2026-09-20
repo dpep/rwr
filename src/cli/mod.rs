@@ -209,6 +209,7 @@ fn targets(
                 let absolute = std::path::Path::new(path)
                     .canonicalize()
                     .map_err(|e| format!("cannot resolve {path}: {e}"))?;
+                crate::diff::within(arg, &absolute, range)?;
                 lines.push((absolute, range));
                 walk.push(path.to_string());
             }

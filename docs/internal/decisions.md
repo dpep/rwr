@@ -2797,3 +2797,14 @@ usually does not fire; the prefilter admits files on the method name, which is r
 **The test is the property, not the case.** `every_pattern_the_notation_builds_is_ruby` prepares and
 parses every pattern and template the notation produces, for a bare class, a namespaced class and
 both notations -- because the bug was not "this index is wrong" but "a spelling nobody parsed".
+
+## D104 - A named line past the end of its file is refused
+**Decided.** `rwr find 'def $M; $B; end' x.rb:999` on a five-line file scoped the run to nothing,
+matched nothing and exited 1 -- a clean "no match", indistinguishable from a real one and from a
+typo'd line number in a CI script. Every neighbouring malformed range already refuses and says why
+(`x.rb:0` -> "line numbers start at 1", `x.rb:9-3` -> "line range ends before it starts"); this was
+the one that hid, and it is the same vacuous pass that made a nonexistent path an error.
+
+The check reads the file it names and counts its lines, counting a final line with no trailing
+newline. A file rwr cannot read is left alone: the walk reports it as a blind spot, and inventing a
+range error there would name the wrong problem.

@@ -93,6 +93,38 @@ pub(crate) fn split_lines(arg: &str) -> Result<Option<Lines<'_>>, String> {
     }))
 }
 
+/// How many lines a source has, counting a final line with no newline.
+fn lines_in(bytes: &[u8]) -> usize {
+    let breaks = bytes.iter().filter(|b| **b == b'\n').count();
+    if bytes.last().is_some_and(|b| *b != b'\n') {
+        breaks + 1
+    } else {
+        breaks
+    }
+}
+
+/// Refuse a named range that begins past the end of the file it names.
+///
+/// `x.rb:999` on a five-line file scoped the run to nothing and exited 1 -- a
+/// clean "no match", indistinguishable from a real one. Every other malformed
+/// range in this surface refuses and says why; this was the one that hid.
+///
+/// A file rwr cannot read is left alone: the walk reports it as a blind spot,
+/// and inventing a range error for it would name the wrong problem.
+pub(crate) fn within(arg: &str, path: &Path, range: (u32, u32)) -> Result<(), String> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ok(());
+    };
+    let lines = lines_in(&bytes);
+    if range.0 as usize > lines {
+        return Err(format!(
+            "{arg}: the file has {lines} line(s), so line {} is past its end",
+            range.0
+        ));
+    }
+    Ok(())
+}
+
 /// What `--since` and `--diff` were given, as a git revision range.
 ///
 /// `--diff` alone is the uncommitted work -- the pre-commit case. `--since main`
@@ -327,6 +359,16 @@ mod tests {
         let file = Path::new("/repo/x.rb");
         assert!(changed.touches(file, 3, 7), "spans the changed line");
         assert!(!changed.touches(file, 6, 9), "sits entirely below it");
+    }
+
+    /// A file's last line counts whether or not it ends in a newline, or
+    /// `x.rb:N` on the last line of an unterminated file reads as past the end.
+    #[test]
+    fn the_last_line_counts_without_a_trailing_newline() {
+        assert_eq!(lines_in(b""), 0);
+        assert_eq!(lines_in(b"a\nb\n"), 2);
+        assert_eq!(lines_in(b"a\nb"), 2);
+        assert_eq!(lines_in(b"\n"), 1);
     }
 
     /// A deleted file has no new lines, so nothing to lint.
