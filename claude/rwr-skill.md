@@ -277,6 +277,10 @@ ivar assigned from one, a constant, `self`, and — where the repo has Sorbet
 signatures — whatever `sig { returns(X) }` says, plus the parameter types a
 `sig { params(x: X) }` gives the body it describes. A receiver it cannot resolve
 does **not** match, so `type:` only ever narrows; the misses show up as residue.
+A signature's type is read where the signature sits, like any other constant:
+`returns(Helpers::Thing)` is `Helpers::Thing`, and a bare `returns(Thing)` inside
+`module App` is `App::Thing` when there is one. A block parameter shadows the
+name it reuses, so a `sig`-typed argument stops applying inside `each { |x| … }`.
 
 `type_not:` is **not** the mirror of `name_not:`. `name_not:` passes when the
 capture has no identifier at all; a type exclusion that passed on an unresolved

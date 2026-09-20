@@ -102,6 +102,12 @@ unless `Account` is the only class of that name the run can see — the same rul
 `inside:` and a `Klass#method` designator follow. Write the namespace when the
 repo has more than one.
 
+A signature's type is read the same way, **where the signature is written**:
+`sig { returns(Helpers::Thing) }` says `Helpers::Thing`, and a bare
+`returns(Thing)` inside `module App` says `App::Thing` if there is one, as Ruby
+would read it. A `sig` on `Alpha::Parser#thing` says nothing about
+`Beta::Parser#thing`.
+
 ## `contains:`
 
 A whole sub-pattern inside a constraint, with shared metavariables required to
