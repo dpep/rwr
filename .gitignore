@@ -12,3 +12,10 @@
 
 # Agent worktrees; `script/commit.sh` does `git add -A` and would commit these as gitlinks.
 .claude/worktrees/
+
+# The testing arc's working notes: reports, matrices, salvaged logs. Kept in the
+# repo so the next session finds them beside the code, deliberately out of
+# history -- they are scratch, and the conclusions live in decisions.md and the
+# changelog. Their first home was the session scratchpad under /private/tmp,
+# which gets purged; most of the arc's reports were lost that way.
+research/
