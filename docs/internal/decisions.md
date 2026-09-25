@@ -3529,3 +3529,135 @@ same-kind nodes in different slots, which no node in Prism currently offers.
 
 *Reverses if:* `children()` learns to carry its slots, at which point the comparison is the slot
 itself and the kind check is redundant.
+
+## D120 - A per-file refusal may not split a rename either; the run refuses whole
+
+**Decided.** Extends D110 to the other road to the same defect.
+
+```
+# z_def.rb
+class Widget
+  def tint(text, color, mode: nil); [text, color, mode]; end
+end
+# a_call.rb
+w = Widget.new
+w.tint('a', 'b')
+Widget.new.tint('c', 'd')
+```
+
+`rwr rewrite 'Widget#tint' -r color .` refused `z_def.rb` -- correctly, the method's own parameter
+really is named `color` -- and **wrote `a_call.rb` anyway**. Both call sites moved, the definition
+kept its name, `NoMethodError`, at exit 5. Renaming rails `ActiveSupport::LogSubscriber#color` hit
+it on a real corpus: one file refused, four written, 14 sites.
+
+**The collision guard is right and the plumbing was wrong.** It returned `ScanOutcome::Refused`,
+which is by name the per-file shape D110's own comment rejects: it "declines one file and lets the
+rest through -- the same broken tree with a louder message". D110 put its directive check in front
+of the write loop and left the older refusal path behind it, so the two answers to one question
+disagreed. The check now sits beside D110's, before the write loop, and refuses the run whole.
+
+**Same guard as D110's**, and for D110's reason rather than by imitation: `renames_a_definition()`.
+A collision is reachable for a rule that moves no definition -- `performance/detect` introduces
+`detect`, which may already be a local -- and there the sites are independent, so declining one file
+leaves every other one correct. That path keeps the per-file refusal, and an e2e test pins it.
+
+*Why not make the collision guard run-level inside the engine.* The engine scans one source at a
+time and by construction cannot see the others; run-level is a property of the run, so it belongs
+where the run is assembled. Putting it in the engine would also have needed a second answer to
+"does this rule set move a definition", which is the cheap-check-that-restates-an-expensive-one
+failure the first principles name.
+
+*Reverses if:* renames gain a way to be partial and correct -- D110's condition, and the same
+answer would follow here.
+
+## D121 - A body metavariable matches a body Prism did not give the target
+
+**Decided.**
+
+A rename's definition rule is `def {name}(*$P); $B; end`. Prism gives `def label; end` a **nil
+body**, so `$B` had nothing to bind and the pattern did not match. The call sites moved, the
+definition did not, and the run exited **0** on a tree that raises `NoMethodError`. The parameter
+list is irrelevant -- `def label(a); end` failed too, while `def label; 1; end` and `def label = 1`
+were always fine. **The empty body is the whole trigger.**
+
+**Absence and emptiness are different in Prism, and this is the third slot to need saying so.**
+`vanishes` already let `foo(*$REST)` match `foo()` and `def foo(*$P)` match a `def` with no
+parameter list, both because the pattern carries a child the target lacks. A body is the same
+situation, so "any body" has to include none: a lone body placeholder binds the empty sequence.
+`align` needs the matching half, or the diff overruns, gives up, and re-renders the whole `def`
+from the template -- which is how the parameter-list twin once produced `def full_name()` with the
+body reflowed.
+
+**Measured, on rails and mastodon.** Definitions the rule reaches: rails 34,731 -> 35,134,
+mastodon 8,641 -> 8,698. **Gained 403 and 57; lost zero** -- the new match set is a strict
+superset, checked by location rather than by count. An identity rewrite of `def $M(*$P); $B; end`
+over all 6,512 files is byte-identical, so the new path splices nothing. On 30 sampled
+empty-bodied methods per corpus, definitions moved 0/30 -> 19/30 (rails) and 0/30 -> 14/30
+(mastodon), every result still parsing; the remainder are the sampler's own misattributions
+(nested namespaces, `class << self`, one-liners with a real body), not misses.
+
+**It widens block bodies too, and that is the same rule rather than a side effect.** Every `$B` in
+the shipped pack is a block body, so `select { |x| }`, `map { |x| }`, `any? { |x| }` and
+`reverse.each { |x| }` now match. Each rewrite stays equivalent on an empty block --
+`[select{}.first, detect{}, select{}.size, count{}, !any?{}, none?{}]` is
+`[nil, nil, 0, 0, true, true]` -- and `possible-n-plus-one`, whose `$B` carries a `contains:`
+constraint, correctly declines one, because an empty body contains nothing. All 131 rule fixtures
+pass.
+
+*Why not a second definition rule for the bodyless shape.* It would double the definition rules per
+designator to spell one Prism fact, leave `contains:` and every hand-written rule still broken, and
+put the fact in `rule.rs` where the next pattern to need it would not find it. The matcher is where
+absence-versus-emptiness already lives.
+
+*Reverses if:* Prism gives an empty body an empty `StatementsNode` instead of none, at which point
+ordinary child matching handles it and all three `vanishes` arms go.
+
+## D122 - A half-applied rename is reported and exits non-zero; it is not refused
+
+**Decided.** The exception to D110, and the reason is which end rwr could see.
+
+A rename that moved call sites and **no** definition has applied half of one edit. It was reported
+as `definition` residue -- and exited **0**, so a script read success. Where the definition sits
+outside the walked path there is no residue either, so it was **silent**: `rwr rewrite
+'Widget#label' -r caption app` with the class in `lib/` rewrote the call, said nothing, exited 0,
+`NoMethodError`.
+
+**Not D110's refusal.** D110 refuses because the input is *jointly unsatisfiable* and rwr can see
+both ends: it found the site, could rewrite it, and was told not to, so deleting the directive is a
+real round trip. Here rwr **did not find the other end**, which is a blind spot -- and the first
+principles' answer to a blind spot is to report it, with principle 2 adding "and set the exit code".
+
+**Measured, because the difference is a population.** ~9% of rails methods have no `def` for the
+definition rule to reach: **3,304 `attr_*`-defined methods on rails and 410 on mastodon**, plus
+`define_method`, `delegate` (177 lines on rails) and ERB. Refusing those would veto the rename
+permanently rather than cost a round trip -- there is nothing to delete, and no flag would help. It
+would also assert that a definition does not exist on the strength of not having seen it.
+
+**The trigger is what moved, not what was reported.** Definition residue is the wrong key: `def
+self.label` beside `def label` is a *different method*, declining it is correct, and it is reported
+as definition residue. Keyed on residue the guard fired 3 times on 120 real renames and **all three
+were false alarms**. Keyed on "this rule group rewrote sites and none of them was a definition" it
+fired **0 times on the same 120**, and it is sound by construction: sites were written, so if no
+definition moved the new name has no definition anywhere rwr walked.
+
+**Grouped by rule id**, because a designator expands to several rules that share one -- the
+definition, the calls, the dispatchers. Per run instead, one group's call rule would vouch for
+another group's definition. The per-rule `moves_definition` vector is kept rather than folded into
+the `renames_a_definition` disjunction for exactly this.
+
+**Exit 1.** Not 4, which promises a rerun makes progress; not 5, which promises nothing was written
+and is what D120 relies on; not 2, since nothing went wrong. 1 already means "there is work to do",
+which is true and is the answer `check` gives on the same tree. `rewrite` returning `Negative` at
+all is new, and this is the only thing it returns it for.
+
+**It fires on real code immediately, and on a defect it did not cause.** `Account#suspended?` on
+mastodon rewrites 9 call sites and leaves the definition, because that definition lives in `module
+Account::Suspensions` and the *matcher's* scope check does not consult `hierarchy.contributes_to`
+the way residue's does. mastodon has 87 `ActiveSupport::Concern` modules and 241 methods under
+`app/models/concerns`; rails has 208 concern modules. Every such rename has been half-applying at
+exit 0. D122 surfaces it; closing it is a separate decision about scope resolution, and the numbers
+above are the case for taking it.
+
+*Reverses if:* the matcher learns to reach a definition wherever the hierarchy says the class got
+it, *and* renames gain a way to be partial and correct -- at which point the remaining cases are
+genuine refusals in D110's sense rather than blind spots.

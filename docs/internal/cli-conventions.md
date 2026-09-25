@@ -63,13 +63,14 @@ commit where a rule correctly matches nothing. ast-grep splits `run` (grep polar
 | Verb | 0 | 1 | 2 | 3 | 4 | 5 |
 |---|---|---|---|---|---|---|
 | `find` | matched | no match | error | pattern/rule parse error | — | refused |
-| `rewrite` | applied, or nothing to apply | — | error | pattern/rule parse error | retryable | refused |
+| `rewrite` | applied, or nothing to apply | rename half applied | error | pattern/rule parse error | retryable | refused |
 | `check` | clean | violations found | error | pattern/rule parse error | — | refused |
 
-**`rewrite` never returns 1**, and `each_verb_keeps_its_polarity` pins that. Having applied
-whatever there was to apply is success; falling short is 4 or 5. The cost is that a caller
-cannot tell "rewrote nothing" from "rewrote everything" by status alone — it has to read the
-output, which is the trade the polarity buys.
+**`rewrite` returns 1 for one thing only: a half-applied rename** (D122) — it moved call sites
+and no definition, so the edit it made is real but the rename is not finished. Otherwise having
+applied whatever there was to apply is success; falling short is 4 or 5. `each_verb_keeps_its_polarity`
+pins both halves. The cost is that a caller cannot tell "rewrote nothing" from "rewrote
+everything" by status alone — it has to read the output, which is the trade the polarity buys.
 
 `3` separates a **pattern** parse failure from a **source file** parse failure — jq splits
 compile-time from runtime errors the same way, and the two need different responses: fix the

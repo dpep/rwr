@@ -132,6 +132,15 @@ pub(crate) struct Engine {
     /// for. Same per-rule answer as `claims_completeness`, narrowed to the rules
     /// that write, because residue exists for precisely the reason this does.
     renames_a_definition: bool,
+    /// Per rule, whether *that* rule moves a definition.
+    ///
+    /// `renames_a_definition` is this vector's disjunction, which is the right
+    /// question for "may this run be split at all". It is the wrong one for
+    /// "did this run move the definition it was renaming": a rule set holding a
+    /// definition rule and a call rule would answer yes on the call rule's hits
+    /// alone. D122 needs the per-rule answer, so it is kept rather than folded
+    /// away.
+    moves_definition: Vec<bool>,
     /// A rule set that names no class cannot tell `Account#display_name` from
     /// `Company#display_name`, so its matches are tallied by resolved receiver.
     unnarrowed: bool,
@@ -380,10 +389,12 @@ impl Engine {
         // Derived from the same per-rule answer as completeness rather than
         // asked again, because they are the same question: a set that moves a
         // definition is a set whose sites reference each other.
-        let renames_a_definition = rules
+        let moves_definition: Vec<bool> = rules
             .iter()
             .zip(&defines)
-            .any(|(rule, defines)| *defines && rule.rewrite.is_some());
+            .map(|(rule, defines)| *defines && rule.rewrite.is_some())
+            .collect();
+        let renames_a_definition = moves_definition.iter().any(|d| *d);
         let unnarrowed = !rules
             .iter()
             .any(|r| r.constraints.values().any(Constraint::narrows_by_receiver));
@@ -428,6 +439,7 @@ impl Engine {
             filters,
             claims_completeness,
             renames_a_definition,
+            moves_definition,
             unnarrowed,
         })
     }
@@ -465,6 +477,11 @@ impl Engine {
     /// ones -- true when it rewrites a definition, whose call sites go with it.
     pub(crate) fn renames_a_definition(&self) -> bool {
         self.renames_a_definition
+    }
+
+    /// Whether rule `index` is one of the rules that moves a definition.
+    pub(crate) fn moves_definition(&self, index: usize) -> bool {
+        self.moves_definition.get(index).is_some_and(|d| *d)
     }
 
     /// Whether any rule needs this source read at all.

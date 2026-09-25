@@ -2878,7 +2878,7 @@ fn each_verb_keeps_its_polarity() {
     );
 
     // rewrite: 0 either way. Applying edits succeeds; having none to apply also
-    // succeeds. It has no 1.
+    // succeeds.
     assert_eq!(
         run(&["rewrite", "performance/detect", at]),
         Some(0),
@@ -2888,6 +2888,22 @@ fn each_verb_keeps_its_polarity() {
         run(&["rewrite", "style/return-nil", at]),
         Some(0),
         "rewrite, applied"
+    );
+
+    // Its one 1: a rename that moved call sites and no definition (D122). The
+    // rule above is not a rename, so it can never reach this -- which is why
+    // this needs its own fixture rather than another argument list.
+    let split = fixture("p Widget.new.label\n");
+    assert_eq!(
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["rewrite", "Widget#label", "-r", "caption", "fixture.rb"])
+            .current_dir(split.path())
+            .output()
+            .expect("binary runs")
+            .status
+            .code(),
+        Some(1),
+        "rewrite, rename half applied"
     );
 
     // And the shapes that are errors whatever the verb.
@@ -4783,4 +4799,235 @@ fn a_line_past_the_end_of_the_file_is_refused() {
         .output()
         .expect("binary runs");
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+/// A rename that moved call sites and no definition may not exit 0.
+///
+/// The edit is real, so it is written -- but the rename is half applied and a
+/// script read success. Two roads that survive the empty-body fix: the
+/// definition sitting outside the walked path, which reports no residue at all
+/// and was therefore *silent*; and a method defined by `attr_accessor`, where
+/// the macro moves and the writer `label=` is left behind (D122).
+#[test]
+fn a_rename_that_moves_no_definition_does_not_exit_zero() {
+    // The definition is outside the path the rewrite walks.
+    let outside = tempfile::tempdir().expect("temp dir");
+    let path = outside.path();
+    std::fs::create_dir(path.join("lib")).expect("mkdir");
+    std::fs::create_dir(path.join("app")).expect("mkdir");
+    std::fs::write(
+        path.join("lib/widget.rb"),
+        "class Widget\n  def label\n    \"x\"\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(path.join("app/use.rb"), "p Widget.new.label\n").expect("write");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "Widget#label", "-r", "caption", "app"])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    // The edit is real and stays written: this is a report, not a refusal.
+    assert!(
+        std::fs::read_to_string(path.join("app/use.rb"))
+            .expect("read")
+            .contains("caption"),
+        "the edit it made is real"
+    );
+    assert!(stderr(&out).contains("half applied"), "{}", stderr(&out));
+
+    // Widening the path finds the definition, so the rename completes cleanly.
+    let whole = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "Widget#label", "-r", "caption", "."])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+    assert_eq!(whole.status.code(), Some(0), "{}", stderr(&whole));
+
+    // A method defined by `attr_accessor` has no `def` to move at all.
+    let attr = fixture("class Widget\n  attr_accessor :label\nend\np Widget.new.label\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "Widget#label", "-r", "caption", "fixture.rb"])
+        .current_dir(attr.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+}
+
+/// An ordinary rename that does move its definition still exits 0.
+///
+/// The guard above must not fire on the flagship case, nor on a same-named
+/// method of the *other* kind: `def self.label` beside `def label` is a
+/// different method, declining it is correct, and it is reported as definition
+/// residue -- which is why the exit code keys on what moved rather than on the
+/// residue report.
+#[test]
+fn a_complete_rename_still_exits_zero() {
+    for (what, source) in [
+        (
+            "the ordinary case",
+            "class Widget\n  def label\n    \"x\"\n  end\nend\np Widget.new.label\n",
+        ),
+        (
+            "beside a class method of the same name",
+            "class Widget\n  def self.label\n    \"c\"\n  end\n\n  def label\n    \"i\"\n  end\nend\np Widget.new.label\n",
+        ),
+    ] {
+        let dir = fixture(source);
+        let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["rewrite", "Widget#label", "-r", "caption", "fixture.rb"])
+            .current_dir(dir.path())
+            .output()
+            .expect("binary runs");
+        assert_eq!(out.status.code(), Some(0), "{what}: {}", stderr(&out));
+        assert!(
+            !stderr(&out).contains("half applied"),
+            "{what}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+/// A collision refusal may not write the rest of the rename.
+///
+/// The collision guard itself is right -- the method's own parameter really is
+/// named `color`, so renaming `tint` to `color` there would shadow it. But the
+/// refusal was a per-file `ScanOutcome::Refused`: it declined the definition's
+/// file and wrote every other file anyway, so both call sites moved, the
+/// definition kept its name, and the tree raised `NoMethodError` at exit 5.
+/// D110's shape arriving by a different road (D120).
+#[test]
+fn a_collision_refusal_does_not_write_the_rest_of_the_rename() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    let def =
+        "class Widget\n  def tint(text, color, mode: nil)\n    [text, color, mode]\n  end\nend\n";
+    let call = "w = Widget.new\nw.tint('a', 'b')\nWidget.new.tint('c', 'd')\n";
+    // Named so the walk reaches the call site before the refusal.
+    std::fs::write(path.join("a_call.rb"), call).expect("write");
+    std::fs::write(path.join("z_def.rb"), def).expect("write");
+
+    let run = |verb: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args([verb, "Widget#tint", "-r", "color", "."])
+            .current_dir(path)
+            .output()
+            .expect("binary runs")
+    };
+
+    let out = run("rewrite");
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(path.join("a_call.rb")).expect("read"),
+        call,
+        "a refusal writes nothing"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("z_def.rb")).expect("read"),
+        def,
+        "a refusal writes nothing"
+    );
+    // It still says which file and why, because that is the way forward.
+    assert!(
+        stderr(&out).contains("already a local variable"),
+        "{}",
+        stderr(&out)
+    );
+
+    // D29: the preview must not disagree with the apply.
+    assert_eq!(
+        run("check").status.code(),
+        out.status.code(),
+        "the preview must not disagree with the apply"
+    );
+}
+
+/// The guard is about renames, not about collisions. A rule that moves no
+/// definition has independent sites, so declining one file leaves the rest
+/// correct -- and those other files must still be written.
+#[test]
+fn a_collision_on_a_rule_that_moves_no_definition_declines_only_that_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path();
+    // `detect` is already a local here, so rewriting `select { }.first` into
+    // `detect { }` in this file would collide with it.
+    let clash = "detect = 1\nxs.select { |x| x.ok? }.first\n";
+    std::fs::write(path.join("a_clash.rb"), clash).expect("write");
+    std::fs::write(path.join("z_clean.rb"), "ys.select { |y| y.ok? }.first\n").expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "performance/detect", "--unsafe", "."])
+        .current_dir(path)
+        .output()
+        .expect("binary runs");
+
+    assert_eq!(
+        std::fs::read_to_string(path.join("a_clash.rb")).expect("read"),
+        clash,
+        "the colliding file is declined"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("z_clean.rb")).expect("read"),
+        "ys.detect { |y| y.ok? }\n",
+        "an independent site still rewrites"
+    );
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+}
+
+/// A rename must reach a method whose body is empty.
+///
+/// Prism gives `def label; end` a nil body, so the definition rule's `$B` had
+/// nothing to bind and the pattern did not match. The call sites moved, the
+/// definition kept its name, and the run exited 0 -- a half-applied rename
+/// reported as success. The parameter list is irrelevant; the empty body is
+/// the whole trigger (D121).
+#[test]
+fn a_rename_reaches_a_method_with_an_empty_body() {
+    for (what, source, want) in [
+        (
+            "one line, no parameters",
+            "class Widget\n  def label; end\n  def run; label; end\nend\n",
+            "class Widget\n  def caption; end\n  def run; caption; end\nend\n",
+        ),
+        (
+            "one line, with parameters",
+            "class Widget\n  def label(a); end\n  def run; label(1); end\nend\n",
+            "class Widget\n  def caption(a); end\n  def run; caption(1); end\nend\n",
+        ),
+        (
+            "two lines",
+            "class Widget\n  def label\n  end\n\n  def run; label; end\nend\n",
+            "class Widget\n  def caption\n  end\n\n  def run; caption; end\nend\n",
+        ),
+        (
+            "a class method",
+            "class Widget\n  def self.label; end\n  def run; Widget.label; end\nend\n",
+            "class Widget\n  def self.caption; end\n  def run; Widget.caption; end\nend\n",
+        ),
+    ] {
+        let designator = if what == "a class method" {
+            "Widget.label"
+        } else {
+            "Widget#label"
+        };
+        let dir = fixture(source);
+        let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+            .args(["rewrite", designator, "-r", "caption", "fixture.rb"])
+            .current_dir(dir.path())
+            .output()
+            .expect("binary runs");
+        // Minimal diff: only the name moves, and the empty body keeps its shape.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read"),
+            want,
+            "{what}: {}",
+            stderr(&out)
+        );
+        assert_eq!(out.status.code(), Some(0), "{what}: {}", stderr(&out));
+        assert!(
+            !stderr(&out).contains("definition"),
+            "{what}: no definition left behind: {}",
+            stderr(&out)
+        );
+    }
 }

@@ -25,11 +25,12 @@ use std::process::ExitCode;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exit {
     /// Verb-dependent success. `find`: matched. `check`: clean. `rewrite`:
-    /// applied, *or* nothing to apply -- writing nothing is not a failure, so
-    /// `rewrite` never returns [`Exit::Negative`].
+    /// applied, *or* nothing to apply -- writing nothing is not a failure.
     Ok,
     /// Verb-dependent negative result — not an error in either polarity.
-    /// `find`: nothing matched. `check`: violations found.
+    /// `find`: nothing matched. `check`: violations found. `rewrite`: the one
+    /// case where it falls short without refusing -- a rename that moved call
+    /// sites and no definition, so the edit is written but half applied (D122).
     Negative,
     /// I/O, internal, or usage failure. `2` because grep, ripgrep, ruff,
     /// rubocop, biome, jq and semgrep all agree it means "something went
@@ -1946,6 +1947,31 @@ fn cmd_apply(
     // rest through -- the same broken tree with a louder message. Before the
     // write loop, so nothing has been written when it fires.
     if engine.renames_a_definition() {
+        // The same decision for the other road to a half-applied rename: a
+        // per-file refusal. `ScanOutcome::Refused` is exactly the shape the
+        // paragraph above rejects, and the collision guard was still returning
+        // it -- so a rename onto a name already bound in the definition's file
+        // declined that file and wrote every call site anyway (D120).
+        let declined: Vec<&Outcome> = outcomes.iter().filter(|o| o.refusal.is_some()).collect();
+        if !declined.is_empty() {
+            eprintln!(
+                "rwr: refused: {} file(s) cannot take this rename. A rename is one edit \
+                 across a definition and every call site, so applying it where it fits \
+                 would leave the rest calling a method that no longer exists. Nothing was \
+                 written.",
+                declined.len()
+            );
+            for o in declined.iter().take(RESIDUE_DETAIL_CAP) {
+                if let Some(reason) = &o.refusal {
+                    eprintln!("  {}: {reason}", o.file);
+                }
+            }
+            if declined.len() > RESIDUE_DETAIL_CAP {
+                eprintln!("  ... and {} more", declined.len() - RESIDUE_DETAIL_CAP);
+            }
+            return Exit::Refused.into();
+        }
+
         let accepted: Vec<&crate::suppress::Suppressed> = outcomes
             .iter()
             .flat_map(|o| o.scanned.suppressed.iter())
@@ -2352,6 +2378,66 @@ fn cmd_apply(
         }
     }
 
+    // A rename that moved call sites and no definition has applied half of one
+    // edit, and until now said so only as residue -- at exit 0, so a script saw
+    // success. Worse where the definition sits outside the walked scope, which
+    // produces no residue at all and was therefore silent.
+    //
+    // Not D110's refusal, though it is D110's defect. D110 refuses because the
+    // input is jointly unsatisfiable and rwr can see both ends: it found the
+    // site, could rewrite it, and was told not to, so deleting the directive is
+    // a real round trip. Here rwr did not find the other end, which is a blind
+    // spot -- and ~9% of rails methods (3,304 `attr_*`, plus `define_method`,
+    // `delegate`, ERB) have no `def` for the definition rule to reach. Refusing
+    // those would veto the rename permanently rather than cost a round trip,
+    // and would assert a definition does not exist on the strength of not
+    // having seen it. So: write, report, and set the exit code (D122).
+    //
+    // Grouped by rule id, because a designator expands to several rules sharing
+    // one -- the definition, the calls, the dispatchers. Asking per run instead
+    // would let one group's call rule vouch for another group's definition.
+    let mut half_applied: Vec<&str> = Vec::new();
+    if engine.renames_a_definition() {
+        let mut sites: std::collections::HashMap<&str, (usize, usize)> =
+            std::collections::HashMap::new();
+        for (index, rule) in rules.iter().enumerate() {
+            // Only a group that has a definition to move can leave one behind.
+            if engine.moves_definition(index)
+                && let Some(id) = rule.id.as_deref()
+            {
+                sites.entry(id).or_default();
+            }
+        }
+        for outcome in &outcomes {
+            for (index, hits) in outcome.scanned.by_rule.iter().enumerate() {
+                let Some(id) = rules.get(index).and_then(|r| r.id.as_deref()) else {
+                    continue;
+                };
+                if let Some(entry) = sites.get_mut(id) {
+                    entry.0 += hits;
+                    if engine.moves_definition(index) {
+                        entry.1 += hits;
+                    }
+                }
+            }
+        }
+        half_applied = sites
+            .into_iter()
+            .filter(|(_, (total, definitions))| *total > 0 && *definitions == 0)
+            .map(|(id, _)| id)
+            .collect();
+        half_applied.sort_unstable();
+    }
+    if !half_applied.is_empty() {
+        for id in &half_applied {
+            eprintln!(
+                "rwr: {id} moved call site(s) but no definition. A rename is one edit across \
+                 a definition and every call site, so this one is half applied -- finish it \
+                 by hand, or widen the path if the definition sits outside it."
+            );
+        }
+    }
+
     profile::report();
     let deferred: usize = outcomes.iter().map(|o| o.scanned.deferred).sum();
     if deferred > 0 {
@@ -2382,6 +2468,15 @@ fn cmd_apply(
     // succeeds either way, having done whatever there was to do.
     // A finding is work to do, exactly as an edit is: `check` exists to fail a
     // gate on it, and a lint that exits 0 gates nothing.
+    //
+    // A half-applied rename is work to do in the same sense, and it is the one
+    // thing `rewrite` returns `Negative` for: the edit it made is real, but the
+    // rename is not finished and a script must not read 0 (D122). Not 4, which
+    // promises a rerun makes progress; not 5, which promises nothing was
+    // written and is what D120 relies on.
+    if !half_applied.is_empty() {
+        return Exit::Negative.into();
+    }
     if write || (changed.is_empty() && findings.is_empty()) {
         Exit::Ok.into()
     } else {

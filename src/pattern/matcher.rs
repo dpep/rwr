@@ -526,6 +526,14 @@ fn vanishes<'pr>(
     if let Some(name) = lone_rest_placeholder(pattern, prepared) {
         return bind(env, &name, Bound::Many(Vec::new()), forbidden);
     }
+    // `def foo; $B; end` against a method with an empty body, for the same
+    // reason: Prism gives `def label; end` no body node, so the pattern carries
+    // a child the target lacks and "any body" has to include none. Without it
+    // the flagship rename matched every call site and not the definition, and
+    // exited 0 on a tree that raises `NoMethodError` (D121).
+    if let Some(name) = lone_body_placeholder(pattern, prepared) {
+        return bind(env, &name, Bound::Many(Vec::new()), forbidden);
+    }
     // A container with no atoms of its own vanishes if everything inside it does.
     generated::atoms(pattern).is_empty()
         && !generated::children(pattern).is_empty()
@@ -1405,6 +1413,24 @@ pub(crate) fn lone_splat_placeholder(node: &Node<'_>, prepared: &Prepared) -> Op
         return None;
     };
     splat_placeholder_name(only, prepared)
+}
+
+/// The metavariable a body stands for, i.e. the `$B` of `def foo; $B; end`.
+///
+/// A body position holds a statements sequence, so the metavariable is one
+/// level down from the node occupying the slot. Both the match and the diff
+/// need to recognise it: matching lets it absorb a body Prism did not give the
+/// target at all, and the diff needs to know that slot accounted for no target
+/// child, or it overruns and re-renders the whole `def`.
+pub(crate) fn lone_body_placeholder(node: &Node<'_>, prepared: &Prepared) -> Option<String> {
+    if !matches!(node, Node::StatementsNode { .. }) {
+        return None;
+    }
+    let kids = generated::children(node);
+    let [only] = kids.as_slice() else {
+        return None;
+    };
+    placeholder_name(only, prepared)
 }
 
 /// The marker a singleton class body pushes onto the scope stack.

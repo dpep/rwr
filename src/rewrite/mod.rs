@@ -1093,6 +1093,20 @@ fn align<'a, 'pr>(
             }
             continue;
         }
+        // `def foo; $B; end` against a method whose body is empty. Prism gives
+        // such a `def` no body node, so the matcher let `$B` absorb nothing and
+        // the slot accounts for zero target children here too. Without it the
+        // alignment overran, the diff gave up, and the whole `def` came back
+        // re-rendered from the template (D121).
+        if let Some(name) = matcher::lone_body_placeholder(p, prepared)
+            && let Some(Bound::Many(absorbed)) = env.get(&name)
+            && absorbed.is_empty()
+        {
+            if matcher::lone_body_placeholder(t, t_prepared).as_deref() != Some(&name) {
+                return None;
+            }
+            continue;
+        }
         // `$R.foo(*$A)` does the same for an argument list. `$A` binds the
         // *arguments*, but the list holding them is one target child -- or none
         // at all, since Prism gives a call without arguments no `ArgumentsNode`
