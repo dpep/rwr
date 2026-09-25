@@ -4885,14 +4885,35 @@ fn a_rename_that_moves_no_definition_does_not_exit_zero() {
         .expect("binary runs");
     assert_eq!(whole.status.code(), Some(0), "{}", stderr(&whole));
 
-    // A method defined by `attr_accessor` has no `def` to move at all.
+    // An `attr_accessor` has no `def`, but moving its symbol *is* moving a
+    // definition -- of the reader and the writer both -- so the guard must not
+    // fire. Keyed on the literal call name it saw `$MACRO`, concluded no
+    // definition moves, and warned "half applied" over a complete rename.
     let attr = fixture("class Widget\n  attr_accessor :label\nend\np Widget.new.label\n");
     let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
         .args(["rewrite", "Widget#label", "-r", "caption", "fixture.rb"])
         .current_dir(attr.path())
         .output()
         .expect("binary runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    // It still fires where the macro really is out of reach, which is the
+    // population D122 exists for.
+    let split = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(split.path().join("app")).expect("mkdir");
+    std::fs::write(
+        split.path().join("lib.rb"),
+        "class Widget\n  attr_accessor :label\nend\n",
+    )
+    .expect("write");
+    std::fs::write(split.path().join("app/use.rb"), "p Widget.new.label\n").expect("write");
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "Widget#label", "-r", "caption", "app"])
+        .current_dir(split.path())
+        .output()
+        .expect("binary runs");
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("half applied"), "{}", stderr(&out));
 }
 
 /// An ordinary rename that does move its definition still exits 0.
@@ -5230,6 +5251,65 @@ fn an_extended_module_is_not_an_instance_methods_definition() {
             .expect("read")
             .contains("def find_it"),
         "an extended module's def is not the instance method: {}",
+        stderr(&out)
+    );
+}
+
+/// An `attr_accessor` rename carries the writer call sites.
+///
+/// One macro defines `label` and `label=`, so moving its symbol renames both --
+/// and `$R.label(*$A)` cannot reach `w.label = 1`, whose method name is
+/// `label=`. rwr reported "2 site(s)" over a tree that raised
+/// `undefined method 'label='`. D99 refuses `Widget#label=` as a designator, so
+/// there is no second command to send the caller to either.
+#[test]
+fn an_attr_accessor_rename_carries_the_writer() {
+    let dir = fixture(
+        "class Widget\n  attr_accessor :label\nend\nw = Widget.new\nw.label = 1\np w.label\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "Widget#label", "-r", "caption", "fixture.rb"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    assert!(
+        !after.contains("label"),
+        "nothing of the old name survives: {after}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+/// A hand-written `def name=` is a separate method, and the rename leaves it.
+///
+/// The macro is the only thing that distinguishes the two cases: `attr_accessor`
+/// renames reader and writer in one edit, while `def label` and `def label=` are
+/// two methods and a caller renaming one may mean nothing by the other. Moving
+/// the writer call sites here would break a rename that is correct today.
+#[test]
+fn a_hand_written_writer_is_left_alone() {
+    let source = "class Widget\n  def label\n    @label\n  end\n\n  def label=(v)\n    \
+                  @label = v\n  end\nend\nw = Widget.new\nw.label = 1\np w.label\n";
+    let dir = fixture(source);
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "Widget#label", "-r", "caption", "fixture.rb"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    let after = std::fs::read_to_string(dir.path().join("fixture.rb")).expect("read");
+    assert!(after.contains("def label=(v)"), "the writer stays: {after}");
+    assert!(
+        after.contains("w.label = 1"),
+        "and so do its callers: {after}"
+    );
+    assert!(after.contains("def caption"), "the reader moves: {after}");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    // And the writer it declined is not filed as residue: `label=` is a
+    // different identifier from the one the run is about, and reporting it made
+    // a correct, complete rename look incomplete.
+    assert!(
+        !stderr(&out).contains("could not account for"),
+        "nothing to report here: {}",
         stderr(&out)
     );
 }

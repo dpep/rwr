@@ -162,6 +162,15 @@ rename it for everybody, edit the module and run the rename once per includer.
 table, so `Account.find_it` comes from `def find_it` in an extended module. That
 definition is still reported rather than moved.
 
+### `attr_accessor` and the writer
+
+`attr_accessor :label` defines `label` **and** `label=` from one symbol, so
+renaming it to `caption` renames both — and the rename carries the `w.label = 1`
+call sites with it. A hand-written `def label=` is a separate method: the rename
+leaves it, and its callers, exactly where they are.
+
+`w.label += 1` and the other operator-assignment forms are not reached yet.
+
 ## Read the residue report
 
 Anything rwr could not account for — a symbol reaching `delegate`, a

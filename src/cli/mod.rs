@@ -1272,7 +1272,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
     let anchors_for_filter: Vec<Vec<u8>> = {
         let parsed = ruby_prism::parse(prepared.source.as_bytes());
         matcher::pattern_root(&parsed.node())
-            .map(|root| residue::anchors(&root, &prepared))
+            .map(|root| residue::anchors(&root, &prepared, &Default::default()))
             .unwrap_or_default()
     };
     let filter = prefilter::Filter::new(&required_literals, &anchors_for_filter);
@@ -1335,7 +1335,7 @@ fn cmd_find(pattern: &str, paths: &[String], common: &Common, out: Output) -> Ex
             // match to co-locate with. Correct scoping needs to know which
             // class the anchor belongs to -- which is receiver resolution, and
             // therefore Phase 2.
-            let anchors = residue::anchors(&p_root, &prepared);
+            let anchors = residue::anchors(&p_root, &prepared, &Default::default());
             if !anchors.is_empty() {
                 let matched: Vec<(usize, usize)> = hits
                     .iter()
@@ -2078,7 +2078,7 @@ fn cmd_apply(
 
                 // Residue first: it reads the *current* text either way.
                 if engine.claims_completeness() {
-                    let anchors = residue::anchors(&p_root, prepared);
+                    let anchors = residue::anchors(&p_root, prepared, &rule.constraints);
                     if !anchors.is_empty() {
                         let mut found =
                             residue::find(&ruby.node(), &anchors, &[], &translated.ruby);
@@ -2175,7 +2175,7 @@ fn cmd_apply(
             .flat_map(|(rule, prepared)| {
                 let parsed = ruby_prism::parse(prepared.source.as_bytes());
                 let found = matcher::pattern_root(&parsed.node())
-                    .map(|root| residue::anchors(&root, prepared))
+                    .map(|root| residue::anchors(&root, prepared, &rule.constraints))
                     .unwrap_or_default();
                 found
                     .into_iter()

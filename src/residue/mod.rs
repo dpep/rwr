@@ -18,6 +18,7 @@ use crate::pattern::matcher;
 use crate::pattern::prepare::Prepared;
 use ruby_prism::Node;
 use serde::Serialize;
+use std::collections::HashMap;
 
 /// Where an unaccounted-for occurrence of the anchor turned up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -268,7 +269,11 @@ pub(crate) fn scoped_to(
 /// but `String#gsub` still exists afterwards, so every `.gsub` the rule
 /// declined to rewrite is perfectly fine. Reporting those as unaccounted-for
 /// was a false claim, and it is what a real run hit first.
-pub(crate) fn defines_a_method(pattern: &Node<'_>, prepared: &Prepared) -> bool {
+pub(crate) fn defines_a_method(
+    pattern: &Node<'_>,
+    prepared: &Prepared,
+    constraints: &HashMap<String, crate::rule::Constraint>,
+) -> bool {
     if matches!(pattern, Node::DefNode { .. }) {
         return true;
     }
@@ -277,8 +282,27 @@ pub(crate) fn defines_a_method(pattern: &Node<'_>, prepared: &Prepared) -> bool 
     };
     // A macro that defines a method counts too: renaming `attr_reader :old` to
     // `attr_reader :new` moves the name just as `def` does.
-    DEFINERS.contains(&call.name().as_slice())
-        && matcher::placeholder_name(pattern, prepared).is_none()
+    if DEFINERS.contains(&call.name().as_slice()) {
+        return matcher::placeholder_name(pattern, prepared).is_none();
+    }
+    // A metavariable in the macro position counts when every name it admits is a
+    // definer -- `$MACRO(*$BEFORE, :old, *$AFTER)` with `$MACRO` held to
+    // `attr_accessor`/`attr_writer`/... moves a name exactly as the literal
+    // spelling does. Read off `DEFINERS` rather than listed again, because a
+    // second list would drift from the first and the drift would be silent: the
+    // rename still applies, and only the completeness claim quietly goes wrong.
+    let Some(metavariable) = matcher::call_name_placeholder(pattern, prepared) else {
+        return false;
+    };
+    // Keys are trimmed on the way in, the way `verdict` does it: a constraint is
+    // written `$MACRO` in the rule and the binding knows it as `MACRO`.
+    constraints
+        .iter()
+        .find(|(key, _)| key.trim_start_matches('$') == metavariable)
+        .and_then(|(_, c)| c.name.as_ref())
+        .is_some_and(|names| {
+            !names.is_empty() && names.iter().all(|n| DEFINERS.contains(&n.as_bytes()))
+        })
 }
 
 /// Calls that dispatch on a method name given as a value.
@@ -421,7 +445,19 @@ fn is_literal_name(node: &Node<'_>) -> bool {
 /// is about `display_name`; `$R.select { |$P| $B }.first` is about a chain, and
 /// treating `first` as its anchor reported every `.first` in the repo -- 3,752
 /// of them on Discourse, which buries the account it exists to give.
-pub(crate) fn anchors(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
+pub(crate) fn anchors(
+    pattern: &Node<'_>,
+    prepared: &Prepared,
+    constraints: &HashMap<String, crate::rule::Constraint>,
+) -> Vec<Vec<u8>> {
+    // The designator's writer rule anchors on nothing. Its call name is `name=`,
+    // a *different* identifier from the one the run is about -- and D99 makes
+    // `Widget#label=` unsayable as a designator, so `label=` is not a name this
+    // account covers. Left in, it searched for `display_name=` and reported the
+    // hand-written `def display_name=` that the rename correctly left alone.
+    if constraints.values().any(|c| c.macro_writer.is_some()) {
+        return Vec::new();
+    }
     // A `def` names exactly what it renames, and is the shape a hand-written
     // rename most obviously takes. Without this the rule claimed completeness --
     // `defines_a_method` says a DefNode does -- and then had nothing to search
@@ -501,12 +537,16 @@ pub(crate) fn anchors(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
 ///
 /// Read off `DISPATCHERS`, the list [`find`] scans with, so the filter in front
 /// of the collector cannot fall behind it.
-pub(crate) fn reach(pattern: &Node<'_>, prepared: &Prepared) -> Vec<Vec<u8>> {
-    let mut out = anchors(pattern, prepared);
+pub(crate) fn reach(
+    pattern: &Node<'_>,
+    prepared: &Prepared,
+    constraints: &HashMap<String, crate::rule::Constraint>,
+) -> Vec<Vec<u8>> {
+    let mut out = anchors(pattern, prepared, constraints);
     // With no anchor there is no report, so there is nothing to admit a file
     // for; and a rule that moves no definition claims no completeness (D7), so
     // its residue never runs.
-    if !out.is_empty() && defines_a_method(pattern, prepared) {
+    if !out.is_empty() && defines_a_method(pattern, prepared, constraints) {
         out.extend(DISPATCHERS.iter().map(|d| d.to_vec()));
     }
     out
@@ -871,7 +911,7 @@ mod tests {
             let parsed = ruby_prism::parse(prepared.source.as_bytes());
             let node = parsed.node();
             let root = matcher::pattern_root(&node).expect("one expression");
-            anchors(&root, &prepared)
+            anchors(&root, &prepared, &HashMap::new())
                 .into_iter()
                 .map(|a| String::from_utf8_lossy(&a).into_owned())
                 .collect::<Vec<_>>()
@@ -904,7 +944,7 @@ mod tests {
             let parsed = ruby_prism::parse(prepared.source.as_bytes());
             let node = parsed.node();
             let root = matcher::pattern_root(&node).expect("one expression");
-            reach(&root, &prepared)
+            reach(&root, &prepared, &HashMap::new())
                 .into_iter()
                 .map(|a| String::from_utf8_lossy(&a).into_owned())
                 .collect::<Vec<_>>()
@@ -960,8 +1000,9 @@ mod tests {
             let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
             let p_node = p_parsed.node();
             let p_root = matcher::pattern_root(&p_node).expect("one expression");
-            let filter = crate::pattern::prefilter::Filter::for_pattern(&p_root, &prepared);
-            let anchors = anchors(&p_root, &prepared);
+            let filter =
+                crate::pattern::prefilter::Filter::for_pattern(&p_root, &prepared, &HashMap::new());
+            let anchors = anchors(&p_root, &prepared, &HashMap::new());
 
             for source in sources {
                 let parsed = ruby_prism::parse(source.as_bytes());
@@ -970,7 +1011,7 @@ mod tests {
                 // A rule that moves no definition claims no completeness (D7),
                 // so the engine never runs its residue -- and a dispatcher in
                 // some other rule's file is not its business.
-                if !defines_a_method(&p_root, &prepared) {
+                if !defines_a_method(&p_root, &prepared, &HashMap::new()) {
                     would.retain(|o| o.context != Context::Dynamic);
                 }
                 if would.is_empty() {
@@ -993,7 +1034,7 @@ mod tests {
         let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
         let p_node = p_parsed.node();
         let p_root = matcher::pattern_root(&p_node).expect("single expression");
-        let anchors = anchors(&p_root, &prepared);
+        let anchors = anchors(&p_root, &prepared, &HashMap::new());
 
         let parsed = ruby_prism::parse(source.as_bytes());
         let hits = matcher::search(
@@ -1090,7 +1131,10 @@ mod tests {
         let prepared = prepare::prepare("def display_name($A); $B; end").expect("prepares");
         let parsed = ruby_prism::parse(prepared.source.as_bytes());
         let root = matcher::pattern_root(&parsed.node()).expect("single expression");
-        assert_eq!(anchors(&root, &prepared), vec![b"display_name".to_vec()]);
+        assert_eq!(
+            anchors(&root, &prepared, &HashMap::new()),
+            vec![b"display_name".to_vec()]
+        );
     }
 
     /// Unless the name is itself a metavariable, where there is no one name the
@@ -1100,7 +1144,46 @@ mod tests {
         let prepared = prepare::prepare("def $M($A); $B; end").expect("prepares");
         let parsed = ruby_prism::parse(prepared.source.as_bytes());
         let root = matcher::pattern_root(&parsed.node()).expect("single expression");
-        assert!(anchors(&root, &prepared).is_empty());
+        assert!(anchors(&root, &prepared, &HashMap::new()).is_empty());
+    }
+
+    /// The macro rules a rename expands to hold the macro name in a
+    /// metavariable, so reading the literal call name found `$MACRO` and
+    /// concluded no definition moves. D122 keys on that answer, so an
+    /// `attr_accessor` rename -- which does move a definition, since one macro
+    /// defines the reader and the writer -- was told it had half applied.
+    #[test]
+    fn a_macro_metavariable_held_to_definers_moves_a_definition() {
+        let prepared = prepare::prepare("$MACRO(*$BEFORE, :label, *$AFTER)").expect("prepares");
+        let parsed = ruby_prism::parse(prepared.source.as_bytes());
+        let root = matcher::pattern_root(&parsed.node()).expect("single expression");
+
+        let held_to = |names: &[&str]| {
+            let mut c = HashMap::new();
+            c.insert(
+                "$MACRO".to_string(),
+                crate::rule::Constraint {
+                    name: Some(names.iter().map(|n| (*n).to_string()).collect()),
+                    ..Default::default()
+                },
+            );
+            c
+        };
+
+        assert!(defines_a_method(
+            &root,
+            &prepared,
+            &held_to(&["attr_accessor", "attr_writer"])
+        ));
+        // `private :label` refers to a method rather than defining one, so a
+        // group holding only those has no definition to move.
+        assert!(!defines_a_method(
+            &root,
+            &prepared,
+            &held_to(&["private", "protected"])
+        ));
+        // Unconstrained, the metavariable admits every macro there is.
+        assert!(!defines_a_method(&root, &prepared, &HashMap::new()));
     }
 
     #[test]

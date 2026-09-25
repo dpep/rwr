@@ -145,6 +145,18 @@ pub(crate) fn placeholder_name(node: &Node<'_>, prepared: &Prepared) -> Option<S
     prepared.bindings.get(key).and_then(|b| b.name.clone())
 }
 
+/// The metavariable a call's *method name* stands for -- the `$MACRO` in
+/// `$MACRO(:foo)`.
+///
+/// Distinct from [`placeholder_name`], which asks whether the node *is* a
+/// placeholder reference. A call carrying arguments is not one, so that answers
+/// `None` for exactly the shape a macro rule takes.
+pub(crate) fn call_name_placeholder(node: &Node<'_>, prepared: &Prepared) -> Option<String> {
+    let call = node.as_call_node()?;
+    let name = std::str::from_utf8(call.name().as_slice()).ok()?;
+    prepared.bindings.get(name).and_then(|b| b.name.clone())
+}
+
 /// If `node` is a placeholder reference, the metavariable it stands for.
 fn placeholder<'a>(node: &Node<'_>, bindings: &'a HashMap<String, Binding>) -> Option<&'a str> {
     let name = bare_name(node)?;
@@ -626,6 +638,13 @@ pub(crate) enum ConstraintMiss {
     SameNameAs {
         other: String,
     },
+    /// The receiver resolved, but its `name=` is hand-written rather than
+    /// declared by an `attr_accessor` / `attr_writer`, so the rename that moved
+    /// `name` did not move `name=` with it.
+    MacroWriter {
+        name: String,
+        resolved: String,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -846,6 +865,20 @@ pub(crate) fn verdict(
                 && !hierarchy.extends_itself(resolved.class_name())
             {
                 return unresolved(true, Some(resolved.class_name().to_string()));
+            }
+            // A writer call site moves only when the writer came from the same
+            // macro as the reader, so that the edit renaming one has already
+            // renamed the other. Two hand-written `def`s are two methods.
+            if let Some(name) = &constraint.macro_writer
+                && !hierarchy.macro_writer(got, name)
+            {
+                return Verdict::BadBinding {
+                    capture: short.clone(),
+                    miss: ConstraintMiss::MacroWriter {
+                        name: name.clone(),
+                        resolved: got.to_string(),
+                    },
+                };
             }
         }
 
@@ -1620,6 +1653,7 @@ impl Verdict {
                 ConstraintMiss::Contains { .. } => "contains",
                 ConstraintMiss::Length { .. } => "length",
                 ConstraintMiss::SameNameAs { .. } => "same_name_as",
+                ConstraintMiss::MacroWriter { .. } => "macro_writer",
             },
         }
     }
@@ -1719,6 +1753,10 @@ impl Verdict {
                     Some(a) => format!("{a} character(s), not {wanted}"),
                     None => format!("not a literal, so `length: {wanted}` cannot apply"),
                 },
+                ConstraintMiss::MacroWriter { name, resolved } => format!(
+                    "`{resolved}#{name}=` is not declared by an attr_accessor/attr_writer, \
+                     so renaming `{name}` did not rename it"
+                ),
                 ConstraintMiss::SameNameAs { other } => {
                     format!("does not name the same identifier as {other}")
                 }

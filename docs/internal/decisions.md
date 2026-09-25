@@ -3761,3 +3761,62 @@ lives in a file naming nothing but the module, and fails without the link.
 
 *Reverses if:* the cost stops being noise on a large repository, or the hierarchy gains a complete
 index for another reason and the incremental walk goes away with it.
+
+## D125 - A rename carries the writer call sites when, and only when, the writer came from a macro
+
+**Decided.** `attr_accessor :label` renamed to `:caption` moves **two** methods, `label` and
+`label=`, because one macro defines both. The rename moved the symbol and the reader call sites and
+left `w.label = 1` behind -- reporting "2 site(s)" over a tree that raised
+`undefined method 'label='`. The count was right and the tree was broken.
+
+**The rule, in one sentence:** a rename carries `x.name = v` exactly when the hierarchy shows
+`name=` comes from an `attr_accessor` / `attr_writer`, because that is precisely when the edit that
+moved the reader has already moved the writer.
+
+**The hand-written case is left alone, and that is not a hedge.** `def label` and `def label=` are
+two methods; a caller renaming one may mean nothing by the other, and moving those call sites would
+break a rename that is correct today. The testbed has said so since it was written --
+`archived_account.rb`'s `def display_name=` is marked `GT:ignore`, "a writer shares the stem and
+nothing else". The macro is the only thing that separates the two cases, so it is what the rule is
+keyed on.
+
+**`expand()` cannot answer this, which is why the gate is a constraint.** Rule expansion runs before
+a single source is parsed, so whether `name=` is macro-defined is unknowable there. The gate rides
+on the `$R` constraint, where the resolved receiver class already is, and is `#[serde(skip)]`: it is
+not a knob a rule file can reach, because it exists to answer one question the designator notation
+raises.
+
+**It anchors no residue.** The rule's call name is `name=`, a different identifier from the one the
+run is about -- and D99 makes `Widget#label=` unsayable as a designator, so `label=` is not a name
+this account covers. Left in, the search reported the hand-written `def display_name=` that the
+rename correctly left alone: a fourth false positive on a testbed budget of three.
+
+**Only where a writer is spellable.** `$R.suspended? = $V` is a syntax error, and a pattern that
+does not parse fails the whole run at `Engine::new` -- so every predicate rename died at exit 3
+until the rule was gated on the name ending in an identifier character.
+
+**Not covered:** `x.foo += 1` and the other operator-assignment forms, which are distinct nodes and
+would need a rule each. Measured on rails: 172 against 8,173 plain attribute writes, 2.1%.
+
+## D126 - D122's guard was keyed on the literal macro name, and a macro rename is a definition
+
+**Decided.** D122 says the trigger is "this rule group rewrote sites and none of them was a
+definition", and `DEFINERS` has counted `attr_accessor` as defining a method since residue shipped.
+The implementation read the *literal* call name of the pattern, which for the macro rules a
+designator expands to is the metavariable `$MACRO` -- in `DEFINERS` under no spelling. So an
+`attr_accessor` rename was recorded as having moved no definition and drew "moved call site(s) but
+no definition" over a rename that was complete.
+
+**The wording was right; the key was wrong.** The sentence is a true description of what the guard
+means, and D122 argued its shape at length. What needed fixing is the answer fed to it, so the
+answer is what changed: a metavariable in the macro position counts as a definer when every name its
+constraint admits is in `DEFINERS`, read off that list rather than restated beside it.
+
+**Which forced the macro allowlist apart.** `ON_THE_ENCLOSING_TABLE` mixed `attr_accessor` with
+`private` and `module_function` -- definers with referrers -- so one rule could only ever answer
+"sometimes". Split in two, the per-rule answer is exact and the shared rule id still groups them, so
+a group whose `attr_accessor` fired is vouched for and a group where only `private :label` matched
+is not.
+
+**It still fires where it should.** An `attr_accessor` outside the walked path is the population
+D122 exists for, and is now the case the e2e test pins.

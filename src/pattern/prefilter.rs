@@ -96,8 +96,15 @@ impl Filter {
     /// That is well typed, silent, and indistinguishable from a pattern that
     /// anchors on nothing -- and it cost the blind-spot report on every file
     /// the required literals alone could not admit.
-    pub(crate) fn for_pattern(root: &Node<'_>, prepared: &Prepared) -> Self {
-        Filter::new(&required_of(prepared), &residue::reach(root, prepared))
+    pub(crate) fn for_pattern(
+        root: &Node<'_>,
+        prepared: &Prepared,
+        constraints: &std::collections::HashMap<String, crate::rule::Constraint>,
+    ) -> Self {
+        Filter::new(
+            &required_of(prepared),
+            &residue::reach(root, prepared, constraints),
+        )
     }
 
     /// The two sets supplied separately, which is how the residue side came to

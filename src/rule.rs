@@ -241,6 +241,18 @@ pub(crate) struct Constraint {
     #[serde(default)]
     pub subclasses: Option<bool>,
 
+    /// The receiver's class must get a writer for this name from an
+    /// `attr_accessor` / `attr_writer`.
+    ///
+    /// Set only by the designator expansion, and only on the `$R.name = $V`
+    /// rule, which is why it is not readable from YAML. It answers the one
+    /// question `expand()` cannot: that runs before a single source is parsed,
+    /// and whether `name=` comes from a macro or from a hand-written `def` is the
+    /// whole of the difference between a writer call site a rename must carry and
+    /// one it must leave alone.
+    #[serde(skip)]
+    pub macro_writer: Option<String>,
+
     /// The capture must be this kind of node.
     ///
     /// The predicate a *literal* rule needs. Sorting array elements is only
@@ -811,6 +823,41 @@ impl MethodRename {
 
         let mut rules = definitions;
         rules.push(calls);
+        // `w.label = 1`, which `$R.label(*$A)` cannot reach: `label=` is a
+        // different method name, and D99 refuses `Widget#label=` as a designator,
+        // so there is no second command to send the caller to.
+        //
+        // Gated on the writer being macro-defined, because that is exactly when
+        // the rename has already moved it. `attr_accessor :label` -> `:caption`
+        // is one edit that renames `label` *and* `label=`, so leaving the writer
+        // call sites behind is simply incomplete -- rwr reported "2 sites" over a
+        // tree that no longer ran. A hand-written `def label=` beside `def label`
+        // is a second method the caller did not ask about, and moving its call
+        // sites would break the rename that works today.
+        //
+        // Instance side only: an `attr_accessor` in a `class << self` body is not
+        // collected as a macro writer, so a `.` rename has nothing to gate on and
+        // the rule would be dead weight.
+        // `$R.suspended? = $V` is a syntax error, and a pattern that does not
+        // parse fails the whole run at `Engine::new` -- so a predicate rename
+        // died at exit 3 until this gate existed. Only a plain identifier can
+        // carry a writer; `?`, `!` and the operator names cannot.
+        let can_take_a_writer = name
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if class.is_some() && kind == Kind::Instance && can_take_a_writer {
+            let mut constraints = receiver();
+            if let Some(c) = constraints.get_mut("$R") {
+                c.macro_writer = Some(name.to_string());
+            }
+            rules.push(Rule {
+                pattern: format!("$R.{name} = $V"),
+                rewrite: Some(format!("$R.{new} = $V")),
+                constraints,
+                ..Default::default()
+            });
+        }
         // `*$A` for the same reason the call rule takes it: `send` forwards the
         // method's arguments, so `account.send(:display_name, 1)` is the
         // ordinary spelling and the no-argument shape alone missed it.
@@ -855,22 +902,30 @@ impl MethodRename {
             // a different method with different callers. The macro rules shipped
             // without the guard the definition rules got, so an instance rename
             // rewrote both (D98).
-            const ON_THE_ENCLOSING_TABLE: &[&str] = &[
-                "attr",
-                "attr_reader",
-                "attr_accessor",
-                "attr_writer",
-                "private",
-                "public",
-                "protected",
-                "module_function",
-            ];
+            //
+            // Split by whether the macro *defines* the method or merely refers
+            // to it, because D122 asks per rule whether a definition moved and
+            // one allowlist spanning both could only answer "sometimes". With
+            // `attr_accessor` in the same rule as `private`, an `attr_accessor`
+            // rename was filed as having moved no definition and drew a
+            // "half applied" warning over a rename that was complete.
+            const DEFINES_ON_THE_ENCLOSING_TABLE: &[&str] =
+                &["attr", "attr_reader", "attr_accessor", "attr_writer"];
+            const REFERS_ON_THE_ENCLOSING_TABLE: &[&str] =
+                &["private", "public", "protected", "module_function"];
             // The one pair that names a *class* method from the *instance*
             // body, which is why it cannot share a singleton flag with the rest.
             const FROM_THE_CLASS_BODY: &[&str] = &["private_class_method", "public_class_method"];
             let groups: &[(&[&str], bool)] = match kind {
-                Kind::Instance => &[(ON_THE_ENCLOSING_TABLE, false)],
-                Kind::Class => &[(ON_THE_ENCLOSING_TABLE, true), (FROM_THE_CLASS_BODY, false)],
+                Kind::Instance => &[
+                    (DEFINES_ON_THE_ENCLOSING_TABLE, false),
+                    (REFERS_ON_THE_ENCLOSING_TABLE, false),
+                ],
+                Kind::Class => &[
+                    (DEFINES_ON_THE_ENCLOSING_TABLE, true),
+                    (REFERS_ON_THE_ENCLOSING_TABLE, true),
+                    (FROM_THE_CLASS_BODY, false),
+                ],
             };
             for (spellings, singleton) in groups {
                 let mut macro_names = HashMap::new();
@@ -1619,7 +1674,13 @@ mod tests {
                 rename: Some("full_name".into()),
             }
             .expand();
-            for rule in rules.iter().filter(|r| r.pattern.starts_with("$R.")) {
+            for rule in rules
+                .iter()
+                // The writer rule is the one call shape that takes no argument
+                // list: `w.label = v` carries a single assigned value, which
+                // `$V` already binds whole.
+                .filter(|r| r.pattern.starts_with("$R.") && !r.pattern.contains(" = $V"))
+            {
                 assert!(
                     rule.pattern.contains("*$A"),
                     "{method}: `{}` cannot reach a call with arguments",

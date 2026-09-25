@@ -15,7 +15,7 @@
 //! before anything is compared (D100).
 
 use crate::pattern::generated;
-use crate::pattern::matcher::{enclosing_class, scope_name_of};
+use crate::pattern::matcher::{SINGLETON, enclosing_class, scope_name_of};
 use rayon::prelude::*;
 use ruby_prism::Node;
 use std::collections::{HashMap, HashSet};
@@ -48,6 +48,14 @@ pub(crate) struct Hierarchy {
     /// *singleton* table, so a rename of `Host#foo` must not move it while a
     /// rename of `Host.foo` must.
     included: HashMap<String, Vec<String>>,
+    /// Names for which an `attr_accessor` / `attr_writer` in each class body
+    /// declares a writer.
+    ///
+    /// One macro defines `name` and `name=`, so moving its symbol renames both
+    /// and the `x.name = v` call sites have to move with it. A hand-written `def
+    /// name=` is a separate method and is left alone -- the macro is the only
+    /// thing that tells the two cases apart.
+    macro_writers: HashMap<String, HashSet<String>>,
     /// `Alias = Account` -- another name for the same class.
     ///
     /// A constant alias is not inheritance and not a mixin: it is the *same*
@@ -104,6 +112,8 @@ struct Collected {
     refines: Vec<(Ref, Ref)>,
     self_extended: Vec<String>,
     aliases: Vec<(String, Ref)>,
+    /// `(class body, name)` for every `attr_accessor` / `attr_writer` symbol.
+    macro_writers: Vec<(Ref, String)>,
 }
 
 impl Collected {
@@ -115,6 +125,7 @@ impl Collected {
         self.refines.extend(other.refines);
         self.self_extended.extend(other.self_extended);
         self.aliases.extend(other.aliases);
+        self.macro_writers.extend(other.macro_writers);
     }
 
     /// Every constant name this file saw, declared or referred to.
@@ -171,6 +182,32 @@ fn extends_itself(node: &Node<'_>) -> bool {
         }),
         _ => false,
     }
+}
+
+/// The names an `attr_accessor` / `attr_writer` call declares a writer for.
+///
+/// `attr_reader` is left out because it declares none, and `attr` because its
+/// second argument decides (`attr :x, true`) and that argument is not a name --
+/// the same reason `DEFINERS` never labels it either way.
+fn macro_writer_names(node: &Node<'_>) -> Vec<String> {
+    let Some(call) = node.as_call_node() else {
+        return Vec::new();
+    };
+    if !matches!(call.name().as_slice(), b"attr_accessor" | b"attr_writer") {
+        return Vec::new();
+    }
+    call.arguments()
+        .into_iter()
+        .flat_map(|a| {
+            a.arguments()
+                .iter()
+                .filter_map(|n| {
+                    let symbol = n.as_symbol_node()?;
+                    String::from_utf8(symbol.unescaped().to_vec()).ok()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// The modules a `include`/`prepend`/`extend` call names.
@@ -323,6 +360,22 @@ fn links(root: &Node<'_>) -> Collected {
                     }
                     out.mixins.push((host.clone(), module));
                 }
+            }
+        }
+        if let Some(host) = &here
+            // `attr_accessor :x` inside `class << self` declares the *class*
+            // writer, a different method with different callers -- the mistake
+            // D98 caught in the macro rules themselves.
+            && scope.last().map(String::as_str) != Some(SINGLETON)
+        {
+            for name in macro_writer_names(&node) {
+                out.macro_writers.push((
+                    Ref {
+                        written: host.clone(),
+                        enclosing: None,
+                    },
+                    name,
+                ));
             }
         }
         for child in generated::children(&node) {
@@ -587,6 +640,12 @@ impl Hierarchy {
             let (host, module) = (h.resolve(host), h.resolve(module));
             h.refines.entry(host).or_default().push(module);
         }
+        for (host, name) in &all.macro_writers {
+            h.macro_writers
+                .entry(h.resolve(host))
+                .or_default()
+                .insert(name.clone());
+        }
         h.self_extended = all
             .self_extended
             .iter()
@@ -641,6 +700,19 @@ impl Hierarchy {
             .map(|(host, _)| host)
             .peekable();
         hosts.peek().is_some() && hosts.all(|host| self.descends_from(host, class))
+    }
+
+    /// Whether `class` gets a writer for `name` from an `attr_accessor` /
+    /// `attr_writer`, its own or one written in an ancestor or a concern.
+    ///
+    /// What decides whether a rename carries the `x.name = v` call sites: the
+    /// macro defines `name` and `name=` together, so the edit that moves its
+    /// symbol has already renamed both.
+    pub(crate) fn macro_writer(&self, class: &str, name: &str) -> bool {
+        self.macro_writers.iter().any(|(host, names)| {
+            names.contains(name)
+                && (self.descends_from(class, host) || self.may_rename_into(host, class))
+        })
     }
 
     /// The modules that refine `class`.
@@ -992,6 +1064,37 @@ mod tests {
             !h.may_rename_into("Naming", "Account"),
             "the distant includer has to be found, or the rename silently widens"
         );
+    }
+
+    /// `attr_accessor` declares a writer and `attr_reader` does not, which is
+    /// the whole of what decides whether a rename carries `x.name = v`.
+    #[test]
+    fn a_macro_writer_is_told_from_a_hand_written_one() {
+        let accessor = Hierarchy::from_source("class Widget\n  attr_accessor :label\nend\n");
+        assert!(accessor.macro_writer("Widget", "label"));
+
+        let reader = Hierarchy::from_source("class Widget\n  attr_reader :label\nend\n");
+        assert!(!reader.macro_writer("Widget", "label"));
+
+        let writer = Hierarchy::from_source("class Widget\n  attr_writer :label\nend\n");
+        assert!(writer.macro_writer("Widget", "label"));
+
+        let by_hand =
+            Hierarchy::from_source("class Widget\n  def label; end\n  def label=(v); end\nend\n");
+        assert!(!by_hand.macro_writer("Widget", "label"));
+
+        // Inherited and mixed-in declarations are the class's own.
+        let inherited = Hierarchy::from_source(
+            "class Widget\n  attr_accessor :label\nend\nclass Gadget < Widget; end\n",
+        );
+        assert!(inherited.macro_writer("Gadget", "label"));
+
+        // `class << self` declares the *class* writer, a different method with
+        // different callers -- the distinction D98 caught in the macro rules.
+        let singleton = Hierarchy::from_source(
+            "class Widget\n  class << self\n    attr_accessor :label\n  end\nend\n",
+        );
+        assert!(!singleton.macro_writer("Widget", "label"));
     }
 
     /// Valid Ruby cannot express a cycle, but a half-written file can, and the

@@ -377,12 +377,14 @@ impl Engine {
             prepareds.push(p);
         }
 
-        let defines: Vec<bool> = prepareds
+        let defines: Vec<bool> = rules
             .iter()
-            .map(|prepared| {
+            .zip(&prepareds)
+            .map(|(rule, prepared)| {
                 let parsed = ruby_prism::parse(prepared.source.as_bytes());
-                matcher::pattern_root(&parsed.node())
-                    .is_some_and(|root| residue::defines_a_method(&root, prepared))
+                matcher::pattern_root(&parsed.node()).is_some_and(|root| {
+                    residue::defines_a_method(&root, prepared, &rule.constraints)
+                })
             })
             .collect();
         let claims_completeness = defines.iter().any(|d| *d);
@@ -416,12 +418,15 @@ impl Engine {
             })
             .collect();
 
-        let filters: Vec<prefilter::Filter> = prepareds
+        let filters: Vec<prefilter::Filter> = rules
             .iter()
-            .map(|prepared| {
+            .zip(&prepareds)
+            .map(|(rule, prepared)| {
                 let parsed = ruby_prism::parse(prepared.source.as_bytes());
                 match matcher::pattern_root(&parsed.node()) {
-                    Some(root) => prefilter::Filter::for_pattern(&root, prepared),
+                    Some(root) => {
+                        prefilter::Filter::for_pattern(&root, prepared, &rule.constraints)
+                    }
                     // Unreachable: the loop above refuses a pattern that is not
                     // one expression. Filtering nothing is the safe reading.
                     None => prefilter::Filter::new(&[], &[]),
@@ -1033,7 +1038,7 @@ impl Engine {
             let Some(p_root) = matcher::pattern_root(&p_node) else {
                 continue;
             };
-            let anchors = residue::anchors(&p_root, prepared);
+            let anchors = residue::anchors(&p_root, prepared, &rule.constraints);
             if anchors.is_empty() {
                 continue;
             }
