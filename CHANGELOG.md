@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.9 — 2026-09-24
 
 The shell examples in `README.md`, `docs/` and the Claude skill are now run by the test suite against
 a fixture repo, and must produce the effect their verb promises rather than merely exit 0. Two had
