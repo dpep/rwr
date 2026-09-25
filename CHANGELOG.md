@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+**A rename now moves a definition a concern contributes.** A method defined in a module the class
+includes is the class's method, so renaming `Account#suspended?` moves the `def` in the concern along
+with the call sites. Previously the call sites moved, the definition did not, and the run reported that
+same definition while exiting 1 — a half-applied rename on any Rails app, since 85 files in mastodon
+and 208 in rails define an `ActiveSupport::Concern` (D123, D124).
+
+**Unless another class includes the same module**, in which case the definition is left alone and
+reported. Moving it would rename a method you did not ask about while that class's own call sites
+stayed behind, so rwr declines and exits 1. Roughly half of concern modules have a single includer and
+are reached; a third to a half are shared and are declined. `extend` is never reached by an instance
+rename — it puts the module's methods on the singleton table.
+
+**An `attr_accessor` rename now carries the writer call sites.** One macro defines `label` and
+`label=`, so renaming the symbol renames both, and `w.label = 1` moves with it — it used to be left
+behind, raising `undefined method 'label='` at exit 1. A hand-written `def label=` is a separate method
+and neither it nor its callers move. `w.label += 1` and the other operator-assignment forms are still
+not reached (D125).
+
+**An `attr_accessor` rename no longer warns that it half applied.** The "moved call site(s) but no
+definition" check was keyed on the literal macro name and never recognised the macro rules a designator
+expands to, so a complete rename exited 1 with the wrong reason. It still fires where the macro
+genuinely sits outside the path you gave it (D126).
+
 **A rename no longer half applies itself, by three separate roads.** A rename is one edit across a
 definition and every call site; moving one end without the other raises `NoMethodError`.
 
@@ -18,8 +41,7 @@ definition and every call site; moving one end without the other raises `NoMetho
   stays written, but the rename is not finished, so a script no longer reads success. This is the only
   case where `rewrite` returns 1, and `docs/internal/cli-conventions.md` said it never did — that was
   wrong. It fires where the definition sits outside the path you gave it (previously silent), where
-  the method is defined by `attr_accessor`, and where it is defined in an `ActiveSupport::Concern` —
-  **that last one rwr still cannot reach, and will fire on a real Rails repo immediately.**
+  the definition sits outside the path you gave it (previously silent).
 
 ## 0.6.9 — 2026-09-24
 

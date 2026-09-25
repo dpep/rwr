@@ -120,6 +120,13 @@ Where a site lives inside a heredoc or a template body, the marker sits on the
 opening line instead -- a heredoc body has nowhere to put a Ruby comment. One
 marker per line: the scorer reads the first `GT:` on a line and stops.
 
+A marker records what **Ruby** does, never what rwr currently manages. Six sites in
+`concerns/nameable.rb`, `lib/account_naming.rb` and `lib/account_patches.rb` were marked
+`GT:residue` while the comment beside each one explained that a rename leaving it behind ships a
+class whose old name still answers — describing the tool's reach, not the language's semantics. The
+fixture was scoring rwr against rwr, and passed. They are `GT:rewrite` now. When a marker and its own
+comment disagree, the comment is the ground truth.
+
 A marker covers its own line and the one below it, and no further. A marker above a two-line
 site therefore lands on the first line and leaves the second unscored — so a fixture whose
 interesting statement is the *second* line (`account = Klass.new`, then `account.method`) is
