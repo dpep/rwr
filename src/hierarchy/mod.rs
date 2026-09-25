@@ -39,6 +39,15 @@ pub(crate) struct Hierarchy {
     /// methods in concerns, so a report that only knows `class X < Y` is silent
     /// about most of the code the class actually runs.
     mixins: HashMap<String, Vec<String>>,
+    /// The subset of `mixins` that lands on the host's *instance* table --
+    /// `include` and `prepend`, not `extend`.
+    ///
+    /// Kept apart for the reason `refines` is: lumping the spellings together is
+    /// right for a report, which only asks where a method might be written, and
+    /// wrong for a rewrite. `extend M` puts M's `def foo` on the host's
+    /// *singleton* table, so a rename of `Host#foo` must not move it while a
+    /// rename of `Host.foo` must.
+    included: HashMap<String, Vec<String>>,
     /// `Alias = Account` -- another name for the same class.
     ///
     /// A constant alias is not inheritance and not a mixin: it is the *same*
@@ -91,6 +100,7 @@ struct Collected {
     declared: Vec<String>,
     superclass: Vec<(String, Ref)>,
     mixins: Vec<(Ref, Ref)>,
+    included: Vec<(Ref, Ref)>,
     refines: Vec<(Ref, Ref)>,
     self_extended: Vec<String>,
     aliases: Vec<(String, Ref)>,
@@ -101,6 +111,7 @@ impl Collected {
         self.declared.extend(other.declared);
         self.superclass.extend(other.superclass);
         self.mixins.extend(other.mixins);
+        self.included.extend(other.included);
         self.refines.extend(other.refines);
         self.self_extended.extend(other.self_extended);
         self.aliases.extend(other.aliases);
@@ -296,14 +307,21 @@ fn links(root: &Node<'_>) -> Collected {
                     out.mixins.push((host, module));
                 }
             } else {
+                // `extend M` reaches the host's singleton table and the other
+                // two reach its instance table, so which spelling it was decides
+                // whether a `#` rename may move a `def` written in M.
+                let instance_side = node
+                    .as_call_node()
+                    .is_some_and(|c| matches!(c.name().as_slice(), b"include" | b"prepend"));
                 for module in modules {
-                    out.mixins.push((
-                        host.clone(),
-                        Ref {
-                            written: module,
-                            enclosing: enclosing.clone(),
-                        },
-                    ));
+                    let module = Ref {
+                        written: module,
+                        enclosing: enclosing.clone(),
+                    };
+                    if instance_side {
+                        out.included.push((host.clone(), module.clone()));
+                    }
+                    out.mixins.push((host.clone(), module));
                 }
             }
         }
@@ -404,11 +422,20 @@ impl Hierarchy {
 
     /// Build only the part of the hierarchy reachable from `roots`.
     ///
-    /// A rename names one class, and only its descendants matter -- so rather
-    /// than parsing every file that declares any superclass, parse only those
-    /// mentioning a class already known to be in the tree, and iterate to a
-    /// fixpoint. `Gold < Premium < Account` is reached in two rounds: the first
-    /// finds Premium, which puts "Premium" into the search set for the second.
+    /// A rename names one class, and only what contributes to it matters -- so
+    /// rather than parsing every file that declares any superclass, parse only
+    /// those mentioning a class already known to be in the tree, and iterate to
+    /// a fixpoint. `Gold < Premium < Account` is reached in two rounds: the
+    /// first finds Premium, which puts "Premium" into the search set for the
+    /// second.
+    ///
+    /// Mixins grow the set the same way, and used not to. A module is known once
+    /// something known mixes it in, which then reaches every *other* class that
+    /// mixes in the same module -- a file cannot include a module without naming
+    /// it. Without that link a concern's other includers were never parsed, and
+    /// the answer to "does any unrelated class share this module" was a confident
+    /// no from a walk that had not looked: on mastodon, 1 of the 59 classes that
+    /// include `Authorization`.
     ///
     /// The search set holds *last segments*, because that is what the bytes of a
     /// file carry: `Billing::Account` is reached by a file writing `Account`
@@ -501,6 +528,26 @@ impl Hierarchy {
                         grew = true;
                     }
                 }
+                // A mixed-in module is known once its host is, for the reason a
+                // subclass is known once its parent is: a file that mixes a
+                // module in has to *name* it, so naming the module reaches every
+                // one of them.
+                //
+                // Only superclass links grew the search set before, so a module
+                // name never entered it and a file whose only interesting line
+                // was `include Authorization` was never parsed. The docstring's
+                // claim that the walk is exact held for inheritance and not for
+                // mixins: on mastodon the hierarchy found 1 of the 59 classes
+                // that include `Authorization`, so any question about who *else*
+                // has a concern was answered on the strength of not having
+                // looked -- silently, and in the unsafe direction.
+                for (host, module) in &found.mixins {
+                    if known.contains(last_segment(&host.written))
+                        && known.insert(last_segment(&module.written).to_string())
+                    {
+                        grew = true;
+                    }
+                }
                 all.absorb(found);
             }
             if !grew {
@@ -531,6 +578,10 @@ impl Hierarchy {
         for (host, module) in &all.mixins {
             let (host, module) = (h.resolve(host), h.resolve(module));
             h.mixins.entry(host).or_default().push(module);
+        }
+        for (host, module) in &all.included {
+            let (host, module) = (h.resolve(host), h.resolve(module));
+            h.included.entry(host).or_default().push(module);
         }
         for (host, module) in &all.refines {
             let (host, module) = (h.resolve(host), h.resolve(module));
@@ -563,6 +614,33 @@ impl Hierarchy {
         self.mixins
             .iter()
             .any(|(host, modules)| modules.contains(&module) && self.descends_from(host, class))
+    }
+
+    /// Whether a rename anchored on `class` may move an instance-method
+    /// definition written in `module`.
+    ///
+    /// Two conditions, and the second is the one doing the work. The module has
+    /// to reach `class` on the *instance* side, so `extend` is out. And every
+    /// class rwr saw mix it in has to be `class` or a descendant: a concern
+    /// shared with an unrelated class defines that class's method too, so moving
+    /// the definition answers a wider question than the designator asked -- and
+    /// the sibling's call sites sit outside the receiver narrowing, so they would
+    /// not move with it. Declining leaves the definition as residue, which is an
+    /// account the caller can act on; moving it would leave a break that nothing
+    /// reports.
+    ///
+    /// A module included into another module and only then into `class` is
+    /// declined as well: the chain is not followed, so the honest answer is the
+    /// conservative one.
+    pub(crate) fn may_rename_into(&self, module: &str, class: &str) -> bool {
+        let module = self.canonical(module);
+        let mut hosts = self
+            .included
+            .iter()
+            .filter(|(_, modules)| modules.contains(&module))
+            .map(|(host, _)| host)
+            .peekable();
+        hosts.peek().is_some() && hosts.all(|host| self.descends_from(host, class))
     }
 
     /// The modules that refine `class`.
@@ -854,6 +932,66 @@ mod tests {
         )];
         let (h, _) = Hierarchy::reachable_from(&sources, &["Billing::Account".to_string()]);
         assert!(h.descends_from("Billing::Premium", "Billing::Account"));
+    }
+
+    /// A rename may move a definition written in a module the class includes --
+    /// but only where no unrelated class shares the module.
+    #[test]
+    fn a_rename_reaches_an_exclusively_included_module() {
+        let h = Hierarchy::from_source(
+            "module Naming\n  def display_name; end\nend\nclass Account\n  include Naming\nend\n",
+        );
+        assert!(h.may_rename_into("Naming", "Account"));
+
+        // A subclass of the anchor is not an outsider: the method it gets from
+        // the module is the anchor's method.
+        let with_subclass = Hierarchy::from_source(
+            "module Naming; end\nclass Account\n  include Naming\nend\n\
+             class Premium < Account\n  include Naming\nend\n",
+        );
+        assert!(with_subclass.may_rename_into("Naming", "Account"));
+
+        // An unrelated class sharing the module is: moving the definition would
+        // rename its method too, and its call sites sit outside the receiver
+        // narrowing, so they would not move with it.
+        let shared = Hierarchy::from_source(
+            "module Naming; end\nclass Account\n  include Naming\nend\n\
+             class Invoice\n  include Naming\nend\n",
+        );
+        assert!(!shared.may_rename_into("Naming", "Account"));
+
+        // `extend` puts the module's instance methods on the *singleton* table,
+        // so a `#` rename must not claim them.
+        let extended =
+            Hierarchy::from_source("module Naming; end\nclass Account\n  extend Naming\nend\n");
+        assert!(!extended.may_rename_into("Naming", "Account"));
+
+        // A module nobody was seen to mix in says nothing about the class.
+        let orphan = Hierarchy::from_source("module Naming\n  def display_name; end\nend\n");
+        assert!(!orphan.may_rename_into("Naming", "Account"));
+    }
+
+    /// The premise the sharing check rests on: the walk has to *find* the other
+    /// includers, and it only ever grew its search set through superclass links.
+    ///
+    /// Measured on mastodon before this: 1 of the 59 classes that include
+    /// `Authorization` was parsed, so "no unrelated class shares this module"
+    /// was answered on the strength of not having looked. The file that includes
+    /// a module has to name it, so naming the module reaches all of them.
+    #[test]
+    fn the_search_set_reaches_a_module_a_distant_class_includes() {
+        let sources = vec![
+            crate::source::Source::Owned(b"class Account\n  include Naming\nend\n".to_vec()),
+            crate::source::Source::Owned(b"module Naming\n  def display_name; end\nend\n".to_vec()),
+            // Names neither Account nor any subclass of it -- reachable only
+            // through the module.
+            crate::source::Source::Owned(b"class Invoice\n  include Naming\nend\n".to_vec()),
+        ];
+        let (h, _) = Hierarchy::reachable_from(&sources, &["Account".to_string()]);
+        assert!(
+            !h.may_rename_into("Naming", "Account"),
+            "the distant includer has to be found, or the rename silently widens"
+        );
     }
 
     /// Valid Ruby cannot express a cycle, but a half-written file can, and the

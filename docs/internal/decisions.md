@@ -3661,3 +3661,103 @@ above are the case for taking it.
 *Reverses if:* the matcher learns to reach a definition wherever the hierarchy says the class got
 it, *and* renames gain a way to be partial and correct -- at which point the remaining cases are
 genuine refusals in D110's sense rather than blind spots.
+
+## D123 - A rename moves a definition a mixin contributes, but only where the mixin is not shared
+
+**Decided.** D122's "*Reverses if*" clause, taken: the matcher now reaches a definition wherever the
+hierarchy says the class got it -- with one restriction, which is the whole of this decision.
+
+**The defect was the two halves disagreeing.** `residue::scoped_to` consults
+`hierarchy.contributes_to`; `matcher::verdict`'s `inside` check did not. So a rename of a
+concern-defined method rewrote every call site, declined the definition, and *reported that very
+definition* in the same run -- self-contradictory output over a tree that no longer ran. It is not
+concern-specific: any `include`d module does it, and `ActiveSupport::Concern` has nothing to do with
+the mechanism.
+
+**`include`/`prepend`, never `extend`.** The mixin map lumps all four spellings together, which is
+right for a report -- any of them could be where the method is written -- and wrong for a rewrite.
+`extend M` puts M's `def foo` on the host's *singleton* table, so an instance rename that consulted
+the undifferentiated map would move a class method's definition: a wrong rewrite from a node
+identical to the one it wanted. `included` is kept alongside `mixins` the way `refines` already is.
+Refinements stay out for their own reason (D78): they only apply where a file says `using`.
+
+**Shared modules are declined, not renamed.** A module mixed into an unrelated class defines *that*
+class's method too. Moving it is correct Ruby and a wider question than `Account#suspended?` asked --
+and, worse, the sibling's call sites sit outside the receiver narrowing, so they would *not* move
+with it. The rename would complete and exit 0, with the sibling's now-broken calls filed as ordinary
+residue -- `rewrite` does not exit 1 on residue, so the only trace of a `NoMethodError` just shipped
+is one line among the blind-spot noise. Declining leaves the
+definition as residue and D122's non-zero exit, which is an account the caller can act on. So: move
+the definition only when every class rwr saw mix the module in is the anchor or a descendant of it.
+
+**The announcement is left alone, because the restriction is what keeps it true.** It reads "the
+instance method `suspended?` on Account and its subclasses". Where the rename proceeds, that is
+exactly the blast radius -- no other class has the method. Where it would be wider, rwr declines
+rather than renaming, so there is no case in which the sentence understates what was done. Had the
+shared case been renamed, the announcement would have had to name every includer, and this project's
+rule is that a result set which silently answers a different question than the one typed is the
+failure the notation exists to avoid.
+
+**Measured, and the measurement changed the design twice.** On a 60-method sample of concern-defined
+methods on mastodon's `app/`, the first cut turned 11 half-applied renames (exit 1) into complete
+ones (exit 0) -- and 7 of the 11 were modules shared with 2 to 60 unrelated classes. The exclusivity
+check was passing *vacuously*, for the reason D124 records. With that fixed, the same sample turns
+**4** renames complete and declines the rest, with nothing that used to rewrite correctly stopping.
+mastodon has 85 concern modules (46 with one includer, 34 shared, 5 unseen); rails has 246 (95, 88,
+63). The single-includer bucket is what this reaches.
+
+*Re-measured independently before merge*, because the split is what the restriction rests on.
+mastodon: 81 concern modules, 44 single-includer, **34 shared**, 3 unseen -- the shared count exactly,
+the rest within two of the figures above, the difference being how a nested `module` is attributed.
+`Authorization` has **59** includers under `app/`, confirming D124's number to the digit. rails did
+not reproduce: 178/77/79/22 against 246/95/88/63, and 246 sits above the 226 `extend
+ActiveSupport::Concern` declarations that exist in its `.rb` files at all -- so that line counts some
+wider population than this one does, and the enumeration here collapses same-named concerns across
+gems (`Callbacks` is several modules), which the rails figure evidently did not. What survives both
+countings is the only thing the decision needs: **two fifths to a half** of concern modules have a
+single includer, and a third to a half are shared. The restriction is narrow, and it is not vacuous.
+
+**A case it deliberately does not fix.** `extend Finders` gives `Account.find_it` from `def find_it`
+in a module -- a *class* method whose definition carries `singleton: false`, so the singleton check
+declines it even when the `inside` check would not. Still a reported half-rename, and a different
+defect with a different shape.
+
+*Reverses if:* the includer set stops being knowable -- at which point declining every mixin
+definition, rather than only the shared ones, is the honest fallback.
+
+## D124 - The hierarchy's search set grows through mixins as well as superclasses
+
+**Decided.** `reachable_from` parses only files naming a class already known to be in the tree, and
+iterates. Its docstring claimed the walk was "exact rather than approximate -- nothing is guessed,
+only deferred until a name is known to matter". That held for inheritance and not for mixins: the
+search set grew **only** through superclass links, so a module name never entered it and a file whose
+only interesting line was `include Authorization` was never parsed.
+
+**It was silent, and it failed in the unsafe direction.** D123 needs to know whether an unrelated
+class shares a concern. Asked of a hierarchy that had not parsed the other includers, the answer was
+a confident "no": on mastodon, the walk found **1 of the 59** classes that include `Authorization`,
+and the whole mixin index held one entry. A gate that says "nobody else has this module" on the
+strength of not having looked is worse than no gate, because it reads as a check.
+
+**The fix is the link that was missing, not a bigger hammer.** A module is known once something
+known mixes it in -- exactly as a subclass is known once its parent is. A file cannot include a
+module without naming it, so naming the module reaches every includer there is. This keeps the
+walk's economy and its exactness argument; it does not widen it to the whole repository.
+
+**Measured against the alternative.** Dropping the per-round filter entirely (parse every candidate)
+also closes the gap and costs, on `ActiveRecord::Base#save` over rails, 1.02s -> 1.11s minimum of
+five. The mixin link costs 1.02s -> 1.04s, inside the noise, and on mastodon's `app/` 0.11s -> 0.12s.
+Same correctness, an order of magnitude less cost, so the link wins.
+
+**What it still cannot see.** A module mixed in by a file outside the walked path, or by a
+computed/aliased constant. Those are the standing blind-spot contract, and the exposure is the one
+D51 already accepts for an unseen subclass.
+
+**The test that guards this has to put the other includer in its own file**, and the first one did
+not. Written beside the anchor, the file is parsed because it names `Account`, so the sibling is found
+whether the mixin link exists or not -- the e2e test passed with this decision reverted, which makes
+it no guard at all. The same shape as the defect: an answer that looks checked and was not. It now
+lives in a file naming nothing but the module, and fails without the link.
+
+*Reverses if:* the cost stops being noise on a large repository, or the hierarchy gains a complete
+index for another reason and the incremental walk goes away with it.

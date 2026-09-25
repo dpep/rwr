@@ -19,7 +19,10 @@ module Nameable
     # definer makes that class's own method and is no reach at all; mixed into
     # Account it makes Account's, and a rename that leaves the block behind
     # quietly does nothing -- the old name still answers.
-    define_method(:display_name_prefix) { display_name.to_s[0, 3] } # GT:residue
+    #
+    # The call inside the block is Account's own, reached through the mixin, so
+    # it is rewritten rather than reported.
+    define_method(:display_name_prefix) { display_name.to_s[0, 3] } # GT:rewrite
   end
 
   module ClassMethods
@@ -32,10 +35,11 @@ module Nameable
   # An ordinary instance method on the including class, calling Account's method
   # with no receiver at all.
   def name_html
-    # GT:residue -- implicit self, but the enclosing lexical scope is a module
+    # GT:rewrite -- implicit self; the lexical scope is a module, but the module
+    # is mixed into Account and nothing else, so the receiver is an Account
     return "" if display_name.blank?
 
-    ERB::Util.html_escape(display_name) # GT:residue -- same, one line later
+    ERB::Util.html_escape(display_name) # GT:rewrite -- same, one line later
   end
 
   # A method whose name merely *starts* with the one being renamed. Legacy

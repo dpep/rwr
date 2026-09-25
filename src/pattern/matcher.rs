@@ -645,7 +645,20 @@ pub(crate) fn verdict(
         // a rule that asks nothing about classes behaves exactly as before.
         let reached = here.as_deref().is_some_and(|s| {
             hierarchy.same_class(s, wanted)
-                || (scope.subclasses.unwrap_or(false) && hierarchy.descends_from(s, wanted))
+                || (scope.subclasses.unwrap_or(false)
+                    && (hierarchy.descends_from(s, wanted)
+                        // A concern's `def` is the class's own method, written
+                        // elsewhere. residue has consulted the hierarchy for
+                        // this since it shipped and the matcher never did, so a
+                        // rename moved every call site and declined the very
+                        // definition the same run reported -- self-contradictory
+                        // output, and the half-applied tree D122 flags.
+                        //
+                        // Instance context only: `extend M` puts the identical
+                        // `def` on the singleton table, where a `#` rename must
+                        // not reach it.
+                        || (scope.singleton == Some(false)
+                            && hierarchy.may_rename_into(s, wanted))))
         });
         if !reached {
             return Verdict::WrongScope(ScopeMiss::Inside {

@@ -137,6 +137,31 @@ overrides, explicit-receiver calls, and implicit-self calls inside the class. It
 leaves `Company#display_name` and `Account.display_name` alone, because those are
 different methods.
 
+### A definition a concern contributes
+
+A method defined in a module the class includes is the class's method, written in
+another file, so the rename moves it:
+
+```ruby
+module Suspensions          # def suspended? here is Account#suspended?
+  def suspended?; true; end
+end
+class Account
+  include Suspensions
+end
+```
+
+**Unless another class includes the same module.** Then the definition is
+`Invoice`'s too, and moving it would rename a method you did not ask about —
+while `invoice.suspended?` stays behind, because the rename narrows receivers to
+`Account`. rwr leaves the definition alone, reports it as residue, and exits 1
+rather than completing a rename that is quietly wider than the one you typed. To
+rename it for everybody, edit the module and run the rename once per includer.
+
+`extend` is not `include`: it puts the module's methods on the class's *singleton*
+table, so `Account.find_it` comes from `def find_it` in an extended module. That
+definition is still reported rather than moved.
+
 ## Read the residue report
 
 Anything rwr could not account for — a symbol reaching `delegate`, a

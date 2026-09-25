@@ -17,12 +17,12 @@ module Reporting
   module Naming
     # An override of Account#display_name, living in a module. A rename that
     # leaves it behind ships a class whose old name still answers.
-    def display_name # GT:residue -- a concern's override, not lexically in Account
+    def display_name # GT:rewrite -- a concern's override, not lexically in Account
       "#{super} (reporting)"
     end
 
     def heading
-      display_name.upcase # GT:residue -- implicit self, dispatching on an Account
+      display_name.upcase # GT:rewrite -- implicit self, dispatching on an Account
     end
   end
 

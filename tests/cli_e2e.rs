@@ -2822,19 +2822,42 @@ fn a_prepended_or_refined_override_is_reported() {
     ]);
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("stdout is one JSON document");
-    let lines: Vec<u64> = doc["residue"]
-        .as_array()
-        .expect("residue")
-        .iter()
-        .filter(|r| {
-            r["file"]
-                .as_str()
-                .is_some_and(|f| f.ends_with("patches.rb"))
-        })
-        .filter(|r| r["context"] == "definition")
-        .filter_map(|r| r["line"].as_u64())
-        .collect();
-    assert_eq!(lines, vec![2, 9], "both overrides must be reported: {doc}");
+    let in_patches = |key: &str, want: &str| -> Vec<u64> {
+        doc[key]
+            .as_array()
+            .expect("array")
+            .iter()
+            .flat_map(|entry| {
+                entry["at"]
+                    .as_array()
+                    .map_or_else(|| vec![entry.clone()], |sites| sites.to_vec())
+            })
+            .filter(|r| {
+                r["file"]
+                    .as_str()
+                    .is_some_and(|f| f.ends_with("patches.rb"))
+            })
+            .filter(|r| want.is_empty() || r["context"] == want)
+            .filter_map(|r| r["line"].as_u64())
+            .collect()
+    };
+    // The `prepend`ed override *is* the method that answers the call, so a
+    // rename has to move it: leaving it renames the original out from under a
+    // wrapper that still calls `super`, which is a NoMethodError reached through
+    // a name the rename did not touch.
+    assert_eq!(
+        in_patches("changed", ""),
+        vec![2],
+        "the prepended override must be rewritten: {doc}"
+    );
+    // The refinement's override must not be, and must still be reported: it only
+    // applies in a file that says `using`, so rewriting it would quietly route
+    // calls around the refinement.
+    assert_eq!(
+        in_patches("residue", "definition"),
+        vec![9],
+        "the refined override must be reported: {doc}"
+    );
 }
 
 /// Exit-code *polarity* per verb, which is what actually drifted.
@@ -4359,10 +4382,16 @@ fn a_bare_constant_receiver_resolves_lexically() {
 ///
 /// `include Helpers::Numeric` inside `module App` is `App::Helpers::Numeric`,
 /// exactly as the absolute spelling is, so the concern's `def` and the
-/// implicit-self calls in its body belong to the class's account either way.
-/// Written relatively they were dropped from the report with nothing said --
-/// and on rails that is `ActiveModel::Type::Helpers::Numeric`, an override on
-/// three numeric types, reported nowhere.
+/// implicit-self calls in its body belong to the class either way. Written
+/// relatively they were dropped with nothing said -- and on rails that is
+/// `ActiveModel::Type::Helpers::Numeric`, an override on three numeric types.
+///
+/// The concern's `def` is now moved rather than merely reported, which is what
+/// the rename needs: the module overrides the parent for the class that includes
+/// it, so leaving it behind sends every rewritten call site to the parent's
+/// implementation instead -- a live program with different behaviour, and no
+/// exception to notice. What this pins either way is that the two spellings
+/// answer identically.
 #[test]
 fn a_relative_mixin_path_keeps_its_blind_spot_report() {
     for spelling in ["App::Helpers::Numeric", "Helpers::Numeric"] {
@@ -4380,8 +4409,15 @@ fn a_relative_mixin_path_keeps_its_blind_spot_report() {
         ]);
         let text = stderr(&out);
         assert!(
-            text.contains("1 definition"),
-            "`include {spelling}` leaves the concern's def unaccounted for: {text}"
+            !text.contains("definition"),
+            "`include {spelling}` must move the concern's def, not report it: {text}"
+        );
+        // Both the module's own `def` and the class's, so the two spellings
+        // cannot differ by quietly reaching fewer sites. The count is on stdout.
+        let counted = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            counted.contains("would rewrite 2 site(s)"),
+            "`include {spelling}` reaches both definitions: {counted}"
         );
     }
 }
@@ -4543,11 +4579,16 @@ fn a_name_twice_on_one_template_line_is_reported_once_per_site() {
 #[test]
 fn the_triage_footer_names_a_definition_left_behind() {
     let dir = tempfile::tempdir().expect("temp dir");
+    // `Widget` shares the concern, which is what keeps its `def` out of the
+    // rename's reach: moving it would rename Widget's method too, and Widget's
+    // call sites are outside the receiver narrowing. So it is a definition rwr
+    // saw and declined -- exactly the context the footer has to name.
     std::fs::write(
         dir.path().join("main.rb"),
         "module Naming\n  def display_name; \"concern\"; end\nend\n\n\
          class Account\n  include Naming\n  def display_name; \"x\"; end\n\
-           \x20 def dyn(f); public_send(\"display_#{f}\"); end\nend\n",
+           \x20 def dyn(f); public_send(\"display_#{f}\"); end\nend\n\n\
+         class Widget\n  include Naming\nend\n",
     )
     .expect("write");
     let mut calls = String::from("class Caller\n  def run\n");
@@ -5030,4 +5071,165 @@ fn a_rename_reaches_a_method_with_an_empty_body() {
             stderr(&out)
         );
     }
+}
+
+/// A concern's `def` is the including class's own method, and a rename moves it.
+///
+/// The two halves of the engine disagreed: `residue` consults
+/// `hierarchy.contributes_to` and the matcher did not, so a rename rewrote every
+/// call site, declined the very definition the same run *reported*, and exited 1
+/// saying so. Self-contradictory output over a tree that no longer ran. 85 files
+/// in mastodon and 208 in rails say `extend ActiveSupport::Concern`, so every
+/// rename of a concern-defined method had half-applied in every release to date.
+#[test]
+fn a_rename_reaches_a_definition_a_concern_contributes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("concern.rb"),
+        "module Suspensions\n  extend ActiveSupport::Concern\n  def suspended?\n    \
+         true\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.path().join("account.rb"),
+        "class Account\n  include Suspensions\nend\n",
+    )
+    .expect("write");
+    std::fs::write(dir.path().join("use.rb"), "p Account.new.suspended?\n").expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "Account#suspended?", "-r", "blocked?", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        std::fs::read_to_string(dir.path().join("concern.rb"))
+            .expect("read")
+            .contains("def blocked?"),
+        "the concern's definition moves: {}",
+        stderr(&out)
+    );
+    assert!(
+        std::fs::read_to_string(dir.path().join("use.rb"))
+            .expect("read")
+            .contains("blocked?"),
+        "and so does the call site"
+    );
+    // A plain module is the same mechanism, so `extend ActiveSupport::Concern`
+    // must not be what the reach depends on.
+    let plain = fixture(
+        "module Plain\n  def tally\n    1\n  end\nend\nclass Account\n  include Plain\n\
+         end\np Account.new.tally\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "Account#tally", "-r", "count", "fixture.rb"])
+        .current_dir(plain.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        !std::fs::read_to_string(plain.path().join("fixture.rb"))
+            .expect("read")
+            .contains("tally"),
+        "no occurrence of the old name survives: {}",
+        stderr(&out)
+    );
+}
+
+/// A concern shared with a class outside the anchor's hierarchy is declined.
+///
+/// Renaming it would rename that class's method too -- correct Ruby, and a wider
+/// question than the designator asked. Worse, the sibling's call sites sit
+/// outside the receiver narrowing, so they would *not* move with it: the rename
+/// would complete, exit 0, and leave a break nothing reports. Declining keeps
+/// the definition in the account and the exit code non-zero.
+#[test]
+fn a_concern_shared_outside_the_hierarchy_is_not_renamed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("concern.rb"),
+        "module Suspensions\n  def suspended?\n    true\n  end\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.path().join("models.rb"),
+        "class Account\n  include Suspensions\nend\n",
+    )
+    .expect("write");
+    // The other includer sits in a file of its own that names *nothing* in
+    // Account's tree, so the hierarchy reaches it only by growing its search set
+    // through the module (D124). Written beside Account it would be parsed
+    // either way, and the exclusivity check would pass vacuously -- the test
+    // would hold with the mixin link reverted, which is no guard at all.
+    std::fs::write(
+        dir.path().join("invoice.rb"),
+        "class Invoice\n  include Suspensions\nend\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.path().join("use.rb"),
+        "p Account.new.suspended?\np Invoice.new.suspended?\n",
+    )
+    .expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "Account#suspended?", "-r", "blocked?", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    assert!(
+        std::fs::read_to_string(dir.path().join("concern.rb"))
+            .expect("read")
+            .contains("def suspended?"),
+        "the shared definition stays put"
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("half applied"), "{}", stderr(&out));
+    // A subclass of the anchor sharing the concern is not an outsider, so that
+    // rename still completes.
+    let sub = fixture(
+        "module Suspensions\n  def suspended?\n    true\n  end\nend\nclass Account\n  \
+         include Suspensions\nend\nclass Premium < Account\n  include Suspensions\nend\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args([
+            "rewrite",
+            "Account#suspended?",
+            "-r",
+            "blocked?",
+            "fixture.rb",
+        ])
+        .current_dir(sub.path())
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+/// `extend M` puts M's `def` on the *singleton* table, so a `#` rename must not
+/// move it.
+///
+/// The mixin map lumps `include`, `prepend` and `extend` together, which is
+/// right for a report -- any of them could be where the method is written -- and
+/// wrong for a rewrite. Asked undifferentiated, an instance rename would have
+/// claimed a class method's definition: a wrong rewrite from a node identical to
+/// the one it wanted.
+#[test]
+fn an_extended_module_is_not_an_instance_methods_definition() {
+    let dir = fixture(
+        "module Finders\n  def find_it\n    1\n  end\nend\nclass Account\n  extend Finders\n\
+         end\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["rewrite", "Account#find_it", "-r", "locate", "fixture.rb"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    assert!(
+        std::fs::read_to_string(dir.path().join("fixture.rb"))
+            .expect("read")
+            .contains("def find_it"),
+        "an extended module's def is not the instance method: {}",
+        stderr(&out)
+    );
 }

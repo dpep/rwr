@@ -10,7 +10,8 @@
 # fails the same way. Neither module names Account in a `class X < Y` line, and
 # neither definition is lexically inside a class at all.
 module AccountAudit
-  # GT:residue -- an override that a rename turns into a stray new method
+  # GT:rewrite -- prepended, so this *is* the method that answers; leaving it
+  # turns it into a stray new method whose `super` no longer resolves
   def display_name
     Audit.record(:read, self)
     super
