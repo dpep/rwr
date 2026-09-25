@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+**A rename no longer half applies itself, by three separate roads.** A rename is one edit across a
+definition and every call site; moving one end without the other raises `NoMethodError`.
+
+- A file rwr cannot rename — because the new name is already a local variable there — no longer lets
+  every *other* file be written. The run refuses whole and writes nothing, as it already did for an
+  `rwr:ignore` directive that accepted half a rename (D110). A rule that moves no definition has
+  independent sites and still declines just the one file.
+- **A method whose body is empty is now renamed.** `def label; end` was matched by nothing, so its
+  call sites moved and the definition did not — at exit 0. The parameter list never mattered; the
+  empty body was the whole trigger. This reaches 403 more definitions on rails and 57 on mastodon,
+  and loses none. It also lets the shipped rules see an empty *block*, so `select { |x| }.first`,
+  `map { |x| }.compact`, `select { |x| }.size` and `!any? { |x| }` now rewrite.
+- **`rwr rewrite` exits 1 when it moved call sites but no definition.** The edit it made is real and
+  stays written, but the rename is not finished, so a script no longer reads success. This is the only
+  case where `rewrite` returns 1, and `docs/internal/cli-conventions.md` said it never did — that was
+  wrong. It fires where the definition sits outside the path you gave it (previously silent), where
+  the method is defined by `attr_accessor`, and where it is defined in an `ActiveSupport::Concern` —
+  **that last one rwr still cannot reach, and will fire on a real Rails repo immediately.**
+
 ## 0.6.9 — 2026-09-24
 
 The shell examples in `README.md`, `docs/` and the Claude skill are now run by the test suite against
