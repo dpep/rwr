@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.10 — 2026-09-25
 
 **A rename now moves a definition a concern contributes.** A method defined in a module the class
 includes is the class's method, so renaming `Account#suspended?` moves the `def` in the concern along
