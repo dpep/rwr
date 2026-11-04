@@ -200,7 +200,7 @@ fn collect(
                 continue;
             }
             let Some(class) = &here else { continue };
-            let returns = returns.clone().map(&written);
+            let returns = returns.clone().map(written);
             let params: Vec<(String, Written)> = params
                 .iter()
                 .map(|(name, receiver)| (name.clone(), written(receiver.clone())))
