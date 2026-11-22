@@ -1093,7 +1093,58 @@ fn structural_diff(
             source,
         )?);
     }
+    drop_emptied_parentheses(target, source, &mut edits);
     Some(edits)
+}
+
+/// Widen an edit that empties an explicit receiver's argument list over its
+/// parentheses, so `x.foo(status: 200)` becomes `x.foo` rather than `x.foo()`.
+///
+/// Only with a receiver: a bare `foo` may read as a local variable. And only
+/// where what follows `)` cannot become an argument once the parentheses are
+/// gone -- `x.foo() -1` would turn into `x.foo(-1)`, and `x.foo() [1]` into
+/// `x.foo([1])`.
+fn drop_emptied_parentheses(target: &Node<'_>, source: &[u8], edits: &mut [Edit]) {
+    let Some(call) = target.as_call_node() else {
+        return;
+    };
+    let (Some(_), Some(open), Some(close)) =
+        (call.receiver(), call.opening_loc(), call.closing_loc())
+    else {
+        return;
+    };
+    if !ends_an_argumentless_call(&source[close.end_offset()..]) {
+        return;
+    }
+    if let Some(edit) = edits.iter_mut().find(|e| {
+        e.text.is_empty() && e.start == open.end_offset() && e.end == close.start_offset()
+    }) {
+        edit.start = open.start_offset();
+        edit.end = close.end_offset();
+    }
+}
+
+/// Whether `rest`, the source after a call's `)`, cannot be read as that call's
+/// argument once the parentheses go.
+fn ends_an_argumentless_call(rest: &[u8]) -> bool {
+    match rest.first() {
+        None | Some(b'\n' | b'\r' | b'.' | b')' | b']' | b'}' | b',' | b';') => true,
+        Some(b'&') => rest.get(1) == Some(&b'.'),
+        Some(b' ' | b'\t') => {
+            let word = rest.trim_ascii_start();
+            let keyword = |k: &[u8]| {
+                word.starts_with(k)
+                    && !word
+                        .get(k.len())
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            };
+            matches!(word.first(), None | Some(b'{' | b'#' | b')' | b']' | b'}'))
+                || [&b"do"[..], b"if", b"unless", b"and", b"or"]
+                    .iter()
+                    .any(|k| keyword(k))
+        }
+        _ => false,
+    }
 }
 
 /// Diff a hash entry by entry, pairing them by key rather than position: each
@@ -2224,6 +2275,58 @@ mod tests {
                 "foo(**$R)",
                 "foo(body: 'abc', status: 200) # note\n",
                 "foo(body: 'abc') # note\n",
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            assert_eq!(
+                rewrite(pattern, template, source).as_deref(),
+                Ok(*want),
+                "{source:?}"
+            );
+        }
+    }
+
+    /// Emptying an explicit receiver's argument list drops the parentheses,
+    /// unless what follows would then read as an argument. A receiverless call
+    /// keeps them: `foo` alone may be a local variable.
+    #[test]
+    fn emptied_parentheses_go_only_where_nothing_can_change_meaning() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "$S.foo(status: 200, **$R)",
+                "$S.foo(**$R)",
+                "x.foo(status: 200)\n",
+                "x.foo\n",
+            ),
+            (
+                "$S.foo(status: 200, **$R)",
+                "$S.foo(**$R)",
+                "x.foo(status: 200).bar\n",
+                "x.foo.bar\n",
+            ),
+            (
+                "$S.foo(status: 200, **$R) do $B end",
+                "$S.foo(**$R) do $B end",
+                "x.foo(status: 200) do\nend\n",
+                "x.foo do\nend\n",
+            ),
+            (
+                "$S.foo(status: 200, **$R)",
+                "$S.foo(**$R)",
+                "x.foo(status: 200) -1\n",
+                "x.foo() -1\n",
+            ),
+            (
+                "$S.foo(status: 200, **$R)",
+                "$S.foo(**$R)",
+                "x.foo(status: 200) [1]\n",
+                "x.foo() [1]\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(status: 200)\n",
+                "foo()\n",
             ),
         ];
         for (pattern, template, source, want) in cases {

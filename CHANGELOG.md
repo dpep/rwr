@@ -17,6 +17,10 @@ entry and its separator go. Deleting the last entry from its own line takes the 
 with it, so `status: 200 )` leaves `body: "abc")` rather than `body: "abc" )`, and a comment beside
 it refuses rather than moving onto the line above.
 
+**Emptying a call's arguments drops its parentheses when it has a receiver.** `x.to_return(status: 200)`
+becomes `x.to_return`, not `x.to_return()` — unless what follows would then read as an argument
+(`x.foo() -1`). A receiverless call keeps `()`, since a bare `foo` may be a local variable.
+
 ## 0.6.10 — 2026-09-25
 
 **A rename now moves a definition a concern contributes.** A method defined in a module the class
