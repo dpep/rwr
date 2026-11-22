@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+**Hash entries and keyword arguments match in any order.** `to_return(status: 200, **$REST)` now
+finds `to_return(body: b, status: 200)` too, and `**$REST` takes every entry the pattern did not name.
+A rule that flanked a key with two rests to reach it anywhere can drop to one. Positional arguments
+and arrays still match in order, and so does a hash pattern with two rests. A source hash holding
+`**opts` or a repeated key is matched only by a pattern that positions its entries, since a later key
+overrides an earlier one. A rewrite never moves an entry: on a site whose order differs from the
+pattern's, kept entries are edited where they stand and dropped ones deleted, and a template that adds
+or reorders entries there is refused (D127).
+
+**Dropping a hash entry keeps the lines around it.** `foo(**$A, status: 200, **$B)` -> `foo(**$A, **$B)`
+on a multi-line call deleted `status: 200` and pulled the remaining entries onto one line; now only the
+entry and its separator go, and a comment beside it refuses rather than moving onto the line above.
+
+**An edit tidies the whitespace at its own seam.** Removing or inserting text no longer leaves a space
+before a closer (`body: "abc" )`), a line of only spaces, an emptied `(\n  \n)`, trailing whitespace or a
+doubled space. Only whitespace touching the edit moves; the rest of the file keeps its bytes (D128).
+
+**Emptying a call's arguments drops its parentheses when it has a receiver.** `x.to_return(status: 200)`
+becomes `x.to_return`, not `x.to_return()` — unless what follows would then read as an argument
+(`x.foo() -1`). A receiverless call keeps `()`, since a bare `foo` may be a local variable.
+
 ## 0.6.10 — 2026-09-25
 
 **A rename now moves a definition a concern contributes.** A method defined in a module the class

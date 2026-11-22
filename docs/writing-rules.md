@@ -63,6 +63,45 @@ stray space is refused, because the alternative is worse than an error: the
 expansion would build templates that cannot match, every site would come back as
 residue, and the run would exit 0 looking clean.
 
+## Hashes and keyword arguments
+
+Entries match by key, in any order, the way Ruby looks them up. `**$REST`
+takes every entry nothing else in the pattern matched, so one pattern reaches a
+key wherever it was written:
+
+```sh
+rwr find '$S.to_return(status: 200, **$REST)' spec/
+```
+
+That finds `to_return(status: 200, body: b)` and `to_return(body: b, status: 200)`
+alike. Without a rest the keys must be exactly these. `status:` and
+`:status =>` are one key; `'status' =>` is another.
+
+**Where order is meaning, it still counts.** Positional arguments and arrays
+match in order. So does a hash pattern with two rests, since the only thing a
+second rest adds is a position. And a source hash holding `**opts` or a
+repeated key -- where a later entry overrides an earlier one -- is not matched
+by a pattern that does not position its entries, because rwr cannot see which
+key wins.
+
+**A rewrite never moves an entry.** Moving one changes what evaluates first and
+the order the hash iterates in. So when the source's order differs from the
+pattern's, each entry the template keeps is edited where it stands and each it
+drops is deleted:
+
+```yaml
+match:   '$S.to_return(body: $B.to_json, **$REST)'
+rewrite: '$S.to_return_json(body: $B, **$REST)'
+tests:
+  - input:  "s.to_return(status: 200, body: b.to_json)\n"
+    output: "s.to_return_json(status: 200, body: b)\n"
+```
+
+A template that adds an entry or lists them in another order than the pattern
+has no place to edit through, so on such a site rwr refuses the file rather than
+pick an order. Against a source already in the pattern's order, the template's
+order applies as written.
+
 ## `where:` predicates
 
 | Key | Constrains |

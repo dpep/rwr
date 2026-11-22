@@ -3820,3 +3820,76 @@ is not.
 
 **It still fires where it should.** An `attr_accessor` outside the walked path is the population
 D122 exists for, and is now the case the e2e test pins.
+
+## D127 - Hash entries match by key in any order; a rewrite never moves one
+
+**Decided.** A hash or keyword-argument pattern matches its entries by key, in any order, and one
+`**$REST` takes whatever no other entry matched, in source order. Default, not opt-in.
+
+**Why default.** Ruby looks hash entries up by key, so a pattern that matched in source order was
+answering a question no rule author asks. Writing a WebMock migration took about twenty rules, and
+the largest multiplier was ordering: each keyword written in each position, two rests flanking every
+key. Opt-in would leave the quiet failure in place -- a missed site looks exactly like an absent one
+-- and every rule author would have to know the flag to get Ruby's own semantics. Matching is
+observation; matching more cannot change a program.
+
+**What can change a program is a rewrite that moves an entry.** Entries evaluate in source order
+and a hash iterates in insertion order, which reaches `to_json`, header order and anything taking
+`**opts`. So a match whose entries sat in another order than the pattern's may only be rewritten
+where no node holding that hash is re-rendered from the template; otherwise the template's order
+would replace the source's, and the file is refused (`Refusal::Reordered`).
+`matcher::matches_in_order` is the test: re-match under the bindings already made, with entries
+held to source order. Its failure is also what keeps a scattered rest -- `status` and `headers`
+around a matched `body` -- from being spliced as one span with `body` inside it.
+
+**So an out-of-order hash is diffed by key, not position** (`rewrite::entry_diff`). Each template
+entry pairs with the pattern entry of the same key or rest, each pattern entry with the target
+entries it matched; kept entries are diffed in place and dropped ones deleted with the separator
+before them, or after them when they lead. The output order is therefore the source's, by
+construction, and no placement rule is needed. It declines -- and the site is refused -- when the
+template adds an entry or lists its entries in another order than the pattern's, when every entry
+would go, or when a deletion would take a comment beside it (which may describe the neighbour) or a
+heredoc body.
+
+**It runs on in-order matches too, first.** Deleting an entry with its separator is the minimal
+edit whatever order the match was in, and the positional path re-rendered the template instead --
+so dropping a key from the middle of a multi-line call pulled its neighbours onto one line. Where
+`entry_diff` declines on an in-order match, the positional path runs as before.
+
+**Where order is meaning, it stays.** Positional arguments and arrays are untouched. A pattern with
+two or more rests, or a splat written into the pattern, matches in order: a second rest adds nothing
+but a position, so keeping it positional keeps every existing rule meaning what it meant. A source
+hash holding `**opts` or a repeated literal key does not match a pattern that does not position its
+entries at all, because a later entry overrides an earlier one and the key set behind `**opts` is
+unknowable -- dropping `status: 200` after `**opts` changes the status, and before it does not. A
+lone `**$REST` still matches such a hash, having no key to claim. Keys compare as `node_eq` does, so
+`status:` and `:status =>` are one key and `'status' =>` another.
+
+*Reverses if:* a real rule needs a template to add or reorder entries on an out-of-order match --
+which would call for a stated placement rule rather than the template's order by default.
+
+## D128 - An edit tidies the whitespace at its own seam, and nowhere else
+
+**Decided.** When rwr removes or inserts text it joins two pieces of source that were not written
+to meet, and it takes licence to tidy the whitespace *at that seam* (`rewrite::seam::tidy`, run on
+every planned edit):
+
+- an emptied container closes up -- `foo(\n  status: 200\n)` becomes `foo()`;
+- a line the deletion empties goes, newline and all;
+- a deletion whose text began its own line takes the spaces and comma left before a closer on that
+  line -- `status: 200 )` leaves `body: "abc")` -- while on a shared line they are the author's
+  padding and stay, so `foo( a: 1 )` keeps its symmetry;
+- a deletion leaves no trailing whitespace, and no edit leaves a doubled space mid-line.
+
+**The boundary is the seam.** Only whitespace touching the edit moves, and never into a neighbouring
+edit, so untouched code keeps its bytes and principle 6's minimal diff holds. A comment stops it:
+the container rule will not join a line onto one carrying `# ...`, which would put code inside the
+comment. Deletions next to a comment or heredoc are already refused before reaching here (D127).
+
+**Why default rather than a toggle.** The alternative is output nobody would write by hand --
+`x.to_return(\n  \n)`, `body: "abc" )` -- left for a formatter rwr does not own (D34). This is D34's
+line restated for the edit's edges: repairing whitespace rwr itself disturbed is not imposing style.
+No toggle until a concrete case shows the tidy is wrong.
+
+*Reverses if:* a seam rule is found rewriting whitespace a reader would call style rather than
+damage -- at which point that rule narrows, not the whole stance.

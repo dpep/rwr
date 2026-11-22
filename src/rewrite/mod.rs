@@ -8,9 +8,10 @@
 //! far from its `<<~FOO` token, and detaching one still *parses*, so no
 //! downstream check would catch the mistake.
 
+mod seam;
 pub(crate) mod sequence;
 
-use crate::pattern::compare::Atom;
+use crate::pattern::compare::{self, Atom};
 use crate::pattern::generated;
 use crate::pattern::matcher::{self, Bound, Env, Match};
 use crate::pattern::metavar::{self, Arity};
@@ -68,6 +69,12 @@ pub(crate) enum Refusal {
     /// a capture that does not move is never spliced at all -- refusing is the
     /// honest answer (principle 2).
     DiscontiguousCapture { at: usize },
+    /// A hash matched with its entries in another order than the pattern's, and
+    /// the template cannot be applied by editing them in place. Re-rendering
+    /// would replace the source's order with the template's -- changing what
+    /// evaluates first and the order the hash iterates in -- so it is refused
+    /// rather than guessed (D127).
+    Reordered { at: usize },
 }
 
 /// A refusal is a *product*, not a diagnostic: refusing rather than guessing is
@@ -115,6 +122,12 @@ impl std::fmt::Display for Refusal {
                 f,
                 "a capture at byte {at} contains a heredoc, whose body sits outside the \
                  expression -- splicing it by range would drag along surrounding text"
+            ),
+            Refusal::Reordered { at } => write!(
+                f,
+                "the hash at byte {at} lists its entries in another order than the pattern, and \
+                 the template cannot be applied without moving them -- write the template's \
+                 entries in the pattern's order so each is edited where it stands"
             ),
         }
     }
@@ -527,6 +540,12 @@ pub(crate) fn plan(
                     },
                 ));
             }
+            // Re-rendering would write the template's order over the source's.
+            None if !matcher::matches_in_order(pattern_root, &m.node, pattern_prepared, &m.env) => {
+                return Err(Refusal::Reordered {
+                    at: m.node.location().start_offset(),
+                });
+            }
             // Shapes diverge, so fall back to replacing the whole span. Correct,
             // merely non-minimal.
             None => {
@@ -575,6 +594,18 @@ pub(crate) fn plan(
             }
             _ => kept.push((index, edit)),
         }
+    }
+
+    // Tidy each seam, bounded by its neighbours so no edit reaches another (D128).
+    let bounds: Vec<(usize, usize)> = (0..kept.len())
+        .map(|k| {
+            let floor = k.checked_sub(1).map_or(0, |p| kept[p].1.end);
+            let ceil = kept.get(k + 1).map_or(source.len(), |(_, e)| e.start);
+            (floor, ceil)
+        })
+        .collect();
+    for ((_, edit), (floor, ceil)) in kept.iter_mut().zip(bounds) {
+        *edit = seam::tidy(source, edit, floor, ceil);
     }
 
     // A site counts once however many edits it took, and only if one survived.
@@ -972,6 +1003,25 @@ fn structural_diff(
         return None;
     }
 
+    // A hash is diffed by key first, which deletes a dropped entry rather than
+    // re-rendering its neighbours. Entries matched out of order have no other
+    // correspondence: `unwrap_to_subtree` and `align` pair children by position.
+    if matcher::is_hash(pattern) {
+        let by_key = entry_diff(
+            pattern,
+            template,
+            target,
+            prepared,
+            t_prepared,
+            template_src,
+            env,
+            source,
+        );
+        if by_key.is_some() || !matcher::matches_in_order(pattern, target, prepared, env) {
+            return by_key;
+        }
+    }
+
     let (p_kids, t_kids, x_kids) = (
         generated::children(pattern),
         generated::children(template),
@@ -1045,15 +1095,296 @@ fn structural_diff(
     }
 
     for (p, t, x) in aligned {
-        match structural_diff(p, t, x, prepared, t_prepared, template_src, env, source) {
-            Some(found) => edits.extend(found),
-            // This child diverges. Replacing *it* is still minimal -- every
-            // sibling keeps its bytes -- so localize here rather than propagate
-            // the failure up and re-render the whole node.
-            None => edits.push(localized(t, x, t_prepared, template_src, env, source)?),
+        edits.extend(diff_child(
+            p,
+            t,
+            x,
+            prepared,
+            t_prepared,
+            template_src,
+            env,
+            source,
+        )?);
+    }
+    drop_emptied_parentheses(target, source, &mut edits);
+    Some(edits)
+}
+
+/// Widen an edit that empties an explicit receiver's argument list over its
+/// parentheses, so `x.foo(status: 200)` becomes `x.foo` rather than `x.foo()`.
+///
+/// Only with a receiver: a bare `foo` may read as a local variable. And only
+/// where what follows `)` cannot become an argument once the parentheses are
+/// gone -- `x.foo() -1` would turn into `x.foo(-1)`, and `x.foo() [1]` into
+/// `x.foo([1])`.
+fn drop_emptied_parentheses(target: &Node<'_>, source: &[u8], edits: &mut [Edit]) {
+    let Some(call) = target.as_call_node() else {
+        return;
+    };
+    let (Some(_), Some(open), Some(close)) =
+        (call.receiver(), call.opening_loc(), call.closing_loc())
+    else {
+        return;
+    };
+    if !ends_an_argumentless_call(&source[close.end_offset()..]) {
+        return;
+    }
+    // Whitespace alone may lie between the parentheses and what is deleted.
+    let blank = |a: usize, b: usize| a <= b && source[a..b].iter().all(u8::is_ascii_whitespace);
+    if let Some(edit) = edits.iter_mut().find(|e| {
+        e.text.is_empty() && blank(open.end_offset(), e.start) && blank(e.end, close.start_offset())
+    }) {
+        edit.start = open.start_offset();
+        edit.end = close.end_offset();
+    }
+}
+
+/// Whether `rest`, the source after a call's `)`, cannot be read as that call's
+/// argument once the parentheses go.
+fn ends_an_argumentless_call(rest: &[u8]) -> bool {
+    match rest.first() {
+        None | Some(b'\n' | b'\r' | b'.' | b')' | b']' | b'}' | b',' | b';') => true,
+        Some(b'&') => rest.get(1) == Some(&b'.'),
+        Some(b' ' | b'\t') => {
+            let word = rest.trim_ascii_start();
+            let keyword = |k: &[u8]| {
+                word.starts_with(k)
+                    && !word
+                        .get(k.len())
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            };
+            matches!(word.first(), None | Some(b'{' | b'#' | b')' | b']' | b'}'))
+                || [&b"do"[..], b"if", b"unless", b"and", b"or"]
+                    .iter()
+                    .any(|k| keyword(k))
+        }
+        _ => false,
+    }
+}
+
+/// Diff a hash entry by entry, pairing them by key rather than position: each
+/// entry the template keeps is edited where it stands and each it drops is
+/// deleted with its separator, so the source's order and layout survive (D127).
+///
+/// `None` -- and so a re-render, which the caller refuses for an out-of-order
+/// match -- when the template adds an entry, lists its entries in another order
+/// than the pattern's, or would delete them all, or when a deletion would take
+/// a comment or a heredoc body with it.
+#[allow(clippy::too_many_arguments)]
+fn entry_diff(
+    pattern: &Node<'_>,
+    template: &Node<'_>,
+    target: &Node<'_>,
+    prepared: &Prepared,
+    t_prepared: &Prepared,
+    template_src: &[u8],
+    env: &Env<'_>,
+    source: &[u8],
+) -> Option<Vec<Edit>> {
+    if std::mem::discriminant(pattern) != std::mem::discriminant(template) {
+        return None;
+    }
+    let (p_kids, t_kids, x_kids) = (
+        generated::children(pattern),
+        generated::children(template),
+        generated::children(target),
+    );
+
+    // Which pattern entry each target entry belongs to: a named rest's from the
+    // environment, a keyed entry's by the one entry it matches, and an
+    // anonymous rest's by elimination.
+    let mut owner: Vec<Option<usize>> = vec![None; x_kids.len()];
+    let mut anonymous = None;
+    for (pi, p) in p_kids.iter().enumerate() {
+        if !matcher::is_rest(p, prepared) {
+            continue;
+        }
+        let Some(name) = matcher::splat_placeholder_name(p, prepared) else {
+            if anonymous.replace(pi).is_some() {
+                return None;
+            }
+            continue;
+        };
+        let Some(Bound::Many(nodes)) = env.get(&name) else {
+            return None;
+        };
+        for node in nodes {
+            let xi = x_kids
+                .iter()
+                .position(|x| own_range(x) == own_range(node))?;
+            if owner[xi].replace(pi).is_some() {
+                return None;
+            }
         }
     }
+    for (pi, p) in p_kids.iter().enumerate() {
+        if matcher::is_rest(p, prepared) {
+            continue;
+        }
+        let mut candidates = (0..x_kids.len())
+            .filter(|&xi| owner[xi].is_none())
+            .filter(|&xi| matcher::matches_under(p, &x_kids[xi], prepared, env));
+        let (Some(xi), None) = (candidates.next(), candidates.next()) else {
+            return None;
+        };
+        owner[xi] = Some(pi);
+    }
+    for slot in &mut owner {
+        if slot.is_none() {
+            *slot = Some(anonymous?);
+        }
+    }
+
+    // Which pattern entry each template entry keeps, in the pattern's order.
+    let mut kept: Vec<(usize, usize)> = Vec::with_capacity(t_kids.len());
+    for (ti, t) in t_kids.iter().enumerate() {
+        let pi = p_kids
+            .iter()
+            .position(|p| entries_correspond(p, t, prepared, t_prepared))?;
+        if kept.last().is_some_and(|&(last, _)| last >= pi) {
+            return None;
+        }
+        kept.push((pi, ti));
+    }
+
+    let mut edits = Vec::new();
+    for &(pi, ti) in &kept {
+        if matcher::is_rest(&p_kids[pi], prepared) {
+            continue;
+        }
+        let xi = owner.iter().position(|o| *o == Some(pi))?;
+        edits.extend(diff_child(
+            &p_kids[pi],
+            &t_kids[ti],
+            &x_kids[xi],
+            prepared,
+            t_prepared,
+            template_src,
+            env,
+            source,
+        )?);
+    }
+
+    let dropped: Vec<bool> = owner
+        .iter()
+        .map(|o| !kept.iter().any(|&(pi, _)| *o == Some(pi)))
+        .collect();
+    if dropped.iter().all(|d| *d) {
+        return None;
+    }
+    let end = |i: usize| effective_range(&x_kids[i]).1;
+    let start = |i: usize| own_range(&x_kids[i]).0;
+    let mut i = 0;
+    while i < x_kids.len() {
+        if !dropped[i] {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j + 1 < x_kids.len() && dropped[j + 1] {
+            j += 1;
+        }
+        // Take the separator before the run, or after it when the run leads.
+        let (from, to) = if i > 0 {
+            (end(i - 1), end(j))
+        } else {
+            (start(i), start(j + 1))
+        };
+        // A comment beside a dropped entry may describe it or its neighbour.
+        // A trailing run's comment may sit past the hash, before the closer; one
+        // after the closer describes the whole call.
+        let after = match x_kids.get(j + 1) {
+            Some(_) => start(j + 1),
+            None => closer_on_line(source, end(j)).unwrap_or_else(|| {
+                source[end(j)..]
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map_or(source.len(), |n| end(j) + n)
+            }),
+        };
+        let commented = (i.max(1)..=j)
+            .map(|k| (end(k - 1), start(k)))
+            .chain(std::iter::once((end(j), after)))
+            .any(|(a, b)| a < b && source[a..b].contains(&b'#'));
+        if commented || heredoc_opens_within(target, from, to) {
+            return None;
+        }
+        edits.push(Edit {
+            start: from,
+            end: to,
+            text: String::new(),
+        });
+        i = j + 1;
+    }
     Some(edits)
+}
+
+/// Where a closing delimiter starts, if only spaces and a trailing comma lie
+/// between `from` and it on the same line.
+fn closer_on_line(source: &[u8], from: usize) -> Option<usize> {
+    let skip = source
+        .get(from..)?
+        .iter()
+        .position(|b| !matches!(b, b' ' | b'\t' | b','))?;
+    matches!(source[from + skip], b')' | b']' | b'}').then_some(from + skip)
+}
+
+/// Whether a template entry is the pattern entry it keeps: the same rest, or the
+/// same key -- the same metavariable, or the same literal key.
+fn entries_correspond(
+    p: &Node<'_>,
+    t: &Node<'_>,
+    prepared: &Prepared,
+    t_prepared: &Prepared,
+) -> bool {
+    if matcher::is_rest(p, prepared) || matcher::is_rest(t, t_prepared) {
+        let name = matcher::splat_placeholder_name(p, prepared);
+        return name.is_some() && name == matcher::splat_placeholder_name(t, t_prepared);
+    }
+    let (Some(p), Some(t)) = (p.as_assoc_node(), t.as_assoc_node()) else {
+        return false;
+    };
+    let (pk, tk) = (p.key(), t.key());
+    match (
+        matcher::key_metavariable(&pk, prepared),
+        matcher::key_metavariable(&tk, t_prepared),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => compare::node_eq(&pk, &tk),
+        _ => false,
+    }
+}
+
+/// One corresponding child's edits.
+#[allow(clippy::too_many_arguments)]
+fn diff_child(
+    p: &Node<'_>,
+    t: &Node<'_>,
+    x: &Node<'_>,
+    prepared: &Prepared,
+    t_prepared: &Prepared,
+    template_src: &[u8],
+    env: &Env<'_>,
+    source: &[u8],
+) -> Option<Vec<Edit>> {
+    if let Some(found) = structural_diff(p, t, x, prepared, t_prepared, template_src, env, source) {
+        return Some(found);
+    }
+    // This child diverges. Replacing *it* is still minimal -- every sibling
+    // keeps its bytes -- so localize here rather than propagate the failure up
+    // and re-render the whole node. Unless it holds entries matched out of
+    // order: re-rendering them writes the template's order over the source's.
+    if !matcher::matches_in_order(p, x, prepared, env) {
+        return None;
+    }
+    Some(vec![localized(
+        t,
+        x,
+        t_prepared,
+        template_src,
+        env,
+        source,
+    )?])
 }
 
 /// Pair pattern children with template and target children, one triple per
@@ -1794,5 +2125,267 @@ mod tests {
         let src = "foo(\n  a,\n  b,\n)\n";
         let out = rewrite("foo($A, $B)", "bar($A, $B)", src).unwrap();
         assert_eq!(out, "bar(\n  a,\n  b,\n)\n");
+    }
+
+    /// D127. An out-of-order match is rewritten by editing each entry where it
+    /// stands and deleting the ones the template drops, so the source's order
+    /// and layout survive.
+    #[test]
+    fn an_out_of_order_match_is_edited_in_place() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "$S.to_return(status: _, body: $B.to_json, headers: _)",
+                "$S.to_return_json(body: $B)",
+                "s.to_return(headers: h, body: b.to_json, status: 200)\n",
+                "s.to_return_json(body: b)\n",
+            ),
+            (
+                "$S.to_return(body: $B.to_json, **$R)",
+                "$S.to_return_json(body: $B, **$R)",
+                "s.to_return(status: 200, body: b.to_json, headers: h)\n",
+                "s.to_return_json(status: 200, body: b, headers: h)\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'x', status: 200)\n",
+                "foo(body: 'x')\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(\n  body: 'x',\n  status: 200,\n  headers: h\n)\n",
+                "foo(\n  body: 'x',\n  headers: h\n)\n",
+            ),
+            (
+                "foo(headers: { 'Content-Type' => 'application/json', **$H }, **$R)",
+                "foo(headers: { **$H }, **$R)",
+                "foo(status: 201, headers: { 'X-Req' => '1', 'Content-Type' => 'application/json' }, body: 'x')\n",
+                "foo(status: 201, headers: { 'X-Req' => '1' }, body: 'x')\n",
+            ),
+            // Carried across unchanged, an out-of-order match is byte-identical.
+            (
+                "foo(a: $A, **$R)",
+                "foo(a: $A, **$R)",
+                "foo(b: 1, a: 2)\n",
+                "foo(b: 1, a: 2)\n",
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            let got = rewrite(pattern, template, source);
+            assert_eq!(got.as_deref(), Ok(*want), "{pattern} -> {template}");
+        }
+    }
+
+    /// D127. A template that cannot be applied to an out-of-order match without
+    /// moving entries is refused: a moved entry would reorder evaluation and the
+    /// hash's iteration order.
+    #[test]
+    fn an_out_of_order_match_keeps_the_source_order() {
+        let cases: &[(&str, &str, &str, Option<&str>)] = &[
+            // A comment beside a dropped entry may describe either neighbour.
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(\n  body: 'x', # why\n  status: 200\n)\n",
+                None,
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'x',\n    status: 200 # why\n)\n",
+                None,
+            ),
+            // The template reorders, adds an entry, or reshapes the call: there
+            // is no place to edit through, and either order would be a guess.
+            (
+                "foo(a: $A, b: $B)",
+                "foo(b: $B, a: $A)",
+                "foo(b: 1, a: 2)\n",
+                None,
+            ),
+            (
+                "foo(a: $A, **$R)",
+                "foo(a: $A, c: 3, **$R)",
+                "foo(b: 1, a: 2)\n",
+                None,
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "bar.baz(**$R)",
+                "foo(body: 1, status: 200)\n",
+                None,
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            let got = rewrite(pattern, template, source);
+            match want {
+                Some(out) => assert_eq!(got.as_deref(), Ok(*out), "{pattern} -> {template}"),
+                None => assert!(
+                    matches!(got, Err(Refusal::Reordered { .. })),
+                    "{pattern} -> {template} should refuse, got {got:?}"
+                ),
+            }
+        }
+    }
+
+    /// Dropping an entry deletes it with its separator whatever order the match
+    /// was in, so a multi-line call keeps one entry per line.
+    #[test]
+    fn dropping_an_entry_keeps_the_lines_around_it() {
+        let src = "foo(\n  body: 'x',\n  status: 200,\n  headers: h\n)\n";
+        let out = rewrite("foo(**$A, status: 200, **$B)", "foo(**$A, **$B)", src);
+        assert_eq!(out.as_deref(), Ok("foo(\n  body: 'x',\n  headers: h\n)\n"));
+    }
+
+    /// Deleting the last entry takes the space after it when that space sits on
+    /// the deleted entry's own line; on a shared line it is the author's padding.
+    #[test]
+    fn deleting_the_last_entry_takes_its_lines_padding() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'abc',\n    status: 200 )\n",
+                "foo(body: 'abc')\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'abc',\n    status: 200, )\n",
+                "foo(body: 'abc')\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'abc', status: 200 )\n",
+                "foo(body: 'abc' )\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(\n  body: 'abc',\n  status: 200\n)\n",
+                "foo(\n  body: 'abc'\n)\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(\n  body: 'abc',\n  status: 200,\n)\n",
+                "foo(\n  body: 'abc',\n)\n",
+            ),
+            (
+                "{a: $A, **$R}",
+                "{a: $A}",
+                "x = {a: 1,\n     b: 2 }\n",
+                "x = {a: 1}\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'abc', status: 200) # note\n",
+                "foo(body: 'abc') # note\n",
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            assert_eq!(
+                rewrite(pattern, template, source).as_deref(),
+                Ok(*want),
+                "{source:?}"
+            );
+        }
+    }
+
+    /// Emptying an explicit receiver's argument list drops the parentheses,
+    /// unless what follows would then read as an argument. A receiverless call
+    /// keeps them: `foo` alone may be a local variable.
+    #[test]
+    fn emptied_parentheses_go_only_where_nothing_can_change_meaning() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "$S.foo(status: 200, **$R)",
+                "$S.foo(**$R)",
+                "x.foo(status: 200)\n",
+                "x.foo\n",
+            ),
+            (
+                "$S.foo(status: 200, **$R)",
+                "$S.foo(**$R)",
+                "x.foo(\n  status: 200\n)\n",
+                "x.foo\n",
+            ),
+            (
+                "$S.foo(status: 200, **$R)",
+                "$S.foo(**$R)",
+                "x.foo(status: 200).bar\n",
+                "x.foo.bar\n",
+            ),
+            (
+                "$S.foo(status: 200, **$R) do $B end",
+                "$S.foo(**$R) do $B end",
+                "x.foo(status: 200) do\nend\n",
+                "x.foo do\nend\n",
+            ),
+            (
+                "$S.foo(status: 200, **$R)",
+                "$S.foo(**$R)",
+                "x.foo(status: 200) -1\n",
+                "x.foo() -1\n",
+            ),
+            (
+                "$S.foo(status: 200, **$R)",
+                "$S.foo(**$R)",
+                "x.foo(status: 200) [1]\n",
+                "x.foo() [1]\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(status: 200)\n",
+                "foo()\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(\n  status: 200\n)\n",
+                "foo()\n",
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            assert_eq!(
+                rewrite(pattern, template, source).as_deref(),
+                Ok(*want),
+                "{source:?}"
+            );
+        }
+    }
+
+    /// The same templates against sources already in the pattern's order behave
+    /// as they always have, explicit reordering included.
+    #[test]
+    fn an_in_order_match_follows_the_template() {
+        let out = rewrite(
+            "foo(a: $A, b: $B)",
+            "foo(b: $B, a: $A)",
+            "foo(a: 1, b: 2)\n",
+        );
+        assert_eq!(out.as_deref(), Ok("foo(b: 2, a: 1)\n"));
+        let out = rewrite(
+            "foo(a: $A, **$R)",
+            "foo(a: $A, c: 3, **$R)",
+            "foo(a: 1, b: 2)\n",
+        );
+        assert_eq!(out.as_deref(), Ok("foo(a: 1, c: 3, b: 2)\n"));
+    }
+
+    /// A source `**splat` hides keys a later entry overrides, so a single-rest
+    /// pattern does not reach into the hash holding it.
+    #[test]
+    fn a_source_double_splat_is_not_matched_out_of_order() {
+        for source in ["foo(**opts, status: 200)\n", "foo(status: 200, **opts)\n"] {
+            let out = rewrite("foo(**$R, status: 200)", "foo(**$R)", source);
+            assert_eq!(out.as_deref(), Ok(source), "{source}");
+        }
+        let out = rewrite("foo(**$R)", "bar(**$R)", "foo(**opts)\n");
+        assert_eq!(out.as_deref(), Ok("bar(**opts)\n"));
     }
 }

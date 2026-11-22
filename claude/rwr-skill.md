@@ -92,6 +92,13 @@ Patterns are Ruby source with metavariables:
 
 All four are valid Ruby, so a pattern stays copy-pasteable from real code.
 
+Hash entries and keyword arguments match by key in any order; `**$REST` takes
+whatever else is there. Order still counts for positional arguments, arrays, a
+hash pattern with two rests, and a source hash holding `**opts` or a repeated
+key (a single-rest pattern does not match there at all). A rewrite never moves
+an entry: kept entries are edited where they stand and dropped ones deleted, and
+a template that adds or reorders entries on an out-of-order site is refused.
+
 ## Finding a *method*, not a shape
 
 "Where is this method called" is a different question from "where does this shape
