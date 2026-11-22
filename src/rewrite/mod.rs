@@ -990,10 +990,11 @@ fn structural_diff(
         return None;
     }
 
-    // Entries matched out of order have no positional correspondence, and both
-    // `unwrap_to_subtree` and `align` pair children by position.
-    if matcher::is_hash(pattern) && !matcher::matches_in_order(pattern, target, prepared, env) {
-        return entry_diff(
+    // A hash is diffed by key first, which deletes a dropped entry rather than
+    // re-rendering its neighbours. Entries matched out of order have no other
+    // correspondence: `unwrap_to_subtree` and `align` pair children by position.
+    if matcher::is_hash(pattern) {
+        let by_key = entry_diff(
             pattern,
             template,
             target,
@@ -1003,6 +1004,9 @@ fn structural_diff(
             env,
             source,
         );
+        if by_key.is_some() || !matcher::matches_in_order(pattern, target, prepared, env) {
+            return by_key;
+        }
     }
 
     let (p_kids, t_kids, x_kids) = (
@@ -2133,6 +2137,15 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// Dropping an entry deletes it with its separator whatever order the match
+    /// was in, so a multi-line call keeps one entry per line.
+    #[test]
+    fn dropping_an_entry_keeps_the_lines_around_it() {
+        let src = "foo(\n  body: 'x',\n  status: 200,\n  headers: h\n)\n";
+        let out = rewrite("foo(**$A, status: 200, **$B)", "foo(**$A, **$B)", src);
+        assert_eq!(out.as_deref(), Ok("foo(\n  body: 'x',\n  headers: h\n)\n"));
     }
 
     /// The same templates against sources already in the pattern's order behave

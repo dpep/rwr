@@ -11,6 +11,10 @@ overrides an earlier one. A rewrite never moves an entry: on a site whose order 
 pattern's, kept entries are edited where they stand and dropped ones deleted, and a template that adds
 or reorders entries there is refused (D127).
 
+**Dropping a hash entry keeps the lines around it.** `foo(**$A, status: 200, **$B)` -> `foo(**$A, **$B)`
+on a multi-line call deleted `status: 200` and pulled the remaining entries onto one line; now only the
+entry and its separator go.
+
 ## 0.6.10 — 2026-09-25
 
 **A rename now moves a definition a concern contributes.** A method defined in a module the class

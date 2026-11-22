@@ -3851,6 +3851,11 @@ template adds an entry or lists its entries in another order than the pattern's,
 would go, or when a deletion would take a comment beside it (which may describe the neighbour) or a
 heredoc body.
 
+**It runs on in-order matches too, first.** Deleting an entry with its separator is the minimal
+edit whatever order the match was in, and the positional path re-rendered the template instead --
+so dropping a key from the middle of a multi-line call pulled its neighbours onto one line. Where
+`entry_diff` declines on an in-order match, the positional path runs as before.
+
 **Where order is meaning, it stays.** Positional arguments and arrays are untouched. A pattern with
 two or more rests, or a splat written into the pattern, matches in order: a second rest adds nothing
 but a position, so keeping it positional keeps every existing rule meaning what it meant. A source
