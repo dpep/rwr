@@ -44,6 +44,8 @@ pub(crate) struct Prepared {
 pub(crate) enum PrepareError {
     /// The pattern does not parse as Ruby under any placeholder casing.
     Unparseable { message: String },
+    /// A bare `*`, `**` or `&` that cannot be a wildcard (D129).
+    Bare { message: String },
 }
 
 impl fmt::Display for PrepareError {
@@ -52,6 +54,7 @@ impl fmt::Display for PrepareError {
             PrepareError::Unparseable { message } => {
                 write!(f, "pattern is not valid Ruby: {message}")
             }
+            PrepareError::Bare { message } => write!(f, "{message}"),
         }
     }
 }
@@ -102,10 +105,11 @@ pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepar
             .count()
             > 1
         {
-            return Err(PrepareError::Unparseable {
+            return Err(PrepareError::Bare {
                 message: format!(
-                    "a pattern holds at most one bare `{sigil}`, as a Ruby method declares at \
-                     most one -- name the others, e.g. `{sigil}$REST`"
+                    "a pattern holds at most one bare `{sigil}`, or a template could not say \
+                     which it forwards -- name the others, e.g. `{sigil}{}`",
+                    if sigil == "&" { "$BLOCK" } else { "$REST" }
                 ),
             });
         }
@@ -283,12 +287,14 @@ fn confirm_bare(
 
     let mut forwards = Vec::new();
     anonymous_forwards(&tree, None, &mut forwards);
-    for (at, sigil, column) in bare {
+    for (at, sigil, start) in bare {
+        let column = start - pattern[..start].rfind('\n').map_or(0, |n| n + 1);
         if !forwards.contains(&(at + shift, sigil)) {
-            return Err(PrepareError::Unparseable {
+            return Err(PrepareError::Bare {
                 message: format!(
-                    "the bare `{sigil}` at offset {column} is not an anonymous argument or \
-                     parameter, so it cannot be a wildcard"
+                    "the bare `{sigil}` at column {} is not an anonymous argument or \
+                     parameter, so it cannot be a wildcard",
+                    column + 1
                 ),
             });
         }
