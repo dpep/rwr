@@ -3842,6 +3842,15 @@ would replace the source's, and the file is refused (`Refusal::Reordered`).
 held to source order. Its failure is also what keeps a scattered rest -- `status` and `headers`
 around a matched `body` -- from being spliced as one span with `body` inside it.
 
+**So an out-of-order hash is diffed by key, not position** (`rewrite::entry_diff`). Each template
+entry pairs with the pattern entry of the same key or rest, each pattern entry with the target
+entries it matched; kept entries are diffed in place and dropped ones deleted with the separator
+before them, or after them when they lead. The output order is therefore the source's, by
+construction, and no placement rule is needed. It declines -- and the site is refused -- when the
+template adds an entry or lists its entries in another order than the pattern's, when every entry
+would go, or when a deletion would take a comment beside it (which may describe the neighbour) or a
+heredoc body.
+
 **Where order is meaning, it stays.** Positional arguments and arrays are untouched. A pattern with
 two or more rests, or a splat written into the pattern, matches in order: a second rest adds nothing
 but a position, so keeping it positional keeps every existing rule meaning what it meant. A source

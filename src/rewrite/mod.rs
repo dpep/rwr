@@ -10,7 +10,7 @@
 
 pub(crate) mod sequence;
 
-use crate::pattern::compare::Atom;
+use crate::pattern::compare::{self, Atom};
 use crate::pattern::generated;
 use crate::pattern::matcher::{self, Bound, Env, Match};
 use crate::pattern::metavar::{self, Arity};
@@ -993,7 +993,16 @@ fn structural_diff(
     // Entries matched out of order have no positional correspondence, and both
     // `unwrap_to_subtree` and `align` pair children by position.
     if matcher::is_hash(pattern) && !matcher::matches_in_order(pattern, target, prepared, env) {
-        return None;
+        return entry_diff(
+            pattern,
+            template,
+            target,
+            prepared,
+            t_prepared,
+            template_src,
+            env,
+            source,
+        );
     }
 
     let (p_kids, t_kids, x_kids) = (
@@ -1081,6 +1090,181 @@ fn structural_diff(
         )?);
     }
     Some(edits)
+}
+
+/// Diff a hash entry by entry, pairing them by key rather than position: each
+/// entry the template keeps is edited where it stands and each it drops is
+/// deleted with its separator, so the source's order and layout survive (D127).
+///
+/// `None` -- and so a re-render, which the caller refuses for an out-of-order
+/// match -- when the template adds an entry, lists its entries in another order
+/// than the pattern's, or would delete them all, or when a deletion would take
+/// a comment or a heredoc body with it.
+#[allow(clippy::too_many_arguments)]
+fn entry_diff(
+    pattern: &Node<'_>,
+    template: &Node<'_>,
+    target: &Node<'_>,
+    prepared: &Prepared,
+    t_prepared: &Prepared,
+    template_src: &[u8],
+    env: &Env<'_>,
+    source: &[u8],
+) -> Option<Vec<Edit>> {
+    if std::mem::discriminant(pattern) != std::mem::discriminant(template) {
+        return None;
+    }
+    let (p_kids, t_kids, x_kids) = (
+        generated::children(pattern),
+        generated::children(template),
+        generated::children(target),
+    );
+
+    // Which pattern entry each target entry belongs to: a named rest's from the
+    // environment, a keyed entry's by the one entry it matches, and an
+    // anonymous rest's by elimination.
+    let mut owner: Vec<Option<usize>> = vec![None; x_kids.len()];
+    let mut anonymous = None;
+    for (pi, p) in p_kids.iter().enumerate() {
+        if !matcher::is_rest(p, prepared) {
+            continue;
+        }
+        let Some(name) = matcher::splat_placeholder_name(p, prepared) else {
+            if anonymous.replace(pi).is_some() {
+                return None;
+            }
+            continue;
+        };
+        let Some(Bound::Many(nodes)) = env.get(&name) else {
+            return None;
+        };
+        for node in nodes {
+            let xi = x_kids
+                .iter()
+                .position(|x| own_range(x) == own_range(node))?;
+            if owner[xi].replace(pi).is_some() {
+                return None;
+            }
+        }
+    }
+    for (pi, p) in p_kids.iter().enumerate() {
+        if matcher::is_rest(p, prepared) {
+            continue;
+        }
+        let mut candidates = (0..x_kids.len())
+            .filter(|&xi| owner[xi].is_none())
+            .filter(|&xi| matcher::matches_under(p, &x_kids[xi], prepared, env));
+        let (Some(xi), None) = (candidates.next(), candidates.next()) else {
+            return None;
+        };
+        owner[xi] = Some(pi);
+    }
+    for slot in &mut owner {
+        if slot.is_none() {
+            *slot = Some(anonymous?);
+        }
+    }
+
+    // Which pattern entry each template entry keeps, in the pattern's order.
+    let mut kept: Vec<(usize, usize)> = Vec::with_capacity(t_kids.len());
+    for (ti, t) in t_kids.iter().enumerate() {
+        let pi = p_kids
+            .iter()
+            .position(|p| entries_correspond(p, t, prepared, t_prepared))?;
+        if kept.last().is_some_and(|&(last, _)| last >= pi) {
+            return None;
+        }
+        kept.push((pi, ti));
+    }
+
+    let mut edits = Vec::new();
+    for &(pi, ti) in &kept {
+        if matcher::is_rest(&p_kids[pi], prepared) {
+            continue;
+        }
+        let xi = owner.iter().position(|o| *o == Some(pi))?;
+        edits.extend(diff_child(
+            &p_kids[pi],
+            &t_kids[ti],
+            &x_kids[xi],
+            prepared,
+            t_prepared,
+            template_src,
+            env,
+            source,
+        )?);
+    }
+
+    let dropped: Vec<bool> = owner
+        .iter()
+        .map(|o| !kept.iter().any(|&(pi, _)| *o == Some(pi)))
+        .collect();
+    if dropped.iter().all(|d| *d) {
+        return None;
+    }
+    let end = |i: usize| effective_range(&x_kids[i]).1;
+    let start = |i: usize| own_range(&x_kids[i]).0;
+    let mut i = 0;
+    while i < x_kids.len() {
+        if !dropped[i] {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j + 1 < x_kids.len() && dropped[j + 1] {
+            j += 1;
+        }
+        // Take the separator before the run, or after it when the run leads.
+        let (from, to) = if i > 0 {
+            (end(i - 1), end(j))
+        } else {
+            (start(i), start(j + 1))
+        };
+        // A comment beside a dropped entry may describe it or its neighbour.
+        let after = x_kids
+            .get(j + 1)
+            .map_or(own_range(target).1, |_| start(j + 1));
+        let commented = (i.max(1)..=j)
+            .map(|k| (end(k - 1), start(k)))
+            .chain(std::iter::once((end(j), after)))
+            .any(|(a, b)| a < b && source[a..b].contains(&b'#'));
+        if commented || heredoc_opens_within(target, from, to) {
+            return None;
+        }
+        edits.push(Edit {
+            start: from,
+            end: to,
+            text: String::new(),
+        });
+        i = j + 1;
+    }
+    Some(edits)
+}
+
+/// Whether a template entry is the pattern entry it keeps: the same rest, or the
+/// same key -- the same metavariable, or the same literal key.
+fn entries_correspond(
+    p: &Node<'_>,
+    t: &Node<'_>,
+    prepared: &Prepared,
+    t_prepared: &Prepared,
+) -> bool {
+    if matcher::is_rest(p, prepared) || matcher::is_rest(t, t_prepared) {
+        let name = matcher::splat_placeholder_name(p, prepared);
+        return name.is_some() && name == matcher::splat_placeholder_name(t, t_prepared);
+    }
+    let (Some(p), Some(t)) = (p.as_assoc_node(), t.as_assoc_node()) else {
+        return false;
+    };
+    let (pk, tk) = (p.key(), t.key());
+    match (
+        matcher::key_metavariable(&pk, prepared),
+        matcher::key_metavariable(&tk, t_prepared),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => compare::node_eq(&pk, &tk),
+        _ => false,
+    }
 }
 
 /// One corresponding child's edits.
@@ -1855,12 +2039,69 @@ mod tests {
         assert_eq!(out, "bar(\n  a,\n  b,\n)\n");
     }
 
+    /// D127. An out-of-order match is rewritten by editing each entry where it
+    /// stands and deleting the ones the template drops, so the source's order
+    /// and layout survive.
+    #[test]
+    fn an_out_of_order_match_is_edited_in_place() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "$S.to_return(status: _, body: $B.to_json, headers: _)",
+                "$S.to_return_json(body: $B)",
+                "s.to_return(headers: h, body: b.to_json, status: 200)\n",
+                "s.to_return_json(body: b)\n",
+            ),
+            (
+                "$S.to_return(body: $B.to_json, **$R)",
+                "$S.to_return_json(body: $B, **$R)",
+                "s.to_return(status: 200, body: b.to_json, headers: h)\n",
+                "s.to_return_json(status: 200, body: b, headers: h)\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'x', status: 200)\n",
+                "foo(body: 'x')\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(\n  body: 'x',\n  status: 200,\n  headers: h\n)\n",
+                "foo(\n  body: 'x',\n  headers: h\n)\n",
+            ),
+            (
+                "foo(headers: { 'Content-Type' => 'application/json', **$H }, **$R)",
+                "foo(headers: { **$H }, **$R)",
+                "foo(status: 201, headers: { 'X-Req' => '1', 'Content-Type' => 'application/json' }, body: 'x')\n",
+                "foo(status: 201, headers: { 'X-Req' => '1' }, body: 'x')\n",
+            ),
+            // Carried across unchanged, an out-of-order match is byte-identical.
+            (
+                "foo(a: $A, **$R)",
+                "foo(a: $A, **$R)",
+                "foo(b: 1, a: 2)\n",
+                "foo(b: 1, a: 2)\n",
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            let got = rewrite(pattern, template, source);
+            assert_eq!(got.as_deref(), Ok(*want), "{pattern} -> {template}");
+        }
+    }
+
     /// D127. A template that cannot be applied to an out-of-order match without
     /// moving entries is refused: a moved entry would reorder evaluation and the
     /// hash's iteration order.
     #[test]
     fn an_out_of_order_match_keeps_the_source_order() {
         let cases: &[(&str, &str, &str, Option<&str>)] = &[
+            // A comment beside a dropped entry may describe either neighbour.
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(\n  body: 'x', # why\n  status: 200\n)\n",
+                None,
+            ),
             // The template reorders, adds an entry, or reshapes the call: there
             // is no place to edit through, and either order would be a guess.
             (

@@ -405,8 +405,24 @@ fn repeats_a_key(entries: &[Node<'_>], prepared: &Prepared) -> bool {
 }
 
 /// `$K:` (a label whose name is a placeholder) or `$K =>`.
-pub(crate) fn is_metavariable_key(key: &Node<'_>, prepared: &Prepared) -> bool {
+fn is_metavariable_key(key: &Node<'_>, prepared: &Prepared) -> bool {
     metavariable_key(key, prepared).is_some() || placeholder(key, &prepared.bindings).is_some()
+}
+
+/// The metavariable a key stands for -- `$K:` or `$K =>` -- for pairing a
+/// pattern's entry with a template's. `None` for a literal or anonymous key.
+pub(crate) fn key_metavariable(key: &Node<'_>, prepared: &Prepared) -> Option<String> {
+    let placeholder =
+        metavariable_key(key, prepared).or_else(|| placeholder(key, &prepared.bindings))?;
+    prepared
+        .bindings
+        .get(placeholder)
+        .and_then(|b| b.name.clone())
+}
+
+/// Whether a node is a rest, `**$NAME` or `**_`.
+pub(crate) fn is_rest(node: &Node<'_>, prepared: &Prepared) -> bool {
+    splat_placeholder(node, &prepared.bindings).is_some()
 }
 
 /// The placeholder a label key stands for, e.g. `$K:` -> its placeholder.
@@ -499,8 +515,18 @@ pub(crate) fn matches_in_order(
         in_order: true,
         ..prepared.clone()
     };
+    matches_under(pattern, target, &ordered, env)
+}
+
+/// Whether `pattern` matches `target` consistently with bindings already made.
+pub(crate) fn matches_under(
+    pattern: &Node<'_>,
+    target: &Node<'_>,
+    prepared: &Prepared,
+    env: &Env<'_>,
+) -> bool {
     let mut env = env.clone();
-    match_node(pattern, target, &ordered, &mut env, &Forbidden::new())
+    match_node(pattern, target, prepared, &mut env, &Forbidden::new())
 }
 
 /// Whether a call has a receiver at all.

@@ -84,10 +84,23 @@ repeated key -- where a later entry overrides an earlier one -- is not matched
 by a pattern that does not position its entries, because rwr cannot see which
 key wins.
 
-**A rewrite never moves an entry.** When the source's order differs from the
-pattern's and the template cannot be applied without moving entries, rwr refuses
-the file rather than pick an order: moving an entry changes what evaluates
-first and the order the hash iterates in.
+**A rewrite never moves an entry.** Moving one changes what evaluates first and
+the order the hash iterates in. So when the source's order differs from the
+pattern's, each entry the template keeps is edited where it stands and each it
+drops is deleted:
+
+```yaml
+match:   '$S.to_return(body: $B.to_json, **$REST)'
+rewrite: '$S.to_return_json(body: $B, **$REST)'
+tests:
+  - input:  "s.to_return(status: 200, body: b.to_json)\n"
+    output: "s.to_return_json(status: 200, body: b)\n"
+```
+
+A template that adds an entry or lists them in another order than the pattern
+has no place to edit through, so on such a site rwr refuses the file rather than
+pick an order. Against a source already in the pattern's order, the template's
+order applies as written.
 
 ## `where:` predicates
 
