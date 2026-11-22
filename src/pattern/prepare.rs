@@ -13,7 +13,9 @@
 //! flip the case of the placeholder nearest the error and try again. Patterns
 //! are tiny, so the loop is cheap, and it stays deterministic.
 
+use super::generated;
 use super::metavar::{self, Arity};
+use ruby_prism::Node;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -93,6 +95,21 @@ pub(crate) fn prepare(pattern: &str) -> Result<Prepared, PrepareError> {
 /// mechanism being invented for it.
 pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepared, PrepareError> {
     let vars = metavar::scan(pattern);
+    for sigil in metavar::BARE {
+        if vars
+            .iter()
+            .filter(|v| v.name.as_deref() == Some(sigil))
+            .count()
+            > 1
+        {
+            return Err(PrepareError::Unparseable {
+                message: format!(
+                    "a pattern holds at most one bare `{sigil}`, as a Ruby method declares at \
+                     most one -- name the others, e.g. `{sigil}$REST`"
+                ),
+            });
+        }
+    }
     let mut cases: Vec<Case> = vars
         .iter()
         .map(|v| match &v.name {
@@ -121,6 +138,7 @@ pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepar
         };
 
         let Some((message, at)) = failure else {
+            confirm_bare(pattern, &vars, &cases)?;
             let bindings = vars
                 .iter()
                 .zip(&cases)
@@ -143,7 +161,16 @@ pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepar
         };
 
         last_message = message;
-        match nearest(&spans, at) {
+        // A bare wildcard's placeholder is lowercase wherever it can stand.
+        let flippable: Vec<Option<(usize, usize)>> = spans
+            .iter()
+            .zip(&vars)
+            .map(|(span, v)| match &v.name {
+                Some(name) if metavar::is_bare(name) => None,
+                _ => Some(*span),
+            })
+            .collect();
+        match nearest(&flippable, at) {
             Some(i) => cases[i] = cases[i].flipped(),
             // Nothing to flip — the pattern is wrong independently of casing.
             None => break,
@@ -177,13 +204,9 @@ fn render(
 
     for (i, var) in vars.iter().enumerate() {
         source.push_str(&pattern[cursor..var.start]);
-        // The metavariable's span includes the leading `*` for sequences, so the
-        // splat has to be re-emitted around the placeholder.
-        if var.arity == Arity::Many {
-            // Re-emit the splat the metavariable's span swallowed, in the
-            // spelling the author used -- `**` inside a hash, `*` elsewhere.
-            source.push_str(if var.double { "**" } else { "*" });
-        }
+        // Re-emit the sigil the metavariable's span swallowed, in the spelling
+        // the author used -- `**` inside a hash, `*` elsewhere.
+        source.push_str(var.sigil);
         let start = source.len();
         source.push_str(&cases[i].placeholder(i));
         spans.push((start, source.len()));
@@ -193,17 +216,158 @@ fn render(
     (source, spans)
 }
 
-/// The placeholder containing `at`, else the one closest to it.
-fn nearest(spans: &[(usize, usize)], at: usize) -> Option<usize> {
-    if spans.is_empty() {
-        return None;
+/// The method a bare `*`, `**` or `&` is parsed inside when the pattern alone
+/// does not parse. Ruby accepts anonymous forwarding only where the enclosing
+/// method declares it, so this keeps "a pattern is valid Ruby" true of them.
+const WRAPPER: &str = "def _(*, **, &)\n";
+
+/// Check that each bare `*`, `**` and `&` the scanner found is what Ruby calls
+/// anonymous forwarding -- a splat with no operand in an argument list, or an
+/// anonymous parameter -- by parsing the pattern with them left bare: alone,
+/// else inside [`WRAPPER`]. A bare sigil anywhere else, say inside a string, is
+/// refused rather than read as a wildcard.
+fn confirm_bare(
+    pattern: &str,
+    vars: &[metavar::Metavar],
+    cases: &[Case],
+) -> Result<(), PrepareError> {
+    if !vars
+        .iter()
+        .any(|v| v.name.as_deref().is_some_and(metavar::is_bare))
+    {
+        return Ok(());
     }
-    if let Some(i) = spans.iter().position(|(s, e)| at >= *s && at < *e) {
-        return Some(i);
+    // The pattern as written, metavariables substituted and bare sigils kept,
+    // with where each bare sigil landed.
+    let mut source = String::with_capacity(pattern.len());
+    let mut bare = Vec::new();
+    let mut cursor = 0;
+    for (i, var) in vars.iter().enumerate() {
+        source.push_str(&pattern[cursor..var.start]);
+        match var.name.as_deref() {
+            Some(sigil) if metavar::is_bare(sigil) => {
+                bare.push((source.len(), sigil, var.start));
+                source.push_str(sigil);
+            }
+            _ => {
+                source.push_str(var.sigil);
+                source.push_str(&cases[i].placeholder(i));
+            }
+        }
+        cursor = var.end;
     }
-    spans
+    source.push_str(&pattern[cursor..]);
+
+    let plain = ruby_prism::parse(source.as_bytes());
+    let wrapped_source = format!("{WRAPPER}{source}\nend\n");
+    let wrapped = ruby_prism::parse(wrapped_source.as_bytes());
+    let first_error = |result: &ruby_prism::ParseResult<'_>, shift: usize| {
+        result.errors().next().map(|d| {
+            (
+                d.location().start_offset().saturating_sub(shift),
+                d.message().to_string(),
+            )
+        })
+    };
+    let (tree, shift) = match (first_error(&plain, 0), first_error(&wrapped, WRAPPER.len())) {
+        (None, _) => (plain.node(), 0),
+        (Some(_), None) => (wrapped.node(), WRAPPER.len()),
+        // Report whichever parse got further into the pattern: a `class` the
+        // wrapper cannot hold fails at once, while the pattern alone fails at
+        // the bare sigil it has no method to forward from.
+        (Some(alone), Some(inside)) => {
+            let (_, message) = if inside.0 > alone.0 { inside } else { alone };
+            return Err(PrepareError::Unparseable { message });
+        }
+    };
+
+    let mut forwards = Vec::new();
+    anonymous_forwards(&tree, None, &mut forwards);
+    for (at, sigil, column) in bare {
+        if !forwards.contains(&(at + shift, sigil)) {
+            return Err(PrepareError::Unparseable {
+                message: format!(
+                    "the bare `{sigil}` at offset {column} is not an anonymous argument or \
+                     parameter, so it cannot be a wildcard"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Where each anonymous argument and parameter in a tree starts, by sigil.
+fn anonymous_forwards(node: &Node<'_>, parent: Option<&Node<'_>>, out: &mut Vec<(usize, &str)>) {
+    let sigil = match node {
+        // A splat with no operand also writes the rest of a multiple
+        // assignment and matches it in a `case/in`; neither forwards anything.
+        Node::SplatNode { .. }
+            if node
+                .as_splat_node()
+                .is_some_and(|n| n.expression().is_none())
+                && matches!(
+                    parent,
+                    Some(Node::ArgumentsNode { .. } | Node::ArrayNode { .. })
+                ) =>
+        {
+            Some("*")
+        }
+        Node::RestParameterNode { .. }
+            if node
+                .as_rest_parameter_node()
+                .is_some_and(|n| n.name().is_none()) =>
+        {
+            Some("*")
+        }
+        Node::AssocSplatNode { .. }
+            if node
+                .as_assoc_splat_node()
+                .is_some_and(|n| n.value().is_none()) =>
+        {
+            Some("**")
+        }
+        Node::KeywordRestParameterNode { .. }
+            if node
+                .as_keyword_rest_parameter_node()
+                .is_some_and(|n| n.name().is_none()) =>
+        {
+            Some("**")
+        }
+        Node::BlockArgumentNode { .. }
+            if node
+                .as_block_argument_node()
+                .is_some_and(|n| n.expression().is_none()) =>
+        {
+            Some("&")
+        }
+        Node::BlockParameterNode { .. }
+            if node
+                .as_block_parameter_node()
+                .is_some_and(|n| n.name().is_none()) =>
+        {
+            Some("&")
+        }
+        _ => None,
+    };
+    if let Some(sigil) = sigil {
+        out.push((node.location().start_offset(), sigil));
+    }
+    for child in generated::children(node) {
+        anonymous_forwards(&child, Some(node), out);
+    }
+}
+
+/// The placeholder containing `at`, else the one closest to it, among those
+/// that may be flipped.
+fn nearest(spans: &[Option<(usize, usize)>], at: usize) -> Option<usize> {
+    let candidates = spans
         .iter()
         .enumerate()
+        .filter_map(|(i, span)| span.map(|s| (i, s)));
+    if let Some((i, _)) = candidates.clone().find(|(_, (s, e))| at >= *s && at < *e) {
+        return Some(i);
+    }
+    candidates
         .min_by_key(|(_, (s, e))| {
             if at < *s {
                 s - at
@@ -297,6 +461,62 @@ mod tests {
         let p = parses("foo(_, *_)");
         assert_eq!(p.bindings.len(), 2);
         assert!(p.bindings.values().all(|b| b.name.is_none()));
+    }
+
+    /// D129. A bare `*`, `**` or `&` is a wildcard bound under its own
+    /// spelling. Ruby accepts it only inside a method declaring anonymous
+    /// parameters, so a pattern that does not parse alone is parsed inside one.
+    #[test]
+    fn bare_sigils_are_wildcards_bound_under_their_spelling() {
+        let p = parses("$R.to_return(status: 200, **)");
+        assert!(p.source.contains("**rwr_mv_"), "{:?}", p.source);
+        assert!(p.bindings.values().any(|b| b.name.as_deref() == Some("**")));
+
+        for pattern in [
+            "foo(1, *)",
+            "foo(&)",
+            "foo(*, a: 1, **, &)",
+            "def fetch(*, legacy:, **) = _",
+            "[1].each { |a, *| a }",
+            // A named metavariable in a name position beside a bare one.
+            "x.$M(*)",
+        ] {
+            let p = parses(pattern);
+            assert_eq!(
+                ruby_prism::parse(p.source.as_bytes()).errors().count(),
+                0,
+                "{pattern:?} produced {:?}",
+                p.source
+            );
+        }
+    }
+
+    /// One wildcard of each spelling, as one method declares one of each; a
+    /// second would have to mean the same nodes again, or something else.
+    #[test]
+    fn a_second_bare_sigil_of_one_spelling_is_refused() {
+        assert!(prepare("foo(*, *)").is_err());
+        assert!(prepare("def m(**) = foo(**)").is_err());
+        assert!(prepare("foo(*, **, &)").is_ok());
+    }
+
+    /// A bare sigil the scanner found must be Ruby's anonymous forwarding. One
+    /// inside a string is text, and reading it as a wildcard would be a guess.
+    #[test]
+    fn a_bare_sigil_that_is_not_forwarding_is_refused() {
+        let err = prepare(r#"foo("(*)")"#).unwrap_err().to_string();
+        assert!(err.contains("bare `*`"), "{err}");
+        // A splat with no operand that forwards nothing stays literal Ruby.
+        assert!(parses("a, * = foo").bindings.is_empty());
+    }
+
+    /// The wrapper is an implementation detail: a pattern it cannot hold is
+    /// reported in terms of the pattern, not of a method the user never wrote.
+    #[test]
+    fn a_wrapper_failure_is_reported_against_the_pattern() {
+        let err = prepare("class Foo; bar(*); end").unwrap_err().to_string();
+        assert!(!err.contains("method body"), "{err}");
+        assert!(err.contains("anonymous"), "{err}");
     }
 
     /// Genuinely broken Ruby must be reported, not silently repaired forever.

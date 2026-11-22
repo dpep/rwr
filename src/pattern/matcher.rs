@@ -145,6 +145,20 @@ pub(crate) fn placeholder_name(node: &Node<'_>, prepared: &Prepared) -> Option<S
     prepared.bindings.get(key).and_then(|b| b.name.clone())
 }
 
+/// Whether a node is an anonymous `_` placeholder.
+pub(crate) fn is_anonymous(node: &Node<'_>, prepared: &Prepared) -> bool {
+    placeholder(node, &prepared.bindings)
+        .and_then(|key| prepared.bindings.get(key))
+        .is_some_and(|b| b.name.is_none())
+}
+
+/// Whether a body is a lone anonymous `_`, the nameless twin of
+/// [`lone_body_placeholder`].
+pub(crate) fn is_anonymous_body(node: &Node<'_>, prepared: &Prepared) -> bool {
+    matches!(node, Node::StatementsNode { .. })
+        && matches!(generated::children(node).as_slice(), [only] if is_anonymous(only, prepared))
+}
+
 /// The metavariable a call's *method name* stands for -- the `$MACRO` in
 /// `$MACRO(:foo)`.
 ///
@@ -181,9 +195,30 @@ fn splat_placeholder<'a>(
         // hash, which is a different node. Without this a pattern cannot reach
         // one pair among several.
         Node::AssocSplatNode { .. } => node.as_assoc_splat_node()?.value()?,
+        // In a parameter list a rest is a parameter named by the placeholder,
+        // and a bare `&` is a run of the zero or one block parameter.
+        Node::RestParameterNode { .. } => {
+            return named(node.as_rest_parameter_node()?.name()?.as_slice(), bindings);
+        }
+        Node::KeywordRestParameterNode { .. } => {
+            return named(
+                node.as_keyword_rest_parameter_node()?.name()?.as_slice(),
+                bindings,
+            );
+        }
+        Node::BlockParameterNode { .. } => {
+            let key = named(node.as_block_parameter_node()?.name()?.as_slice(), bindings)?;
+            return (bindings.get(key)?.name.as_deref() == Some("&")).then_some(key);
+        }
         _ => return None,
     };
     placeholder(&inner, bindings)
+}
+
+/// The placeholder a parameter's name is, if it is one.
+fn named<'a>(name: &[u8], bindings: &'a HashMap<String, Binding>) -> Option<&'a str> {
+    let name = std::str::from_utf8(name).ok()?;
+    bindings.get_key_value(name).map(|(k, _)| k.as_str())
 }
 
 /// How many times one node may be re-matched after a constraint rejection.
@@ -291,6 +326,19 @@ pub(crate) fn match_node<'pr>(
         return bind(env, &name, Bound::One(generated::dup(target)), forbidden);
     }
 
+    if let (Some(p), Some(t)) = (pattern.as_parameters_node(), target.as_parameters_node()) {
+        return match_parameters(&p, &t, prepared, env, forbidden);
+    }
+
+    // A bare `&` forwards the block argument whole, sigil and all, so it binds
+    // the argument rather than the expression inside it.
+    if let (Some(p), Node::BlockArgumentNode { .. }) = (pattern.as_block_argument_node(), target)
+        && let Some(expression) = p.expression()
+        && placeholder_name(&expression, prepared).as_deref() == Some("&")
+    {
+        return bind(env, "&", Bound::One(generated::dup(target)), forbidden);
+    }
+
     // A lone metavariable standing for a body binds the *whole* body, whatever
     // shape that body has.
     //
@@ -347,6 +395,62 @@ pub(crate) fn match_node<'pr>(
         }
     }
     match_children(&p_kids, &t_kids, prepared, env, forbidden)
+}
+
+/// Match two parameter lists section by section, as Ruby binds them (D129):
+/// positional parameters in order, where a `*` rest placeholder is a run;
+/// keywords by name in any order, where a `**` rest placeholder takes the
+/// others; and the block parameter, which a bare `&` matches present or absent.
+fn match_parameters<'pr>(
+    pattern: &ruby_prism::ParametersNode<'_>,
+    target: &ruby_prism::ParametersNode<'pr>,
+    prepared: &Prepared,
+    env: &mut Env<'pr>,
+    forbidden: &Forbidden,
+) -> bool {
+    fn positional<'a>(p: &ruby_prism::ParametersNode<'a>) -> Vec<Node<'a>> {
+        p.requireds()
+            .iter()
+            .chain(p.optionals().iter())
+            .chain(p.rest())
+            .chain(p.posts().iter())
+            .collect()
+    }
+    fn keywords<'a>(p: &ruby_prism::ParametersNode<'a>) -> Vec<Node<'a>> {
+        p.keywords().iter().chain(p.keyword_rest()).collect()
+    }
+    let mut trial = env.clone();
+    let (p_kw, t_kw) = (keywords(pattern), keywords(target));
+    let keywords_match = if prepared.in_order {
+        match_children(&p_kw, &t_kw, prepared, &mut trial, forbidden)
+    } else {
+        match_entries(&p_kw, &t_kw, prepared, &mut trial, forbidden)
+    };
+    let block_matches = match (pattern.block(), target.block()) {
+        (None, None) => true,
+        (Some(p), t) if is_rest(&p.as_node(), prepared) => {
+            let taken = t.iter().map(|b| b.as_node()).collect();
+            bind(&mut trial, "&", Bound::Many(taken), forbidden)
+        }
+        (Some(p), Some(t)) => {
+            match_node(&p.as_node(), &t.as_node(), prepared, &mut trial, forbidden)
+        }
+        _ => false,
+    };
+    if keywords_match
+        && block_matches
+        && match_children(
+            &positional(pattern),
+            &positional(target),
+            prepared,
+            &mut trial,
+            forbidden,
+        )
+    {
+        *env = trial;
+        return true;
+    }
+    false
 }
 
 /// A braced hash literal or a braceless one -- keyword arguments.
@@ -727,6 +831,9 @@ fn vanishes<'pr>(
     // exited 0 on a tree that raises `NoMethodError` (D121).
     if let Some(name) = lone_body_placeholder(pattern, prepared) {
         return bind(env, &name, Bound::Many(Vec::new()), forbidden);
+    }
+    if is_anonymous_body(pattern, prepared) {
+        return true;
     }
     // A container with no atoms of its own vanishes if everything inside it does.
     generated::atoms(pattern).is_empty()
@@ -1117,8 +1224,10 @@ fn holds_within(node: &Node<'_>, sub: &Prepared, outer: &Env<'_>) -> bool {
     // outer bindings is the only condition, and it is checked below.
     let criteria = Criteria::none();
     search(&root, node, sub, &criteria).iter().any(|hit| {
+        // A bare `*` belongs to the pattern it is written in, as `_` does.
         hit.env
             .iter()
+            .filter(|(name, _)| !super::metavar::is_bare(name))
             .all(|(name, bound)| outer.get(name).is_none_or(|theirs| agree(bound, theirs)))
     })
 }
@@ -2302,6 +2411,118 @@ mod tests {
             // Positional arguments and arrays keep their order.
             ("foo(1, $X)", "foo(x, 1)", 0),
             ("[1, 2]", "x = [2, 1]", 0),
+        ];
+        for (pattern, source, want) in cases {
+            assert_eq!(
+                matches(pattern, source),
+                *want,
+                "{pattern} against {source}"
+            );
+        }
+    }
+
+    /// D129. A bare `*`, `**` and `&` are wildcards: a run of arguments, the
+    /// remaining hash entries, and a block-pass argument.
+    #[test]
+    fn bare_sigils_match_as_wildcards() {
+        let cases: &[(&str, &str, usize)] = &[
+            ("foo(1, *)", "foo(1, 2, 3)", 1),
+            ("foo(1, *)", "foo(1)", 1),
+            ("foo(1, *)", "foo(2)", 0),
+            (
+                "$S.to_return(status: 200, **)",
+                "s.to_return(body: b, status: 200)",
+                1,
+            ),
+            (
+                "$S.to_return(status: 200, **)",
+                "s.to_return(status: 200)",
+                1,
+            ),
+            (
+                "$S.to_return(status: 200, **)",
+                "s.to_return(**o, status: 200)",
+                0,
+            ),
+            ("foo(&)", "foo(&blk)", 1),
+            ("foo(&)", "foo(&:sym)", 1),
+            ("foo(&)", "foo { 1 }", 0),
+            ("foo(&)", "foo", 0),
+            ("foo(*, &)", "foo(1, 2, &blk)", 1),
+        ];
+        for (pattern, source, want) in cases {
+            assert_eq!(
+                matches(pattern, source),
+                *want,
+                "{pattern} against {source}"
+            );
+        }
+    }
+
+    /// A bare sigil in a `contains:` sub-pattern is that sub-pattern's own
+    /// wildcard, not a promise to agree with the outer pattern's.
+    #[test]
+    fn a_bare_sigil_in_a_subpattern_is_its_own() {
+        let rule = "match: '$S.foo(1, *)'\n\
+                    where:\n  $S: { contains: \"stub_request(*)\" }\n";
+        assert_eq!(applied(rule, "stub_request(:get, u).foo(1, 2, 3)\n"), 1);
+        assert_eq!(applied(rule, "other(:get).foo(1, 2)\n"), 0);
+    }
+
+    /// D129. In a parameter list `*` is a run of positional parameters and `**`
+    /// of keyword ones; keywords match by name in any order, a required keyword
+    /// only a required one and `legacy: _` only an optional one. A block
+    /// parameter is matched by `&`, which also admits none.
+    #[test]
+    fn bare_sigils_in_parameters_are_runs() {
+        let pattern = "def fetch(*, legacy:, **) = _";
+        let cases: &[(&str, &str, usize)] = &[
+            (pattern, "def fetch(legacy:) = 1", 1),
+            (
+                pattern,
+                "def fetch(a, b = 1, *r, legacy:, c: 2, **o) = 1",
+                1,
+            ),
+            (pattern, "def fetch(c: 2, legacy:)\n  1\nend", 1),
+            (pattern, "def fetch(a, legacy: 1) = a", 0),
+            (pattern, "def fetch(a, c:) = a", 0),
+            (pattern, "def fetch(legacy:, &blk) = 1", 0),
+            (
+                "def fetch(*, legacy:, **, &) = _",
+                "def fetch(legacy:, &blk) = 1",
+                1,
+            ),
+            (
+                "def fetch(*, legacy:, **, &) = _",
+                "def fetch(legacy:) = 1",
+                1,
+            ),
+            (
+                "def fetch(*, legacy: _, **) = _",
+                "def fetch(legacy: 1) = 1",
+                1,
+            ),
+            (
+                "def fetch(*, legacy: _, **) = _",
+                "def fetch(legacy:) = 1",
+                0,
+            ),
+            // Without `**` the keywords are exactly these.
+            ("def fetch(*, legacy:) = _", "def fetch(a, legacy:) = 1", 1),
+            ("def fetch(*, legacy:) = _", "def fetch(legacy:, b:) = 1", 0),
+            // `*` is positional only.
+            (
+                "def fetch(*, legacy:) = _",
+                "def fetch(legacy:, **o) = 1",
+                0,
+            ),
+            // Alone, `*` is any parameter list, as `*$P` is.
+            ("def fetch(*) = _", "def fetch(a, k: 1, &b) = 1", 1),
+            ("def fetch(*) = _", "def fetch = 1", 1),
+            // A block-bodied definition matches an endless pattern, and `_`
+            // takes an empty body as `$B` does.
+            (pattern, "def fetch(legacy:)\n  x\n  y\nend", 1),
+            (pattern, "def fetch(legacy:)\nend", 1),
         ];
         for (pattern, source, want) in cases {
             assert_eq!(

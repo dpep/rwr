@@ -16,6 +16,11 @@
 //! All four are valid Ruby, so Ruby's own grammar validates where a sequence
 //! may appear - splats are legal exactly where sequence metavariables are
 //! wanted. `*_` is already idiomatic Ruby for "rest, ignored".
+//!
+//! A bare `*`, `**` or `&` -- Ruby's anonymous forwarding -- is a wildcard that
+//! a template may forward (D129). It binds under its own spelling, which no
+//! `$NAME` can collide with, and `prepare` confirms with Prism that each one
+//! the scanner found really is an anonymous argument or parameter.
 
 /// How many nodes a metavariable stands for, before any `where:` refinement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,12 +37,12 @@ pub(crate) struct Metavar {
     /// `None` for the anonymous forms `_` and `*_`.
     pub name: Option<String>,
     pub arity: Arity,
-    /// Spelled `**` rather than `*`, as Ruby requires inside a hash.
+    /// The sigil the span swallowed: `*`, `**`, `&`, or empty for a single node.
     ///
     /// The whole `**$NAME` is one token: treating the second asterisk as the
     /// metavariable would leave the first behind as literal template text, and
     /// an empty sequence would render `{*, a:}`.
-    pub double: bool,
+    pub sigil: &'static str,
     /// Byte range in the pattern source, for substitution and diagnostics.
     pub start: usize,
     pub end: usize,
@@ -63,30 +68,47 @@ pub(crate) fn scan(pattern: &str) -> Vec<Metavar> {
         }
 
         let start = i;
-        let double = b[i] == b'*' && b.get(i + 1) == Some(&b'*');
-        let (arity, j) = if double {
-            (Arity::Many, i + 2)
+        let sigil = if b[i] == b'*' && b.get(i + 1) == Some(&b'*') {
+            "**"
         } else if b[i] == b'*' {
-            (Arity::Many, i + 1)
+            "*"
         } else {
-            (Arity::One, i)
+            ""
         };
+        let arity = if sigil.is_empty() {
+            Arity::One
+        } else {
+            Arity::Many
+        };
+        let j = i + sigil.len();
 
         match parse_binder(b, j) {
             Some((name, end)) => {
                 out.push(Metavar {
                     name,
                     arity,
-                    double,
+                    sigil,
                     start,
                     end,
                 });
                 i = end;
             }
-            // Not a metavariable. A rejected `$` is a literal Ruby global, and
-            // the *whole* token must be consumed: stepping one byte past the
-            // `$` in `$_` would leave a bare `_` to be misread as a wildcard.
             None => {
+                if let Some(sigil) = bare_sigil(b, i) {
+                    out.push(Metavar {
+                        name: Some(sigil.to_string()),
+                        arity: Arity::Many,
+                        sigil,
+                        start,
+                        end: start + sigil.len(),
+                    });
+                    i = start + sigil.len();
+                    continue;
+                }
+                // Not a metavariable. A rejected `$` is a literal Ruby global,
+                // and the *whole* token must be consumed: stepping one byte past
+                // the `$` in `$_` would leave a bare `_` to be misread as a
+                // wildcard.
                 i += 1;
                 if b[start] == b'$' {
                     while is_ident_byte(b.get(i)) {
@@ -97,6 +119,34 @@ pub(crate) fn scan(pattern: &str) -> Vec<Metavar> {
         }
     }
     out
+}
+
+/// The spellings a bare forwarding wildcard binds under.
+pub(crate) const BARE: [&str; 3] = ["*", "**", "&"];
+
+/// Whether a capture name is a bare `*`, `**` or `&` rather than a `$NAME`.
+pub(crate) fn is_bare(name: &str) -> bool {
+    BARE.contains(&name)
+}
+
+/// A bare `*`, `**` or `&` at `i`: the sigil standing alone, followed by what
+/// may close an argument or parameter. Multiplication, `&&`, `&.` and a splat
+/// of an expression all have an operand after them instead.
+fn bare_sigil(b: &[u8], i: usize) -> Option<&'static str> {
+    let sigil = match (b[i], b.get(i + 1)) {
+        (b'*', Some(b'*')) => "**",
+        (b'*', _) => "*",
+        (b'&', _) => "&",
+        _ => return None,
+    };
+    if i > 0 && matches!(b[i - 1], b'*' | b'&') {
+        return None;
+    }
+    let mut k = i + sigil.len();
+    while matches!(b.get(k), Some(c) if c.is_ascii_whitespace()) {
+        k += 1;
+    }
+    matches!(b.get(k), None | Some(b',' | b')' | b']' | b'}' | b'|')).then_some(sigil)
 }
 
 /// Parse `_` or `$NAME` at `j`, returning the capture name and end offset.
@@ -165,9 +215,9 @@ mod tests {
     fn a_double_splat_is_one_token() {
         let found = scan("{**$REST}");
         assert_eq!(found.len(), 1);
-        assert!(found[0].double);
+        assert_eq!(found[0].sigil, "**");
         assert_eq!(&"{**$REST}"[found[0].start..found[0].end], "**$REST");
-        assert!(!scan("foo(*$R)")[0].double);
+        assert_eq!(scan("foo(*$R)")[0].sigil, "*");
     }
 
     /// The case rule means ordinary Ruby globals need no escape - including
@@ -200,12 +250,38 @@ mod tests {
         assert_eq!(found("foo(bar_baz)"), vec![]);
     }
 
-    /// A bare `*` is multiplication or a plain splat, and must not swallow
-    /// what follows it.
+    /// A `*` with an operand is multiplication or a plain splat, and must not
+    /// swallow what follows it.
     #[test]
-    fn bare_asterisk_is_not_a_metavariable() {
+    fn an_asterisk_with_an_operand_is_not_a_metavariable() {
         assert_eq!(found("a * $B"), vec![(Some("B".into()), Arity::One)]);
         assert_eq!(found("foo(*args)"), vec![]);
+        assert_eq!(found("a *\n  b"), vec![]);
+        assert_eq!(found("a && b&.c(&blk)"), vec![]);
+        assert_eq!(found("a ** 2"), vec![]);
+    }
+
+    /// Ruby's anonymous forwarding: the sigil alone, closed by what ends an
+    /// argument or parameter. Each binds under its own spelling.
+    #[test]
+    fn a_bare_sigil_is_a_wildcard() {
+        for (pattern, sigil) in [
+            ("foo(1, *)", "*"),
+            ("foo(a: 1, **)", "**"),
+            ("foo(&)", "&"),
+            ("def m(*, **) = _", "*"),
+            ("foo(*\n)", "*"),
+            ("proc { |a, *| a }", "*"),
+            ("**", "**"),
+        ] {
+            let vars = scan(pattern);
+            let bare = vars.iter().find(|v| v.name.as_deref() == Some(sigil));
+            let bare = bare.unwrap_or_else(|| panic!("{pattern:?}: no bare {sigil}"));
+            assert_eq!(&pattern[bare.start..bare.end], sigil);
+        }
+        let vars = scan("foo(*, **, &)");
+        let names: Vec<_> = vars.iter().filter_map(|v| v.name.as_deref()).collect();
+        assert_eq!(names, ["*", "**", "&"]);
     }
 
     /// Repeated names bind once and are checked for AST equality at match time
