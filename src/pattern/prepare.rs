@@ -32,6 +32,10 @@ pub(crate) struct Prepared {
     pub source: String,
     /// Placeholder identifier -> what it stands for.
     pub bindings: HashMap<String, Binding>,
+    /// Match hash entries in source order only. Set by
+    /// [`super::matcher::matches_in_order`], which asks whether a match needed
+    /// D127's any-order entries; never set for a rule's own matching.
+    pub in_order: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +135,11 @@ pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepar
                     )
                 })
                 .collect();
-            return Ok(Prepared { source, bindings });
+            return Ok(Prepared {
+                source,
+                bindings,
+                in_order: false,
+            });
         };
 
         last_message = message;

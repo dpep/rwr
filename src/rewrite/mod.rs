@@ -68,6 +68,12 @@ pub(crate) enum Refusal {
     /// a capture that does not move is never spliced at all -- refusing is the
     /// honest answer (principle 2).
     DiscontiguousCapture { at: usize },
+    /// A hash matched with its entries in another order than the pattern's, and
+    /// the template cannot be applied by editing them in place. Re-rendering
+    /// would replace the source's order with the template's -- changing what
+    /// evaluates first and the order the hash iterates in -- so it is refused
+    /// rather than guessed (D127).
+    Reordered { at: usize },
 }
 
 /// A refusal is a *product*, not a diagnostic: refusing rather than guessing is
@@ -115,6 +121,12 @@ impl std::fmt::Display for Refusal {
                 f,
                 "a capture at byte {at} contains a heredoc, whose body sits outside the \
                  expression -- splicing it by range would drag along surrounding text"
+            ),
+            Refusal::Reordered { at } => write!(
+                f,
+                "the hash at byte {at} lists its entries in another order than the pattern, and \
+                 the template cannot be applied without moving them -- write the template's \
+                 entries in the pattern's order so each is edited where it stands"
             ),
         }
     }
@@ -526,6 +538,12 @@ pub(crate) fn plan(
                         text: String::new(),
                     },
                 ));
+            }
+            // Re-rendering would write the template's order over the source's.
+            None if !matcher::matches_in_order(pattern_root, &m.node, pattern_prepared, &m.env) => {
+                return Err(Refusal::Reordered {
+                    at: m.node.location().start_offset(),
+                });
             }
             // Shapes diverge, so fall back to replacing the whole span. Correct,
             // merely non-minimal.
@@ -972,6 +990,12 @@ fn structural_diff(
         return None;
     }
 
+    // Entries matched out of order have no positional correspondence, and both
+    // `unwrap_to_subtree` and `align` pair children by position.
+    if matcher::is_hash(pattern) && !matcher::matches_in_order(pattern, target, prepared, env) {
+        return None;
+    }
+
     let (p_kids, t_kids, x_kids) = (
         generated::children(pattern),
         generated::children(template),
@@ -1045,15 +1069,50 @@ fn structural_diff(
     }
 
     for (p, t, x) in aligned {
-        match structural_diff(p, t, x, prepared, t_prepared, template_src, env, source) {
-            Some(found) => edits.extend(found),
-            // This child diverges. Replacing *it* is still minimal -- every
-            // sibling keeps its bytes -- so localize here rather than propagate
-            // the failure up and re-render the whole node.
-            None => edits.push(localized(t, x, t_prepared, template_src, env, source)?),
-        }
+        edits.extend(diff_child(
+            p,
+            t,
+            x,
+            prepared,
+            t_prepared,
+            template_src,
+            env,
+            source,
+        )?);
     }
     Some(edits)
+}
+
+/// One corresponding child's edits.
+#[allow(clippy::too_many_arguments)]
+fn diff_child(
+    p: &Node<'_>,
+    t: &Node<'_>,
+    x: &Node<'_>,
+    prepared: &Prepared,
+    t_prepared: &Prepared,
+    template_src: &[u8],
+    env: &Env<'_>,
+    source: &[u8],
+) -> Option<Vec<Edit>> {
+    if let Some(found) = structural_diff(p, t, x, prepared, t_prepared, template_src, env, source) {
+        return Some(found);
+    }
+    // This child diverges. Replacing *it* is still minimal -- every sibling
+    // keeps its bytes -- so localize here rather than propagate the failure up
+    // and re-render the whole node. Unless it holds entries matched out of
+    // order: re-rendering them writes the template's order over the source's.
+    if !matcher::matches_in_order(p, x, prepared, env) {
+        return None;
+    }
+    Some(vec![localized(
+        t,
+        x,
+        t_prepared,
+        template_src,
+        env,
+        source,
+    )?])
 }
 
 /// Pair pattern children with template and target children, one triple per
@@ -1794,5 +1853,74 @@ mod tests {
         let src = "foo(\n  a,\n  b,\n)\n";
         let out = rewrite("foo($A, $B)", "bar($A, $B)", src).unwrap();
         assert_eq!(out, "bar(\n  a,\n  b,\n)\n");
+    }
+
+    /// D127. A template that cannot be applied to an out-of-order match without
+    /// moving entries is refused: a moved entry would reorder evaluation and the
+    /// hash's iteration order.
+    #[test]
+    fn an_out_of_order_match_keeps_the_source_order() {
+        let cases: &[(&str, &str, &str, Option<&str>)] = &[
+            // The template reorders, adds an entry, or reshapes the call: there
+            // is no place to edit through, and either order would be a guess.
+            (
+                "foo(a: $A, b: $B)",
+                "foo(b: $B, a: $A)",
+                "foo(b: 1, a: 2)\n",
+                None,
+            ),
+            (
+                "foo(a: $A, **$R)",
+                "foo(a: $A, c: 3, **$R)",
+                "foo(b: 1, a: 2)\n",
+                None,
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "bar.baz(**$R)",
+                "foo(body: 1, status: 200)\n",
+                None,
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            let got = rewrite(pattern, template, source);
+            match want {
+                Some(out) => assert_eq!(got.as_deref(), Ok(*out), "{pattern} -> {template}"),
+                None => assert!(
+                    matches!(got, Err(Refusal::Reordered { .. })),
+                    "{pattern} -> {template} should refuse, got {got:?}"
+                ),
+            }
+        }
+    }
+
+    /// The same templates against sources already in the pattern's order behave
+    /// as they always have, explicit reordering included.
+    #[test]
+    fn an_in_order_match_follows_the_template() {
+        let out = rewrite(
+            "foo(a: $A, b: $B)",
+            "foo(b: $B, a: $A)",
+            "foo(a: 1, b: 2)\n",
+        );
+        assert_eq!(out.as_deref(), Ok("foo(b: 2, a: 1)\n"));
+        let out = rewrite(
+            "foo(a: $A, **$R)",
+            "foo(a: $A, c: 3, **$R)",
+            "foo(a: 1, b: 2)\n",
+        );
+        assert_eq!(out.as_deref(), Ok("foo(a: 1, c: 3, b: 2)\n"));
+    }
+
+    /// A source `**splat` hides keys a later entry overrides, so a single-rest
+    /// pattern does not reach into the hash holding it.
+    #[test]
+    fn a_source_double_splat_is_not_matched_out_of_order() {
+        for source in ["foo(**opts, status: 200)\n", "foo(status: 200, **opts)\n"] {
+            let out = rewrite("foo(**$R, status: 200)", "foo(**$R)", source);
+            assert_eq!(out.as_deref(), Ok(source), "{source}");
+        }
+        let out = rewrite("foo(**$R)", "bar(**$R)", "foo(**opts)\n");
+        assert_eq!(out.as_deref(), Ok("bar(**opts)\n"));
     }
 }

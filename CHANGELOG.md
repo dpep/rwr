@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Hash entries and keyword arguments match in any order.** `to_return(status: 200, **$REST)` now
+finds `to_return(body: b, status: 200)` too, and `**$REST` takes every entry the pattern did not name.
+A rule that flanked a key with two rests to reach it anywhere can drop to one. Positional arguments
+and arrays still match in order, and so does a hash pattern with two rests. A source hash holding
+`**opts` or a repeated key is matched only by a pattern that positions its entries, since a later key
+overrides an earlier one. A rewrite never moves an entry: where a template could only be applied by
+reordering, the file is refused (D127).
+
 ## 0.6.10 — 2026-09-25
 
 **A rename now moves a definition a concern contributes.** A method defined in a module the class

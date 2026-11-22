@@ -399,6 +399,10 @@ fn write(path: PathBuf, body: &str) {
 /// A Rails-shaped repo holding exactly what the documented examples name:
 /// `app/models`, `app/services`, `app/x.rb`, `rule.yml`, `my-rules/`, a `main`
 /// branch to diff against.
+/// Keyword arguments in two orders, for the any-order hash example.
+const STUB_RB: &str =
+    "stub.to_return(status: 200, body: body)\nstub.to_return(body: body, status: 200)\n";
+
 fn build_fixture(root: &Path) {
     write(root.join(".ruby-version"), "3.3\n");
     write(root.join("app/models/account.rb"), ACCOUNT_RB);
@@ -408,6 +412,7 @@ fn build_fixture(root: &Path) {
     write(root.join("app/jobs/sync.rb"), SYNC_RB);
     write(root.join("app/x.rb"), X_RB);
     write(root.join("spec/account_spec.rb"), SPEC_RB);
+    write(root.join("spec/stub_spec.rb"), STUB_RB);
     write(root.join("rule.yml"), DETECT_YML);
     write(root.join("my-rules/detect.yml"), DETECT_YML);
     write(root.join("rename.yml"), RENAME_YML);

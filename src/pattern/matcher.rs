@@ -338,13 +338,169 @@ pub(crate) fn match_node<'pr>(
         return false;
     }
 
-    match_children(
-        &generated::children(pattern),
-        &generated::children(target),
-        prepared,
-        env,
-        forbidden,
-    )
+    let (p_kids, t_kids) = (generated::children(pattern), generated::children(target));
+    if is_hash(pattern) && !prepared.in_order {
+        match entry_order(&p_kids, &t_kids, prepared) {
+            EntryOrder::Any => return match_entries(&p_kids, &t_kids, prepared, env, forbidden),
+            EntryOrder::Refused => return false,
+            EntryOrder::Source => {}
+        }
+    }
+    match_children(&p_kids, &t_kids, prepared, env, forbidden)
+}
+
+/// A braced hash literal or a braceless one -- keyword arguments.
+pub(crate) fn is_hash(node: &Node<'_>) -> bool {
+    matches!(node, Node::HashNode { .. } | Node::KeywordHashNode { .. })
+}
+
+/// How a hash pattern's entries line up with a target's (D127).
+enum EntryOrder {
+    /// By key, in any order: Ruby's own hash semantics.
+    Any,
+    /// Position by position, as written.
+    Source,
+    /// Not at all.
+    Refused,
+}
+
+fn entry_order(p_kids: &[Node<'_>], t_kids: &[Node<'_>], prepared: &Prepared) -> EntryOrder {
+    let rests = p_kids
+        .iter()
+        .filter(|p| splat_placeholder(p, &prepared.bindings).is_some())
+        .count();
+    let spelled_splat = p_kids.iter().any(|p| {
+        matches!(p, Node::AssocSplatNode { .. })
+            && splat_placeholder(p, &prepared.bindings).is_none()
+    });
+    // Two rests say what sits before and after a key, which is a statement about
+    // order; a splat written into the pattern places itself. Neither has a
+    // keyed entry left to reorder.
+    if rests >= 2 || spelled_splat || rests == p_kids.len() || repeats_a_key(p_kids, prepared) {
+        return EntryOrder::Source;
+    }
+    // A later entry overrides an earlier one -- a repeated key, or any key a
+    // `**opts` might hold -- so in such a hash order is meaning, and a pattern
+    // that does not position its entries cannot say which one it means.
+    let splat = t_kids
+        .iter()
+        .any(|t| matches!(t, Node::AssocSplatNode { .. }));
+    if splat || repeats_a_key(t_kids, prepared) {
+        return EntryOrder::Refused;
+    }
+    EntryOrder::Any
+}
+
+/// Whether two entries share a literal key. A metavariable key is no key yet.
+fn repeats_a_key(entries: &[Node<'_>], prepared: &Prepared) -> bool {
+    let keys: Vec<Node<'_>> = entries
+        .iter()
+        .filter_map(|e| e.as_assoc_node())
+        .map(|a| a.key())
+        .filter(|k| !is_metavariable_key(k, prepared))
+        .collect();
+    keys.iter()
+        .enumerate()
+        .any(|(i, a)| keys[i + 1..].iter().any(|b| compare::node_eq(a, b)))
+}
+
+/// `$K:` (a label whose name is a placeholder) or `$K =>`.
+pub(crate) fn is_metavariable_key(key: &Node<'_>, prepared: &Prepared) -> bool {
+    metavariable_key(key, prepared).is_some() || placeholder(key, &prepared.bindings).is_some()
+}
+
+/// The placeholder a label key stands for, e.g. `$K:` -> its placeholder.
+fn metavariable_key<'a>(key: &Node<'_>, prepared: &'a Prepared) -> Option<&'a str> {
+    let symbol = key.as_symbol_node()?;
+    let name = std::str::from_utf8(symbol.unescaped()).ok()?;
+    prepared
+        .bindings
+        .get_key_value(name)
+        .map(|(k, _)| k.as_str())
+}
+
+/// Match hash entries by key in any order; the one rest, if any, takes what is
+/// left in source order. Backtracks over which target entry each pattern entry
+/// takes, which is a single candidate per literal key -- only metavariable keys
+/// branch, and each branch is a distinct D118 binding.
+fn match_entries<'pr>(
+    pattern: &[Node<'_>],
+    target: &[Node<'pr>],
+    prepared: &Prepared,
+    env: &mut Env<'pr>,
+    forbidden: &Forbidden,
+) -> bool {
+    let (rest, keyed): (Vec<&Node<'_>>, Vec<&Node<'_>>) = pattern
+        .iter()
+        .partition(|p| splat_placeholder(p, &prepared.bindings).is_some());
+    let rest = rest.first().copied();
+    if keyed.len() > target.len() || (rest.is_none() && keyed.len() != target.len()) {
+        return false;
+    }
+    let mut taken = vec![false; target.len()];
+    assign_entries(&keyed, rest, target, &mut taken, prepared, env, forbidden)
+}
+
+fn assign_entries<'pr>(
+    keyed: &[&Node<'_>],
+    rest: Option<&Node<'_>>,
+    target: &[Node<'pr>],
+    taken: &mut [bool],
+    prepared: &Prepared,
+    env: &mut Env<'pr>,
+    forbidden: &Forbidden,
+) -> bool {
+    let Some((head, tail)) = keyed.split_first() else {
+        let left: Vec<Node<'pr>> = target
+            .iter()
+            .zip(taken.iter())
+            .filter(|(_, t)| !**t)
+            .map(|(n, _)| generated::dup(n))
+            .collect();
+        let Some(rest) = rest else {
+            return left.is_empty();
+        };
+        let key = splat_placeholder(rest, &prepared.bindings).expect("a rest placeholder");
+        return match prepared.bindings.get(key).and_then(|b| b.name.clone()) {
+            None => true,
+            Some(name) => bind(env, &name, Bound::Many(left), forbidden),
+        };
+    };
+    for (i, entry) in target.iter().enumerate() {
+        if taken[i] {
+            continue;
+        }
+        let mut trial = env.clone();
+        if !match_node(head, entry, prepared, &mut trial, forbidden) {
+            continue;
+        }
+        taken[i] = true;
+        if assign_entries(tail, rest, target, taken, prepared, &mut trial, forbidden) {
+            *env = trial;
+            return true;
+        }
+        taken[i] = false;
+    }
+    false
+}
+
+/// Whether `pattern` matches `target` with every hash's entries in source order,
+/// under bindings already made. A rewrite that re-renders a node from its
+/// template may only do so where this holds: otherwise the template's order
+/// would silently replace the source's, and a scattered rest would be spliced
+/// as one span with the entries between its members inside it (D127).
+pub(crate) fn matches_in_order(
+    pattern: &Node<'_>,
+    target: &Node<'_>,
+    prepared: &Prepared,
+    env: &Env<'_>,
+) -> bool {
+    let ordered = Prepared {
+        in_order: true,
+        ..prepared.clone()
+    };
+    let mut env = env.clone();
+    match_node(pattern, target, &ordered, &mut env, &Forbidden::new())
 }
 
 /// Whether a call has a receiver at all.
@@ -2081,6 +2237,60 @@ mod tests {
         let t_result = ruby_prism::parse(source.as_bytes());
         assert_eq!(t_result.errors().count(), 0, "target does not parse");
         search(&p_root, &t_result.node(), &prepared, &Criteria::none()).len()
+    }
+
+    /// D127. Hash entries and keyword arguments match by key, in any order;
+    /// one `**$REST` takes whatever no other entry matched. Positional arguments,
+    /// arrays and a pattern with two rests keep their order. A source `**splat`
+    /// or repeated key makes order meaning, so a pattern that does not position
+    /// its entries does not match there at all.
+    #[test]
+    fn hash_entries_match_by_key_in_any_order() {
+        let cases: &[(&str, &str, usize)] = &[
+            ("foo(a: _, b: _)", "foo(b: 1, a: 2)", 1),
+            ("{a: 1, b: 2}", "x = {b: 2, a: 1}", 1),
+            ("foo(a: _)", "foo(a: 1, b: 2)", 0),
+            ("foo(b: _, **$R)", "foo(a: 1, b: 2, c: 3)", 1),
+            ("foo(b: _, **_)", "foo(a: 1, b: 2, c: 3)", 1),
+            ("foo(a: _, b: _, **$R)", "foo(b: 1, a: 2)", 1),
+            // A label and a symbol rocket are one key; a string is another.
+            ("foo(:status => _)", "foo(status: 1)", 1),
+            ("foo(status: _)", "foo('status' => 1)", 0),
+            ("foo('status' => _)", "foo(status: 1)", 0),
+            // Nested hashes are hashes too.
+            (
+                "foo(headers: { 'Content-Type' => 'application/json', **$H }, **$R)",
+                "foo(status: 1, headers: { 'X' => '1', 'Content-Type' => 'application/json' })",
+                1,
+            ),
+            // A source splat: a later key overrides it, so order is meaning.
+            ("foo(a: 1, **$R)", "foo(**o, a: 1)", 0),
+            ("foo(a: 1, **$R)", "foo(a: 1, **o)", 0),
+            ("foo(**$R)", "foo(a: 1, **o)", 1),
+            ("foo(a: 1, b: 2)", "foo(b: 2, **o, a: 1)", 0),
+            // A repeated source key: the last one wins, so order is meaning.
+            ("x = {a: 2, **$R}", "x = {a: 1, a: 2}", 0),
+            // Two rests describe positions, so that pattern matches in order.
+            ("foo(**$A, b: _, **$Z, a: _, **$Y)", "foo(a: 1, b: 2)", 0),
+            ("foo(**$A, a: _, **$Z, b: _, **$Y)", "foo(a: 1, b: 2)", 1),
+            // Positional arguments and arrays keep their order.
+            ("foo(1, $X)", "foo(x, 1)", 0),
+            ("[1, 2]", "x = [2, 1]", 0),
+        ];
+        for (pattern, source, want) in cases {
+            assert_eq!(
+                matches(pattern, source),
+                *want,
+                "{pattern} against {source}"
+            );
+        }
+    }
+
+    /// D118 still holds for one rest: each pair a key metavariable can take is
+    /// its own match.
+    #[test]
+    fn a_key_metavariable_with_one_rest_is_a_match_per_pair() {
+        assert_eq!(matches("{$K: $V, **$R}", "x = {a: 1, b: 2, c: 3}"), 3);
     }
 
     /// D115. At the root the match *is* the guarded call, so a rename reaches

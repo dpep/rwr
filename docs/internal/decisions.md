@@ -3820,3 +3820,36 @@ is not.
 
 **It still fires where it should.** An `attr_accessor` outside the walked path is the population
 D122 exists for, and is now the case the e2e test pins.
+
+## D127 - Hash entries match by key in any order; a rewrite never moves one
+
+**Decided.** A hash or keyword-argument pattern matches its entries by key, in any order, and one
+`**$REST` takes whatever no other entry matched, in source order. Default, not opt-in.
+
+**Why default.** Ruby looks hash entries up by key, so a pattern that matched in source order was
+answering a question no rule author asks. Writing a WebMock migration took about twenty rules, and
+the largest multiplier was ordering: each keyword written in each position, two rests flanking every
+key. Opt-in would leave the quiet failure in place -- a missed site looks exactly like an absent one
+-- and every rule author would have to know the flag to get Ruby's own semantics. Matching is
+observation; matching more cannot change a program.
+
+**What can change a program is a rewrite that moves an entry.** Entries evaluate in source order
+and a hash iterates in insertion order, which reaches `to_json`, header order and anything taking
+`**opts`. So a match whose entries sat in another order than the pattern's may only be rewritten
+where no node holding that hash is re-rendered from the template; otherwise the template's order
+would replace the source's, and the file is refused (`Refusal::Reordered`).
+`matcher::matches_in_order` is the test: re-match under the bindings already made, with entries
+held to source order. Its failure is also what keeps a scattered rest -- `status` and `headers`
+around a matched `body` -- from being spliced as one span with `body` inside it.
+
+**Where order is meaning, it stays.** Positional arguments and arrays are untouched. A pattern with
+two or more rests, or a splat written into the pattern, matches in order: a second rest adds nothing
+but a position, so keeping it positional keeps every existing rule meaning what it meant. A source
+hash holding `**opts` or a repeated literal key does not match a pattern that does not position its
+entries at all, because a later entry overrides an earlier one and the key set behind `**opts` is
+unknowable -- dropping `status: 200` after `**opts` changes the status, and before it does not. A
+lone `**$REST` still matches such a hash, having no key to claim. Keys compare as `node_eq` does, so
+`status:` and `:status =>` are one key and `'status' =>` another.
+
+*Reverses if:* a real rule needs a template to add or reorder entries on an out-of-order match --
+which would call for a stated placement rule rather than the template's order by default.
