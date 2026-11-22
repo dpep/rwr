@@ -1002,10 +1002,32 @@ fn structural_diff(
     if p_meta.is_some() || t_meta.is_some() {
         return None;
     }
+    // `_` in the same place on both sides keeps whatever it matched, as a named
+    // metavariable would; a body that is a lone `_` likewise.
+    if (matcher::is_anonymous(pattern, prepared) && matcher::is_anonymous(template, t_prepared))
+        || (matcher::is_anonymous_body(pattern, prepared)
+            && matcher::is_anonymous_body(template, t_prepared))
+    {
+        return Some(Vec::new());
+    }
 
     // A hash is diffed by key first, which deletes a dropped entry rather than
     // re-rendering its neighbours. Entries matched out of order have no other
     // correspondence: `unwrap_to_subtree` and `align` pair children by position.
+    // Parameters likewise: keywords match by name, and `*`/`**` runs may sit
+    // anywhere, so pairing by position would misalign them (D129).
+    if matches!(pattern, Node::ParametersNode { .. }) {
+        return entry_diff(
+            pattern,
+            template,
+            target,
+            prepared,
+            t_prepared,
+            template_src,
+            env,
+            source,
+        );
+    }
     if matcher::is_hash(pattern) {
         let by_key = entry_diff(
             pattern,
@@ -1118,17 +1140,26 @@ fn structural_diff(
 /// gone -- `x.foo() -1` would turn into `x.foo(-1)`, and `x.foo() [1]` into
 /// `x.foo([1])`.
 fn drop_emptied_parentheses(target: &Node<'_>, source: &[u8], edits: &mut [Edit]) {
-    let Some(call) = target.as_call_node() else {
-        return;
+    // A definition's parentheses hold only its parameters, so they always go.
+    let (open, close) = if let Some(def) = target.as_def_node() {
+        let (Some(open), Some(close)) = (def.lparen_loc(), def.rparen_loc()) else {
+            return;
+        };
+        (open, close)
+    } else {
+        let Some(call) = target.as_call_node() else {
+            return;
+        };
+        let (Some(_), Some(open), Some(close)) =
+            (call.receiver(), call.opening_loc(), call.closing_loc())
+        else {
+            return;
+        };
+        if !ends_an_argumentless_call(&source[close.end_offset()..]) {
+            return;
+        }
+        (open, close)
     };
-    let (Some(_), Some(open), Some(close)) =
-        (call.receiver(), call.opening_loc(), call.closing_loc())
-    else {
-        return;
-    };
-    if !ends_an_argumentless_call(&source[close.end_offset()..]) {
-        return;
-    }
     // Whitespace alone may lie between the parentheses and what is deleted.
     let blank = |a: usize, b: usize| a <= b && source[a..b].iter().all(u8::is_ascii_whitespace);
     if let Some(edit) = edits.iter_mut().find(|e| {
@@ -1270,7 +1301,23 @@ fn entry_diff(
         .map(|o| !kept.iter().any(|&(pi, _)| *o == Some(pi)))
         .collect();
     if dropped.iter().all(|d| *d) {
-        return None;
+        // An emptied hash would change what the call receives; an emptied
+        // parameter list is a method taking none, and its parentheses go too.
+        if !matches!(target, Node::ParametersNode { .. }) || x_kids.is_empty() {
+            return None;
+        }
+        let (from, to) = (
+            own_range(&x_kids[0]).0,
+            effective_range(&x_kids[x_kids.len() - 1]).1,
+        );
+        if source[from..to].contains(&b'#') || heredoc_opens_within(target, from, to) {
+            return None;
+        }
+        return Some(vec![Edit {
+            start: from,
+            end: to,
+            text: String::new(),
+        }]);
     }
     let end = |i: usize| effective_range(&x_kids[i]).1;
     let start = |i: usize| own_range(&x_kids[i]).0;
@@ -1340,6 +1387,11 @@ fn entries_correspond(
     if matcher::is_rest(p, prepared) || matcher::is_rest(t, t_prepared) {
         let name = matcher::splat_placeholder_name(p, prepared);
         return name.is_some() && name == matcher::splat_placeholder_name(t, t_prepared);
+    }
+    // A parameter is the same parameter by kind and name.
+    if !matches!(p, Node::AssocNode { .. } | Node::AssocSplatNode { .. }) {
+        return std::mem::discriminant(p) == std::mem::discriminant(t)
+            && atoms_correspond(p, t, prepared, t_prepared);
     }
     let (Some(p), Some(t)) = (p.as_assoc_node(), t.as_assoc_node()) else {
         return false;
@@ -1436,6 +1488,14 @@ fn align<'a, 'pr>(
             if matcher::lone_body_placeholder(t, t_prepared).as_deref() != Some(&name) {
                 return None;
             }
+            continue;
+        }
+        // The same for a lone `_` body, which leaves no binding to ask: a body
+        // is a definition's last child, so a target that has run out has none.
+        if matcher::is_anonymous_body(p, prepared)
+            && matcher::is_anonymous_body(t, t_prepared)
+            && cursor == x_kids.len()
+        {
             continue;
         }
         // `$R.foo(*$A)` does the same for an argument list. `$A` binds the
@@ -1556,8 +1616,13 @@ fn restore(fragment: &str, prepared: &Prepared) -> Option<String> {
         match prepared.bindings.get(word) {
             None => out.push_str(word),
             Some(binding) => {
-                out.push('$');
-                out.push_str(binding.name.as_ref()?);
+                let name = binding.name.as_ref()?;
+                // A bare sigil is already in the fragment, before its
+                // placeholder: `**rwr_mv_1` restores to `**`.
+                if !metavar::is_bare(name) {
+                    out.push('$');
+                    out.push_str(name);
+                }
             }
         }
     }
@@ -2130,6 +2195,68 @@ mod tests {
     /// D127. An out-of-order match is rewritten by editing each entry where it
     /// stands and deleting the ones the template drops, so the source's order
     /// and layout survive.
+    /// D129. A bare sigil in a template forwards what the pattern's same
+    /// sigil matched, edited in place: entries and parameters the template
+    /// drops are deleted, and everything else keeps its bytes and order.
+    #[test]
+    fn a_bare_sigil_forwards_what_it_matched() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "$R.to_return(status: 200, **)",
+                "$R.to_return(**)",
+                "s.to_return(body: 'x', status: 200, headers: h)\n",
+                "s.to_return(body: 'x', headers: h)\n",
+            ),
+            (
+                "$R.to_return(status: 200, **)",
+                "$R.to_return(**)",
+                "s.to_return(\n  status: 200,\n  body: 'x'\n)\n",
+                "s.to_return(\n  body: 'x'\n)\n",
+            ),
+            ("foo(1, *)", "bar(1, *)", "foo(1, 2, 3)\n", "bar(1, 2, 3)\n"),
+            ("foo(*)", "bar(0, *)", "foo(1, 2)\n", "bar(0, 1, 2)\n"),
+            ("foo(*, &)", "bar(*, &)", "foo(1, &blk)\n", "bar(1, &blk)\n"),
+            ("foo(&)", "bar(1, &)", "foo(&:x)\n", "bar(1, &:x)\n"),
+            (
+                "def fetch(*, legacy:, **) = _",
+                "def fetch(*, **) = _",
+                "def fetch(a, legacy:, b: 1)\n  a + b\nend\n",
+                "def fetch(a, b: 1)\n  a + b\nend\n",
+            ),
+            (
+                "def fetch(*, legacy:, **) = _",
+                "def fetch(*, **) = _",
+                "def fetch(b: 1, legacy:) = b\n",
+                "def fetch(b: 1) = b\n",
+            ),
+            (
+                "def fetch(*, legacy:, **, &) = _",
+                "def fetch(*, **, &) = _",
+                "def fetch(legacy:, &blk)\n  blk.call\nend\n",
+                "def fetch(&blk)\n  blk.call\nend\n",
+            ),
+            (
+                "def fetch(*, legacy: _, **) = _",
+                "def fetch(*, **) = _",
+                "def fetch(x,\n          legacy: false,\n          y: 2)\n  x\nend\n",
+                "def fetch(x,\n          y: 2)\n  x\nend\n",
+            ),
+            (
+                "def fetch(*, legacy:, **) = _",
+                "def fetch(*, **) = _",
+                "def fetch(legacy:)\n  1\nend\n",
+                "def fetch\n  1\nend\n",
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            assert_eq!(
+                rewrite(pattern, template, source).as_deref(),
+                Ok(*want),
+                "{pattern} -> {template} on {source:?}"
+            );
+        }
+    }
+
     #[test]
     fn an_out_of_order_match_is_edited_in_place() {
         let cases: &[(&str, &str, &str, &str)] = &[
