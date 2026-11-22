@@ -8,6 +8,7 @@
 //! far from its `<<~FOO` token, and detaching one still *parses*, so no
 //! downstream check would catch the mistake.
 
+mod seam;
 pub(crate) mod sequence;
 
 use crate::pattern::compare::{self, Atom};
@@ -595,6 +596,18 @@ pub(crate) fn plan(
         }
     }
 
+    // Tidy each seam, bounded by its neighbours so no edit reaches another (D128).
+    let bounds: Vec<(usize, usize)> = (0..kept.len())
+        .map(|k| {
+            let floor = k.checked_sub(1).map_or(0, |p| kept[p].1.end);
+            let ceil = kept.get(k + 1).map_or(source.len(), |(_, e)| e.start);
+            (floor, ceil)
+        })
+        .collect();
+    for ((_, edit), (floor, ceil)) in kept.iter_mut().zip(bounds) {
+        *edit = seam::tidy(source, edit, floor, ceil);
+    }
+
     // A site counts once however many edits it took, and only if one survived.
     let mut sites: Vec<usize> = kept.iter().map(|(i, _)| *i).collect();
     sites.sort_unstable();
@@ -1116,8 +1129,10 @@ fn drop_emptied_parentheses(target: &Node<'_>, source: &[u8], edits: &mut [Edit]
     if !ends_an_argumentless_call(&source[close.end_offset()..]) {
         return;
     }
+    // Whitespace alone may lie between the parentheses and what is deleted.
+    let blank = |a: usize, b: usize| a <= b && source[a..b].iter().all(u8::is_ascii_whitespace);
     if let Some(edit) = edits.iter_mut().find(|e| {
-        e.text.is_empty() && e.start == open.end_offset() && e.end == close.start_offset()
+        e.text.is_empty() && blank(open.end_offset(), e.start) && blank(e.end, close.start_offset())
     }) {
         edit.start = open.start_offset();
         edit.end = close.end_offset();
@@ -1270,17 +1285,11 @@ fn entry_diff(
             j += 1;
         }
         // Take the separator before the run, or after it when the run leads.
-        let (from, mut to) = if i > 0 {
+        let (from, to) = if i > 0 {
             (end(i - 1), end(j))
         } else {
             (start(i), start(j + 1))
         };
-        // A trailing run that began a line of its own also owns what is left of
-        // that line before the closer -- `status: 200 )` -- whereas on a shared
-        // line the space is the author's padding.
-        if i > 0 && j + 1 == x_kids.len() && source[from..start(i)].contains(&b'\n') {
-            to = closer_on_line(source, to).unwrap_or(to);
-        }
         // A comment beside a dropped entry may describe it or its neighbour.
         // A trailing run's comment may sit past the hash, before the closer; one
         // after the closer describes the whole call.
@@ -2301,6 +2310,12 @@ mod tests {
             (
                 "$S.foo(status: 200, **$R)",
                 "$S.foo(**$R)",
+                "x.foo(\n  status: 200\n)\n",
+                "x.foo\n",
+            ),
+            (
+                "$S.foo(status: 200, **$R)",
+                "$S.foo(**$R)",
                 "x.foo(status: 200).bar\n",
                 "x.foo.bar\n",
             ),
@@ -2326,6 +2341,12 @@ mod tests {
                 "foo(status: 200, **$R)",
                 "foo(**$R)",
                 "foo(status: 200)\n",
+                "foo()\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(\n  status: 200\n)\n",
                 "foo()\n",
             ),
         ];

@@ -3867,3 +3867,29 @@ lone `**$REST` still matches such a hash, having no key to claim. Keys compare a
 
 *Reverses if:* a real rule needs a template to add or reorder entries on an out-of-order match --
 which would call for a stated placement rule rather than the template's order by default.
+
+## D128 - An edit tidies the whitespace at its own seam, and nowhere else
+
+**Decided.** When rwr removes or inserts text it joins two pieces of source that were not written
+to meet, and it takes licence to tidy the whitespace *at that seam* (`rewrite::seam::tidy`, run on
+every planned edit):
+
+- an emptied container closes up -- `foo(\n  status: 200\n)` becomes `foo()`;
+- a line the deletion empties goes, newline and all;
+- a deletion whose text began its own line takes the spaces and comma left before a closer on that
+  line -- `status: 200 )` leaves `body: "abc")` -- while on a shared line they are the author's
+  padding and stay, so `foo( a: 1 )` keeps its symmetry;
+- a deletion leaves no trailing whitespace, and no edit leaves a doubled space mid-line.
+
+**The boundary is the seam.** Only whitespace touching the edit moves, and never into a neighbouring
+edit, so untouched code keeps its bytes and principle 6's minimal diff holds. A comment stops it:
+the container rule will not join a line onto one carrying `# ...`, which would put code inside the
+comment. Deletions next to a comment or heredoc are already refused before reaching here (D127).
+
+**Why default rather than a toggle.** The alternative is output nobody would write by hand --
+`x.to_return(\n  \n)`, `body: "abc" )` -- left for a formatter rwr does not own (D34). This is D34's
+line restated for the edit's edges: repairing whitespace rwr itself disturbed is not imposing style.
+No toggle until a concrete case shows the tidy is wrong.
+
+*Reverses if:* a seam rule is found rewriting whitespace a reader would call style rather than
+damage -- at which point that rule narrows, not the whole stance.

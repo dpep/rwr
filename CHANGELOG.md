@@ -13,9 +13,11 @@ or reorders entries there is refused (D127).
 
 **Dropping a hash entry keeps the lines around it.** `foo(**$A, status: 200, **$B)` -> `foo(**$A, **$B)`
 on a multi-line call deleted `status: 200` and pulled the remaining entries onto one line; now only the
-entry and its separator go. Deleting the last entry from its own line takes the rest of that line
-with it, so `status: 200 )` leaves `body: "abc")` rather than `body: "abc" )`, and a comment beside
-it refuses rather than moving onto the line above.
+entry and its separator go, and a comment beside it refuses rather than moving onto the line above.
+
+**An edit tidies the whitespace at its own seam.** Removing or inserting text no longer leaves a space
+before a closer (`body: "abc" )`), a line of only spaces, an emptied `(\n  \n)`, trailing whitespace or a
+doubled space. Only whitespace touching the edit moves; the rest of the file keeps its bytes (D128).
 
 **Emptying a call's arguments drops its parentheses when it has a receiver.** `x.to_return(status: 200)`
 becomes `x.to_return`, not `x.to_return()` — unless what follows would then read as an argument
