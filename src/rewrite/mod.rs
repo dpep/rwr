@@ -1219,15 +1219,29 @@ fn entry_diff(
             j += 1;
         }
         // Take the separator before the run, or after it when the run leads.
-        let (from, to) = if i > 0 {
+        let (from, mut to) = if i > 0 {
             (end(i - 1), end(j))
         } else {
             (start(i), start(j + 1))
         };
+        // A trailing run that began a line of its own also owns what is left of
+        // that line before the closer -- `status: 200 )` -- whereas on a shared
+        // line the space is the author's padding.
+        if i > 0 && j + 1 == x_kids.len() && source[from..start(i)].contains(&b'\n') {
+            to = closer_on_line(source, to).unwrap_or(to);
+        }
         // A comment beside a dropped entry may describe it or its neighbour.
-        let after = x_kids
-            .get(j + 1)
-            .map_or(own_range(target).1, |_| start(j + 1));
+        // A trailing run's comment may sit past the hash, before the closer; one
+        // after the closer describes the whole call.
+        let after = match x_kids.get(j + 1) {
+            Some(_) => start(j + 1),
+            None => closer_on_line(source, end(j)).unwrap_or_else(|| {
+                source[end(j)..]
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map_or(source.len(), |n| end(j) + n)
+            }),
+        };
         let commented = (i.max(1)..=j)
             .map(|k| (end(k - 1), start(k)))
             .chain(std::iter::once((end(j), after)))
@@ -1243,6 +1257,16 @@ fn entry_diff(
         i = j + 1;
     }
     Some(edits)
+}
+
+/// Where a closing delimiter starts, if only spaces and a trailing comma lie
+/// between `from` and it on the same line.
+fn closer_on_line(source: &[u8], from: usize) -> Option<usize> {
+    let skip = source
+        .get(from..)?
+        .iter()
+        .position(|b| !matches!(b, b' ' | b'\t' | b','))?;
+    matches!(source[from + skip], b')' | b']' | b'}').then_some(from + skip)
 }
 
 /// Whether a template entry is the pattern entry it keeps: the same rest, or the
@@ -2106,6 +2130,12 @@ mod tests {
                 "foo(\n  body: 'x', # why\n  status: 200\n)\n",
                 None,
             ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'x',\n    status: 200 # why\n)\n",
+                None,
+            ),
             // The template reorders, adds an entry, or reshapes the call: there
             // is no place to edit through, and either order would be a guess.
             (
@@ -2146,6 +2176,63 @@ mod tests {
         let src = "foo(\n  body: 'x',\n  status: 200,\n  headers: h\n)\n";
         let out = rewrite("foo(**$A, status: 200, **$B)", "foo(**$A, **$B)", src);
         assert_eq!(out.as_deref(), Ok("foo(\n  body: 'x',\n  headers: h\n)\n"));
+    }
+
+    /// Deleting the last entry takes the space after it when that space sits on
+    /// the deleted entry's own line; on a shared line it is the author's padding.
+    #[test]
+    fn deleting_the_last_entry_takes_its_lines_padding() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'abc',\n    status: 200 )\n",
+                "foo(body: 'abc')\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'abc',\n    status: 200, )\n",
+                "foo(body: 'abc')\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'abc', status: 200 )\n",
+                "foo(body: 'abc' )\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(\n  body: 'abc',\n  status: 200\n)\n",
+                "foo(\n  body: 'abc'\n)\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(\n  body: 'abc',\n  status: 200,\n)\n",
+                "foo(\n  body: 'abc',\n)\n",
+            ),
+            (
+                "{a: $A, **$R}",
+                "{a: $A}",
+                "x = {a: 1,\n     b: 2 }\n",
+                "x = {a: 1}\n",
+            ),
+            (
+                "foo(status: 200, **$R)",
+                "foo(**$R)",
+                "foo(body: 'abc', status: 200) # note\n",
+                "foo(body: 'abc') # note\n",
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            assert_eq!(
+                rewrite(pattern, template, source).as_deref(),
+                Ok(*want),
+                "{source:?}"
+            );
+        }
     }
 
     /// The same templates against sources already in the pattern's order behave
