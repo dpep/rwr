@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**A bare `*`, `**` or `&` is a wildcard a template can forward.** `match: '$S.to_return(status: 200, **)'`
+with `rewrite: '$S.to_return(**)'` drops `status: 200` and keeps every other entry where it was --
+Ruby's own anonymous forwarding, with no name to invent. In a parameter list `*` and `**` are runs of
+positional and keyword parameters and `&` the block parameter, so `def fetch(*, legacy:, **) = _` ->
+`def fetch(*, **) = _` removes one parameter and leaves the rest and the body alone. A pattern holds
+one of each; a second, or one in `rewrite:` that `match:` lacks, is an error. A pattern that already
+spelled an anonymous `*`, `**` or `&` parameter now reads it as a wildcard (D129).
+
 **Hash entries and keyword arguments match in any order.** `to_return(status: 200, **$REST)` now
 finds `to_return(body: b, status: 200)` too, and `**$REST` takes every entry the pattern did not name.
 A rule that flanked a key with two rests to reach it anywhere can drop to one. Positional arguments
