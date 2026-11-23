@@ -35,8 +35,8 @@ written and suggests adding `= _`.
 finds `to_return(body: b, status: 200)` too, and `**$REST` takes every entry the pattern did not name.
 A rule that flanked a key with two rests to reach it anywhere can drop to one. Positional arguments
 and arrays still match in order, and so does a hash pattern with two rests. A source hash holding
-`**opts` or a repeated key is matched only by a pattern that positions its entries, since a later key
-overrides an earlier one. A rewrite never moves an entry: on a site whose order differs from the
+`**opts`, a repeated key, or a key known only at runtime (`k => 404`, `CONST => x`) is matched only by
+a pattern that positions its entries, since a later key overrides an earlier one. A rewrite never moves an entry: on a site whose order differs from the
 pattern's, kept entries are edited where they stand and dropped ones deleted, and a template that adds
 or reorders entries there is refused (D127).
 

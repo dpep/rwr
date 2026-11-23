@@ -473,26 +473,50 @@ fn entry_order(p_kids: &[Node<'_>], t_kids: &[Node<'_>], prepared: &Prepared) ->
         .iter()
         .filter(|p| splat_placeholder(p, &prepared.bindings).is_some())
         .count();
-    let spelled_splat = p_kids.iter().any(|p| {
-        matches!(p, Node::AssocSplatNode { .. })
-            && splat_placeholder(p, &prepared.bindings).is_none()
+    let places_itself = p_kids.iter().any(|p| match p.as_assoc_node() {
+        Some(assoc) => {
+            let key = assoc.key();
+            !is_static_key(&key) && !is_metavariable_key(&key, prepared)
+        }
+        None => {
+            matches!(p, Node::AssocSplatNode { .. })
+                && splat_placeholder(p, &prepared.bindings).is_none()
+        }
     });
     // Two rests say what sits before and after a key, which is a statement about
-    // order; a splat written into the pattern places itself. Neither has a
-    // keyed entry left to reorder.
-    if rests >= 2 || spelled_splat || rests == p_kids.len() || repeats_a_key(p_kids, prepared) {
+    // order; a splat or runtime key written into the pattern places itself.
+    // Neither has a keyed entry left to reorder.
+    if rests >= 2 || places_itself || rests == p_kids.len() || repeats_a_key(p_kids, prepared) {
         return EntryOrder::Source;
     }
     // A later entry overrides an earlier one -- a repeated key, or any key a
-    // `**opts` might hold -- so in such a hash order is meaning, and a pattern
-    // that does not position its entries cannot say which one it means.
-    let splat = t_kids
-        .iter()
-        .any(|t| matches!(t, Node::AssocSplatNode { .. }));
-    if splat || repeats_a_key(t_kids, prepared) {
+    // `**opts` or a runtime key (`k =>`) might be -- so in such a hash order is
+    // meaning, and a pattern that does not position its entries cannot say
+    // which one it means.
+    let unknowable = t_kids.iter().any(|t| match t.as_assoc_node() {
+        Some(assoc) => !is_static_key(&assoc.key()),
+        None => matches!(t, Node::AssocSplatNode { .. }),
+    });
+    if unknowable || repeats_a_key(t_kids, prepared) {
         return EntryOrder::Refused;
     }
     EntryOrder::Any
+}
+
+/// Whether a source key's value is known without running the program.
+fn is_static_key(key: &Node<'_>) -> bool {
+    matches!(
+        key,
+        Node::SymbolNode { .. }
+            | Node::StringNode { .. }
+            | Node::IntegerNode { .. }
+            | Node::FloatNode { .. }
+            | Node::RationalNode { .. }
+            | Node::ImaginaryNode { .. }
+            | Node::NilNode { .. }
+            | Node::TrueNode { .. }
+            | Node::FalseNode { .. }
+    )
 }
 
 /// Whether two entries share a literal key. A metavariable key is no key yet.
@@ -2498,6 +2522,29 @@ mod tests {
             ("foo(a: 1, b: 2)", "foo(b: 2, **o, a: 1)", 0),
             // A repeated source key: the last one wins, so order is meaning.
             ("x = {a: 2, **$R}", "x = {a: 1, a: 2}", 0),
+            // A key known only at runtime may be any other key: as a splat.
+            ("foo(status: 200, **)", "foo(k => 404, status: 200)", 0),
+            ("foo(status: 200, **)", "foo(K => 404, status: 200)", 0),
+            ("foo(status: 200, **)", "foo(k() => 404, status: 200)", 0),
+            (
+                "foo(status: 200, **)",
+                "foo(\"#{k}\" => 404, status: 200)",
+                0,
+            ),
+            (
+                "foo(status: 200, **)",
+                "foo(:\"#{k}\" => 404, status: 200)",
+                0,
+            ),
+            ("foo(**)", "foo(k => 404, status: 200)", 1),
+            (
+                "foo(status: 200, **)",
+                "foo(1 => 404, nil => 1, 'a' => 2, status: 200)",
+                1,
+            ),
+            // A pattern spelling such a key positions itself, as a spelled splat does.
+            ("foo(K => 1, a: 2)", "foo(K => 1, a: 2)", 1),
+            ("foo(K => 1, a: 2)", "foo(a: 2, K => 1)", 0),
             // Two rests describe positions, so that pattern matches in order.
             ("foo(**$A, b: _, **$Z, a: _, **$Y)", "foo(a: 1, b: 2)", 0),
             ("foo(**$A, a: _, **$Z, b: _, **$Y)", "foo(a: 1, b: 2)", 1),
