@@ -3863,12 +3863,14 @@ so dropping a key from the middle of a multi-line call pulled its neighbours ont
 `entry_diff` declines on an in-order match, the positional path runs as before.
 
 **Where order is meaning, it stays.** Positional arguments and arrays are untouched. A pattern with
-two or more rests, or a splat written into the pattern, matches in order: a second rest adds nothing
-but a position, so keeping it positional keeps every existing rule meaning what it meant. A source
-hash holding `**opts` or a repeated literal key does not match a pattern that does not position its
-entries at all, because a later entry overrides an earlier one and the key set behind `**opts` is
-unknowable -- dropping `status: 200` after `**opts` changes the status, and before it does not. A
-lone `**$REST` still matches such a hash, having no key to claim. Keys compare as `node_eq` does, so
+two or more rests, or a splat or runtime key (below) written into the pattern, matches in order: a
+second rest adds nothing but a position, so keeping it positional keeps every existing rule meaning
+what it meant. A source hash holding `**opts`, a repeated literal key, or a key known only at runtime
+-- `k =>`, `CONST =>`, `foo() =>`, `"#{a}" =>`; anything but a scalar literal -- does not match a
+pattern that does not position its entries at all, because a later entry overrides an earlier one
+and the key set behind `**opts` or the key behind `k` is unknowable -- dropping `status: 200` after
+`**opts` or `k => 404` changes the status, and before it does not. A lone `**$REST` still matches
+such a hash, having no key to claim. Keys compare as `node_eq` does, so
 `status:` and `:status =>` are one key and `'status' =>` another.
 
 *Reverses if:* a real rule needs a template to add or reorder entries on an out-of-order match --

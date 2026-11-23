@@ -35,8 +35,8 @@ written and suggests adding `= _`.
 finds `to_return(body: b, status: 200)` too, and `**$REST` takes every entry the pattern did not name.
 A rule that flanked a key with two rests to reach it anywhere can drop to one. Positional arguments
 and arrays still match in order, and so does a hash pattern with two rests. A source hash holding
-`**opts` or a repeated key is matched only by a pattern that positions its entries, since a later key
-overrides an earlier one. A rewrite never moves an entry: on a site whose order differs from the
+`**opts`, a repeated key, or a key known only at runtime (`k => 404`, `CONST => x`) is matched only by
+a pattern that positions its entries, since a later key overrides an earlier one. A rewrite never moves an entry: on a site whose order differs from the
 pattern's, kept entries are edited where they stand and dropped ones deleted, and a template that adds
 or reorders entries there is refused (D127).
 
@@ -51,6 +51,14 @@ doubled space. Only whitespace touching the edit moves; the rest of the file kee
 **Emptying a call's arguments drops its parentheses when it has a receiver.** `x.to_return(status: 200)`
 becomes `x.to_return`, not `x.to_return()` — unless what follows would then read as an argument
 (`x.foo() -1`). A receiverless call keeps `()`, since a bare `foo` may be a local variable.
+
+**A `def` rewrite that keeps the method's name is not a rename.** A refused file is reported with its
+own reason and refused alone, rather than refusing the whole run as a half-applied rename, and the
+rewritten `def` is no longer listed among the occurrences the rule could not account for.
+
+**`foo(*$A, **$B)` matches each call once.** The run could also take the keyword arguments, so `find`
+reported every call with keywords twice and `rewrite` exited 4 asking for a rerun that changed nothing.
+Keywords now go to the `**` slot, as in Ruby.
 
 **`rwr test` names the rule that rewrote a fixture.** A case runs every rule in its file, so a wider
 rule earlier in the file can rewrite a later rule's fixture; that failure now says
