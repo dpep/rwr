@@ -2123,6 +2123,45 @@ fn an_unparseable_snippet_fails_rather_than_passing() {
     );
 }
 
+/// A case runs the whole set (D69), so an earlier, wider rule can rewrite a
+/// later rule's fixture. The failure names the rule that did it (D130).
+#[test]
+fn a_fixture_rewritten_by_another_rule_names_it() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let rule = rule_with(
+        dir.path(),
+        "shadow.yml",
+        "- match: '$S.to_return(status: 200, **)'\n  \
+         rewrite: '$S.to_return(**)'\n\
+         - match: '$S.to_return(status: 200, **)'\n  \
+         where:\n    $S:\n      name_not: [legacy]\n  \
+         rewrite: '$S.to_return(**)'\n  \
+         tests:\n\
+         \x20   - input: \"legacy.to_return(status: 200, body: 1)\\n\"\n\
+         \x20     unchanged: true\n",
+    );
+    let out = test_run(dir.path(), &rule);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("FAIL shadow rule 2 case 1")
+            && text.contains(
+                "rewritten by shadow rule 1 (`$S.to_return(status: 200, **)`), \
+                 not by the rule declaring this case"
+            ),
+        "{text}"
+    );
+
+    let json = Command::new(env!("CARGO_BIN_EXE_rwr"))
+        .args(["test", "shadow.yml", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("binary runs");
+    let doc: serde_json::Value = serde_json::from_slice(&json.stdout).expect("valid json");
+    assert_eq!(doc["cases"][0]["rule"], "shadow rule 2");
+    assert_eq!(doc["cases"][0]["rewritten_by"][0], "shadow rule 1");
+}
+
 /// A case that asserts nothing, and a category error, are rule bugs -- caught
 /// before anything runs rather than passing quietly.
 #[test]

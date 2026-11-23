@@ -3944,3 +3944,24 @@ pattern, so nothing regresses.
 
 *Reverses if:* a real rule needs a bare sigil to mean the literal anonymous forwarding it spells --
 which would call for an escape rather than giving up the wildcard.
+
+## D130 - A fixture another rule rewrote names that rule
+
+**Decided.** A case runs the whole set (D69), so an earlier, wider rule can rewrite a later rule's
+fixture: `$S.to_return(status: 200, **)` with no `where:` ahead of the same match narrowed by one.
+The narrowed rule's `unchanged: true` case then fails with a diff and no culprit, which reads as an
+rwr bug. So a failing `output:` or `unchanged:` case whose edits came from rules other than its own
+names them, with their patterns, and `--json` carries them as `rewritten_by`. Each case is labelled
+with the rule declaring it, numbered within that rule's `tests:`; rules sharing an id -- every rule in
+a list file takes the file's -- are told apart as `shadow rule 2`.
+
+**Why on failure, not as a shadowing warning.** Whether one rule shadows another is a question about
+every source either could match, which rwr cannot answer from patterns without guessing. Which rule
+edited this snippet is a fact the engine already records per rule. And a passing case another rule
+rewrote is the whole-set behaviour D69 means to test, so it says nothing.
+
+**D69 stands.** The set still runs whole; this only says who did what. A `finds:` miscount is not
+attributed: findings carry the rule's id, which list-file rules share.
+
+*Reverses if:* authors keep hitting shadowing that a passing fixture hides -- that would call for a
+static overlap check, not for running a case against its own rule alone.

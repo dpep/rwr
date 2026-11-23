@@ -2538,6 +2538,7 @@ mod tests {
 /// `kind` is a closed vocabulary so a caller can branch without parsing prose.
 #[derive(Debug, Serialize)]
 struct CaseResult {
+    /// The rule declaring the case, and the case's place among its `tests:`.
     rule: String,
     case: usize,
     outcome: &'static str,
@@ -2546,6 +2547,9 @@ struct CaseResult {
     expected: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     actual: Option<String>,
+    /// Other rules whose edits are in a failing `actual` (D130).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rewritten_by: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2613,11 +2617,15 @@ fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
     // fixture that looks like coverage and is not.
     let wants_residue = cases.iter().any(|c| c.residue.is_some());
 
-    let names: Vec<String> = rules
+    let names = case_rule_names(&rules);
+    let patterns: Vec<String> = rules.iter().map(|r| r.pattern.clone()).collect();
+    // Each case's declaring rule and its place in that rule's `tests:`, in the
+    // order `rule::cases` returns them.
+    let owners: Vec<(usize, usize)> = rules
         .iter()
-        .map(|r| r.id.clone().unwrap_or_else(|| "(unnamed)".to_string()))
+        .enumerate()
+        .flat_map(|(i, r)| (1..=r.tests.len()).map(move |n| (i, n)))
         .collect();
-    let label = names.first().cloned().unwrap_or_default();
     let engine = match crate::engine::Engine::new(rules) {
         Ok(e) => e,
         Err(e) => {
@@ -2723,13 +2731,31 @@ fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
             None => ("pass", passed_as, None, None),
         };
 
+        // The whole set runs (D69), so an earlier, wider rule can make a later
+        // rule's fixture fail; without naming it the diff reads as an rwr bug.
+        let (owner, number) = owners[index];
+        let rewritten_by = match &outcome {
+            crate::engine::ScanOutcome::Scanned(s)
+                if matches!(kind, "output_mismatch" | "unexpected_rewrite") =>
+            {
+                s.by_rule
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, &sites)| sites > 0 && i != owner)
+                    .map(|(i, _)| names[i].clone())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+
         results.push(CaseResult {
-            rule: label.clone(),
-            case: index + 1,
+            rule: names[owner].clone(),
+            case: number,
             outcome: outcome_word,
             kind,
             expected,
             actual,
+            rewritten_by,
         });
     }
 
@@ -2740,6 +2766,21 @@ fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
         Output::Text => {
             for r in results.iter().filter(|r| r.outcome == "fail") {
                 println!("FAIL {} case {} — {}", r.rule, r.case, explain_kind(r.kind));
+                if !r.rewritten_by.is_empty() {
+                    let by: Vec<String> = r
+                        .rewritten_by
+                        .iter()
+                        .map(|name| {
+                            let i = names.iter().position(|n| n == name).unwrap_or_default();
+                            format!("{name} (`{}`)", patterns[i])
+                        })
+                        .collect();
+                    println!(
+                        "  rewritten by {}, not by the rule declaring this case -- \
+                         `rwr test` runs every rule in the set",
+                        by.join(", ")
+                    );
+                }
                 if let (Some(want), Some(got)) = (&r.expected, &r.actual) {
                     for line in diff_lines(want, got) {
                         println!("  {line}");
@@ -2781,6 +2822,25 @@ fn cmd_test(rule_arg: &str, out: Output) -> ExitCode {
     }
 }
 
+/// Each rule's name in `rwr test` output: its id, numbered when rules share
+/// one, as every rule in a list file takes the file's id (D54).
+fn case_rule_names(rules: &[rule::Rule]) -> Vec<String> {
+    let ids: Vec<&str> = rules
+        .iter()
+        .map(|r| r.id.as_deref().unwrap_or("(unnamed)"))
+        .collect();
+    ids.iter()
+        .enumerate()
+        .map(|(i, id)| {
+            if ids.iter().filter(|o| *o == id).count() == 1 {
+                return (*id).to_string();
+            }
+            let n = ids[..=i].iter().filter(|o| *o == id).count();
+            format!("{id} rule {n}")
+        })
+        .collect()
+}
+
 /// One line on what a failure kind means, so the diff is not the only clue.
 fn explain_kind(kind: &str) -> &'static str {
     match kind {
@@ -2789,7 +2849,7 @@ fn explain_kind(kind: &str) -> &'static str {
         }
         "refused" => "the rule refused to edit this snippet",
         "output_mismatch" => "the rewrite did not produce the expected source",
-        "unexpected_rewrite" => "expected no change, but the rule rewrote it",
+        "unexpected_rewrite" => "expected no change, but the snippet was rewritten",
         "wrong_finds" => "wrong number of findings",
         "wrong_residue" => "wrong number of occurrences left unaccounted for",
         _ => "asserts nothing",
