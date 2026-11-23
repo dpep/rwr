@@ -38,6 +38,12 @@ doubled space. Only whitespace touching the edit moves; the rest of the file kee
 becomes `x.to_return`, not `x.to_return()` — unless what follows would then read as an argument
 (`x.foo() -1`). A receiverless call keeps `()`, since a bare `foo` may be a local variable.
 
+**`rwr test` names the rule that rewrote a fixture.** A case runs every rule in its file, so a wider
+rule earlier in the file can rewrite a later rule's fixture; that failure now says
+``rewritten by shadow rule 1 (`$S.to_return(status: 200, **)`)``, and `--json` lists it under
+`rewritten_by`. Each failure is labelled with the rule declaring the case and the case's number within
+that rule's `tests:`; rules in a list file, which share the file's id, read as `<id> rule N` (D130).
+
 ## 0.6.10 — 2026-09-25
 
 **A rename now moves a definition a concern contributes.** A method defined in a module the class
