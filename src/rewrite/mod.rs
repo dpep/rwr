@@ -2247,6 +2247,24 @@ mod tests {
                 "def fetch(legacy:)\n  1\nend\n",
                 "def fetch\n  1\nend\n",
             ),
+            (
+                "def fetch($A, $B = _, *, **) = _",
+                "def fetch($A, *, **) = _",
+                "def fetch(a, b = 1, c: 2)\n  a + c\nend\n",
+                "def fetch(a, c: 2)\n  a + c\nend\n",
+            ),
+            (
+                "def fetch($A, $B = _, *) = _",
+                "def fetch($A, *) = _",
+                "def fetch(a,\n          b = nil,\n          *rest)\n  a\nend\n",
+                "def fetch(a,\n          *rest)\n  a\nend\n",
+            ),
+            (
+                "def fetch($A, $B = _, *) = _",
+                "def fetch($A, *) = _",
+                "def fetch(a, b = 1) = a\n",
+                "def fetch(a) = a\n",
+            ),
         ];
         for (pattern, template, source, want) in cases {
             assert_eq!(

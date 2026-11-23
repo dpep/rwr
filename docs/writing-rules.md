@@ -123,8 +123,10 @@ sigil in `rewrite:` that `match:` lacks has nothing to forward and is an error.
 
 In a parameter list, `*` is any run of positional parameters, `**` any run of
 keyword ones, and `&` the block parameter or none. Keywords match by name in any
-order: `legacy:` only a required keyword, `legacy: _` only an optional one. A
-definition needs a body to be Ruby, and `= _` matches any body, endless or not:
+order: `legacy:` only a required keyword, `legacy: _` only an optional one.
+Positional parameters are as exact: `$A` only a required one, `$A = _` only an
+optional one. A definition needs a body to be Ruby, and `= _` matches any body,
+endless or not:
 
 ```yaml
 match:   'def fetch(*, legacy:, **) = _'
@@ -134,6 +136,16 @@ tests:
     output: "def fetch(url, timeout: 5)\n  get(url)\nend\n"
   - input:  "def fetch(url, legacy:, &blk) = get(url, &blk)\n"
     unchanged: true    # no `&` in the pattern, so no block parameter
+```
+
+```yaml
+match:   'def fetch($A, $B = _, *) = _'
+rewrite: 'def fetch($A, *) = _'
+tests:
+  - input:  "def fetch(url, retries = 3, *rest)\n  get(url)\nend\n"
+    output: "def fetch(url, *rest)\n  get(url)\nend\n"
+  - input:  "def fetch(url, retries) = get(url)\n"
+    unchanged: true    # `$B = _` is only an optional parameter
 ```
 
 Alone, `def fetch(*) = _` is any parameter list.
