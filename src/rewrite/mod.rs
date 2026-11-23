@@ -75,16 +75,36 @@ pub(crate) enum Refusal {
     /// would replace the source's order with the template's -- changing what
     /// evaluates first and the order the hash iterates in -- so it is refused
     /// rather than guessed (D127).
-    Reordered { at: usize },
+    Reordered { what: &'static str, at: Position },
     /// rwr computed an edit that does not describe a span of the source. A bug
     /// in rwr, refused rather than applied or allowed to abort the run.
     Malformed { edit: Edit },
     /// A deletion would take or strand a comment, which may describe the
     /// deleted code or its neighbour -- no placement of it is safe to guess.
-    Commented { at: usize },
+    Commented { at: Position },
     /// A deletion shares lines with a heredoc whose body sits elsewhere, and no
     /// single edit removes the one without the other.
-    HeredocBeside { at: usize },
+    HeredocBeside { at: Position },
+}
+
+/// Where a refusal points, as the one-based line and column a reader looks up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Position {
+    pub line: usize,
+    pub col: usize,
+}
+
+impl Position {
+    fn of(source: &[u8], offset: usize) -> Self {
+        let (line, col) = crate::source::line_col(source, offset);
+        Position { line, col }
+    }
+}
+
+impl std::fmt::Display for Position {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "line {}:{}", self.line, self.col)
+    }
 }
 
 /// A refusal is a *product*, not a diagnostic: refusing rather than guessing is
@@ -133,21 +153,21 @@ impl std::fmt::Display for Refusal {
                 "a capture at byte {at} contains a heredoc, whose body sits outside the \
                  expression -- splicing it by range would drag along surrounding text"
             ),
-            Refusal::Reordered { at } => write!(
+            Refusal::Reordered { what, at } => write!(
                 f,
-                "the hash at byte {at} lists its entries in another order than the pattern, and \
+                "the {what} at {at} lists its entries in another order than the pattern, and \
                  the template cannot be applied without moving them -- write the template's \
                  entries in the pattern's order so each is edited where it stands"
             ),
             Refusal::Commented { at } => write!(
                 f,
-                "a comment at byte {at} sits beside code this rewrite would delete, and may \
+                "a comment at {at} sits beside code this rewrite would delete, and may \
                  describe it or its neighbour -- rwr will not delete or move it; edit this site \
                  by hand"
             ),
             Refusal::HeredocBeside { at } => write!(
                 f,
-                "the code to delete at byte {at} shares its lines with a heredoc whose body sits \
+                "the code to delete at {at} shares its lines with a heredoc whose body sits \
                  further down, and no single edit removes one without the other -- edit this \
                  site by hand"
             ),
@@ -587,7 +607,12 @@ pub(crate) fn plan(
             // Re-rendering would write the template's order over the source's.
             None if !matcher::matches_in_order(pattern_root, &m.node, pattern_prepared, &m.env) => {
                 return Err(Refusal::Reordered {
-                    at: m.node.location().start_offset(),
+                    what: if m.node.as_def_node().is_some() {
+                        "parameter list"
+                    } else {
+                        "hash"
+                    },
+                    at: Position::of(source, m.node.location().start_offset()),
                 });
             }
             // Shapes diverge, so fall back to replacing the whole span. Correct,
@@ -667,7 +692,9 @@ pub(crate) fn plan(
             .all_within(source, edit.start, edit.end)
             .find(|&at| !edit.text.contains(comment_text(source, at)))
         {
-            return Err(Refusal::Commented { at });
+            return Err(Refusal::Commented {
+                at: Position::of(source, at),
+            });
         }
     }
 
@@ -1070,9 +1097,9 @@ struct Diff<'a, 'pr> {
 }
 
 impl Diff<'_, '_> {
-    /// Whether a comment overlaps `[from, to)`.
-    fn comment_within(&self, from: usize, to: usize) -> bool {
-        self.comments.within(self.source, from, to).is_some()
+    /// Where the first comment overlapping `[from, to)` starts.
+    fn comment_within(&self, from: usize, to: usize) -> Option<usize> {
+        self.comments.within(self.source, from, to)
     }
 
     /// Record why this site is refused, keeping the first reason found.
@@ -1323,12 +1350,16 @@ fn close_argument_gaps(d: &Diff<'_, '_>, target: &Node<'_>, edits: &mut [Edit]) 
             });
             (edit.end, to)
         };
-        if d.comment_within(gap.0, gap.1) {
-            d.refuse(Refusal::Commented { at: gap.0 });
+        if let Some(at) = d.comment_within(gap.0, gap.1) {
+            d.refuse(Refusal::Commented {
+                at: Position::of(source, at),
+            });
             return None;
         }
         if heredoc_body_within(target, source, gap.0, gap.1) {
-            d.refuse(Refusal::HeredocBeside { at: edit.start });
+            d.refuse(Refusal::HeredocBeside {
+                at: Position::of(source, edit.start),
+            });
             return None;
         }
         if i > 0 || j + 1 < n {
@@ -1577,9 +1608,11 @@ fn entry_diff(
             .map(|k| (end(k - 1), start(k)))
             .chain(std::iter::once((end(j), after)))
             .chain(before)
-            .find(|&(a, b)| d.comment_within(a, b));
-        if let Some((at, _)) = commented {
-            d.refuse(Refusal::Commented { at });
+            .find_map(|(a, b)| d.comment_within(a, b));
+        if let Some(at) = commented {
+            d.refuse(Refusal::Commented {
+                at: Position::of(source, at),
+            });
             return None;
         }
         // The separator before a run starts at the kept entry's own end, so a
@@ -1592,7 +1625,9 @@ fn entry_diff(
         if heredoc_opens_within(target, from, to)
             || heredoc_body_within(target, source, separator_from, to)
         {
-            d.refuse(Refusal::HeredocBeside { at: start(i) });
+            d.refuse(Refusal::HeredocBeside {
+                at: Position::of(source, start(i)),
+            });
             return None;
         }
         edits.push(Edit {
@@ -2609,6 +2644,33 @@ mod tests {
         let src = "foo(\n  body: 'x',\n  status: 200,\n  headers: h\n)\n";
         let out = rewrite("foo(**$A, status: 200, **$B)", "foo(**$A, **$B)", src);
         assert_eq!(out.as_deref(), Ok("foo(\n  body: 'x',\n  headers: h\n)\n"));
+    }
+
+    /// A refusal names what it refused and where, as a reader would look it up.
+    #[test]
+    fn a_reorder_refusal_names_the_parameter_list_and_its_line() {
+        let got = rewrite(
+            "def fetch(a:, b:) = _",
+            "def fetch(b:, a:) = _",
+            "x = 1\ndef fetch(b:, a:)\nend\n",
+        )
+        .map_err(|r| r.to_string());
+        let message = got.expect_err("refuses");
+        assert!(
+            message.starts_with("the parameter list at line 2:1 lists its entries"),
+            "{message}"
+        );
+        let got = rewrite(
+            "$S.to_return(status: 200, **)",
+            "$S.to_return(**)",
+            "x.to_return(\n  body: 1, # why\n  status: 200\n)\n",
+        )
+        .map_err(|r| r.to_string());
+        assert!(
+            got.as_ref()
+                .is_err_and(|m| m.starts_with("a comment at line 2:12 ")),
+            "{got:?}"
+        );
     }
 
     /// A dropped entry that opens its line and shares it with the next entry
