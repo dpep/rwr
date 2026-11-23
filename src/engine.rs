@@ -573,6 +573,8 @@ impl Engine {
         let mut total = 0usize;
         let mut deferred = 0usize;
         let mut by_rule = vec![0usize; self.rules.len()];
+        // Each rewritten node's span in `current`, carried through later edits.
+        let mut rewritten: Vec<(usize, usize)> = Vec::new();
         let mut spread: Vec<String> = Vec::new();
         let mut flagged: Vec<Finding> = Vec::new();
         let mut rewrites: Vec<Rewrite> = Vec::new();
@@ -644,7 +646,14 @@ impl Engine {
                     }
                     let p_parsed = ruby_prism::parse(prepared.source.as_bytes());
                     let p_node = p_parsed.node();
-                    type Applied = (String, usize, usize, Vec<rewrite::Site>);
+                    type Applied = (
+                        String,
+                        usize,
+                        usize,
+                        Vec<rewrite::Site>,
+                        Vec<rewrite::Edit>,
+                        Vec<(usize, usize)>,
+                    );
                     let found: Result<Option<Applied>, String> =
                         match matcher::pattern_root(&p_node) {
                             None => Ok(None),
@@ -876,6 +885,8 @@ impl Engine {
                                                     planned.sites,
                                                     planned.dropped,
                                                     planned.at.clone(),
+                                                    planned.edits,
+                                                    planned.matched,
                                                 ))),
                                             }
                                         }
@@ -892,7 +903,7 @@ impl Engine {
                         // Nothing changed, so the parse still describes the
                         // source and the next rule can reuse it.
                         Ok(None) => {}
-                        Ok(Some((text, sites, dropped, at))) => {
+                        Ok(Some((text, sites, dropped, at, edits, matched))) => {
                             for site in &at {
                                 let (line, col) = source::line_col(&current, site.start);
                                 let (end_line, _) = source::line_col(&current, site.end);
@@ -906,6 +917,11 @@ impl Engine {
                                     replacement: site.replacement.clone(),
                                 });
                             }
+                            rewritten = rewritten
+                                .iter()
+                                .chain(&matched)
+                                .map(|&(s, e)| (shifted(&edits, s), shifted(&edits, e)))
+                                .collect();
                             applied = Some((text, sites, dropped, index));
                             break;
                         }
@@ -964,7 +980,7 @@ impl Engine {
         } else {
             Vec::new()
         };
-        let residue = self.residue(label, &current, ctx, &reported);
+        let residue = self.residue(label, &current, ctx, &reported, &rewritten);
         if total == 0
             && residue.is_empty()
             && flagged.is_empty()
@@ -1018,6 +1034,7 @@ impl Engine {
         current: &[u8],
         ctx: &Context,
         reported: &[(usize, usize)],
+        rewritten: &[(usize, usize)],
     ) -> Vec<Residue> {
         if !self.claims_completeness {
             return Vec::new();
@@ -1043,6 +1060,10 @@ impl Engine {
                 continue;
             }
             let mut occurrences = residue::find(&parsed.node(), &anchors, reported, current);
+            // A node the rule rewrote is accounted for -- a `def` whose name it
+            // kept still carries the anchor. Exact span only, so a recursive
+            // call or comment inside it is still reported.
+            occurrences.retain(|o| !rewritten.contains(&(o.byte_start, o.byte_end)));
             // Comments live beside the tree, not in it, so they need their own
             // pass -- and a rename that leaves `# returns the display_name`
             // behind has left something stale that this report should name.
@@ -1072,4 +1093,15 @@ impl Engine {
         found.dedup_by_key(|r| (r.line, r.col));
         found
     }
+}
+
+/// Where an offset lands once `edits` (disjoint, sorted) are applied; mirrors
+/// `rewrite::shifted`.
+fn shifted(edits: &[rewrite::Edit], offset: usize) -> usize {
+    let delta: isize = edits
+        .iter()
+        .filter(|e| e.end <= offset)
+        .map(|e| e.text.len() as isize - (e.end - e.start) as isize)
+        .sum();
+    (offset as isize + delta).max(0) as usize
 }

@@ -5420,3 +5420,26 @@ tests:
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     assert!(stderr(&out).contains("`value:`"), "{}", stderr(&out));
 }
+
+/// A `def` the rule just rewrote is accounted for: residue lists only what it
+/// left alone, here the call site.
+#[test]
+fn a_rewritten_def_is_not_its_own_residue() {
+    let dir = fixture("def fetch(a, b = 1)\n  a\nend\nfetch(1)\n");
+    let file = dir.path().join("fixture.rb");
+    let out = rwr(&[
+        "rewrite",
+        "def fetch($A, $B = _, *) = _",
+        "-r",
+        "def fetch($A, *) = _",
+        file.to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read back"),
+        "def fetch(a)\n  a\nend\nfetch(1)\n"
+    );
+    let err = stderr(&out);
+    assert!(!err.contains("Definition"), "{err}");
+    assert!(err.contains("Call: fetch(1)"), "{err}");
+}
