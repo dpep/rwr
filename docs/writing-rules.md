@@ -162,6 +162,7 @@ Alone, `def fetch(*) = _` is any parameter list.
 | `same_name_as: $V` | one capture names an identifier the other *reads* — across node kinds, never two literals |
 | `is: constant\|symbol\|string\|integer\|array\|hash` | the capture's node kind |
 | `length: N` | a string/symbol literal's content, in characters |
+| `value: [200, '"200"']` | the capture is one of these literals, each written as Ruby |
 | `contains: <pattern>` | a sub-pattern holds somewhere inside the capture |
 
 `scope:` constrains the match as a whole — `inside: Account`, `singleton: true`,
@@ -194,6 +195,31 @@ A signature's type is read the same way, **where the signature is written**:
 `returns(Thing)` inside `module App` says `App::Thing` if there is one, as Ruby
 would read it. A `sig` on `Alpha::Parser#thing` says nothing about
 `Beta::Parser#thing`.
+
+## `value:`
+
+Rules that differ only by a literal collapse into one. Each entry is Ruby, exactly
+as you would write it in `match:`, and compares the same way: `200` matches `200`
+and `0xC8`, not `200.0`; `'"200"'` matches `"200"` and `'200'`.
+
+```yaml
+match:   '$S.$M(status: $V, **)'
+where:
+  $M: { name: [to_return, to_return_json] }
+  $V: { value: [200, '"200"'] }
+rewrite: '$S.$M(**)'
+tests:
+  - input:  "stub.to_return(status: \"200\", body: 'ok')\n"
+    output: "stub.to_return(body: 'ok')\n"
+```
+
+**YAML strips its own quotes first.** `"200"` in YAML is the text `200`, which is
+Ruby's integer. The Ruby string needs Ruby's quotes inside YAML's: `'"200"'`. A
+list naming one value twice is refused, which is how that slip shows up.
+
+Entries are integers, floats, strings, symbols, `nil`, `true` or `false`. Anything
+else is refused, as is `value:` beside another predicate, or on a capture that
+binds a name (`$M` in `$R.$M`) or a run (`*$A`) rather than one value.
 
 ## `contains:`
 

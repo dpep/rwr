@@ -147,7 +147,8 @@ sequence may appear.
 `same_name_as:` (two captures naming one identifier across node kinds), and
 `is:`/`length:` (a capture's node kind and a literal's content) — the pair that
 makes `gsub` → `tr` safe rather than plausible, since `tr` maps character by
-character.
+character. `value:` lists the literals a capture may be, written as Ruby —
+`value: [200, '"200"']` — so rules that differ by one literal become one.
 
 `contains:` holds a whole sub-pattern, and shared metavariables have to refer to
 the same thing:
