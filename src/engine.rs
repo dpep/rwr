@@ -391,10 +391,24 @@ impl Engine {
         // Derived from the same per-rule answer as completeness rather than
         // asked again, because they are the same question: a set that moves a
         // definition is a set whose sites reference each other.
+        // A `def` rewrite that keeps the method's name and receiver changes
+        // the definition in place; nothing calls a name that went away.
         let moves_definition: Vec<bool> = rules
             .iter()
+            .zip(&prepareds)
             .zip(&defines)
-            .map(|(rule, defines)| *defines && rule.rewrite.is_some())
+            .map(|((rule, prepared), defines)| {
+                *defines
+                    && rule.rewrite.as_deref().is_some_and(|template| {
+                        let kept = def_name(prepared).is_some_and(|name| {
+                            prepare::prepare_with(template, &rule.constant_captures())
+                                .ok()
+                                .and_then(|t| def_name(&t))
+                                == Some(name)
+                        });
+                        !kept
+                    })
+            })
             .collect();
         let renames_a_definition = moves_definition.iter().any(|d| *d);
         let unnarrowed = !rules
@@ -1104,4 +1118,19 @@ fn shifted(edits: &[rewrite::Edit], offset: usize) -> usize {
         .map(|e| e.text.len() as isize - (e.end - e.start) as isize)
         .sum();
     (offset as isize + delta).max(0) as usize
+}
+
+/// The name a receiverless `def` pattern defines, a metavariable as `$NAME`.
+fn def_name(prepared: &prepare::Prepared) -> Option<String> {
+    let parsed = ruby_prism::parse(prepared.source.as_bytes());
+    let root = matcher::pattern_root(&parsed.node())?;
+    let def = root.as_def_node()?;
+    if def.receiver().is_some() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(def.name().as_slice()).into_owned();
+    match prepared.bindings.get(&raw) {
+        Some(binding) => binding.name.as_ref().map(|n| format!("${n}")),
+        None => Some(raw),
+    }
 }

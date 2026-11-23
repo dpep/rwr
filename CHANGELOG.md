@@ -52,6 +52,10 @@ doubled space. Only whitespace touching the edit moves; the rest of the file kee
 becomes `x.to_return`, not `x.to_return()` — unless what follows would then read as an argument
 (`x.foo() -1`). A receiverless call keeps `()`, since a bare `foo` may be a local variable.
 
+**A `def` rewrite that keeps the method's name is not a rename.** A refused file is reported with its
+own reason and refused alone, rather than refusing the whole run as a half-applied rename, and the
+rewritten `def` is no longer listed among the occurrences the rule could not account for.
+
 **`rwr test` names the rule that rewrote a fixture.** A case runs every rule in its file, so a wider
 rule earlier in the file can rewrite a later rule's fixture; that failure now says
 ``rewritten by shadow rule 1 (`$S.to_return(status: 200, **)`)``, and `--json` lists it under

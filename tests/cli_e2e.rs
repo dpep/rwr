@@ -5443,3 +5443,22 @@ fn a_rewritten_def_is_not_its_own_residue() {
     assert!(!err.contains("Definition"), "{err}");
     assert!(err.contains("Call: fetch(1)"), "{err}");
 }
+
+/// A `def` rewrite that keeps the method's name is not a rename: its refusal
+/// gives its own reason, not the atomic-rename one.
+#[test]
+fn a_refused_def_rewrite_that_keeps_its_name_is_not_a_rename() {
+    let dir = fixture("def fetch(b:, a:)\n  1\nend\n");
+    let file = dir.path().join("fixture.rb");
+    let out = rwr(&[
+        "rewrite",
+        "def fetch(a:, b:) = _",
+        "-r",
+        "def fetch(b:, a:) = _",
+        file.to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(!err.contains("rename"), "{err}");
+    assert!(err.contains("rwr: refused "), "{err}");
+}
