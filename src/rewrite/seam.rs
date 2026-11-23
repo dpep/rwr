@@ -17,6 +17,9 @@ use super::Edit;
 ///   padding.
 /// - No trailing whitespace and no doubled space is created.
 pub(super) fn tidy(source: &[u8], edit: &Edit, floor: usize, ceil: usize) -> Edit {
+    if edit.start > edit.end || edit.end > source.len() || floor > edit.start || edit.end > ceil {
+        return edit.clone();
+    }
     let (mut start, mut end) = (edit.start, edit.end);
     let text = edit.text.as_bytes();
     let deletion = text.is_empty();

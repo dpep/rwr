@@ -44,13 +44,20 @@ or reorders entries there is refused (D127).
 on a multi-line call deleted `status: 200` and pulled the remaining entries onto one line; now only the
 entry and its separator go, and a comment beside it refuses rather than moving onto the line above.
 
+**Dropping arguments takes their comma and keeps their comments.** Emptying a keyword hash through
+`**$R` could strand its comma -- on a call without parentheses, `foo 1, status: 200` became `foo 1,` and
+the next line its argument -- or write `x.to_return(,)` and refuse the whole file. The separator now goes
+with the arguments (`x.to_return(status: 200,)` -> `x.to_return`, `foo(a: 1, &b)` -> `foo(&b)`), and a
+rewrite that would delete or strand a comment refuses, naming the comment's line.
+
 **An edit tidies the whitespace at its own seam.** Removing or inserting text no longer leaves a space
 before a closer (`body: "abc" )`), a line of only spaces, an emptied `(\n  \n)`, trailing whitespace or a
 doubled space. Only whitespace touching the edit moves; the rest of the file keeps its bytes (D128).
 
-**Emptying a call's arguments drops its parentheses when it has a receiver.** `x.to_return(status: 200)`
+**Emptying a call's arguments drops its parentheses after `.` or `&.`.** `x.to_return(status: 200)`
 becomes `x.to_return`, not `x.to_return()` — unless what follows would then read as an argument
-(`x.foo() -1`). A receiverless call keeps `()`, since a bare `foo` may be a local variable.
+(`x.foo() -1`). A receiverless call keeps `()`, since a bare `foo` may be a local variable, and so does
+one after `::` (`X::Foo()`), since `X::Foo` is a constant.
 
 **A `def` rewrite that keeps the method's name is not a rename.** A refused file is reported with its
 own reason and refused alone, rather than refusing the whole run as a half-applied rename, and the
