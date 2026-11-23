@@ -1244,18 +1244,38 @@ fn structural_diff(
 /// comma before the run, or after it when the run leads; a run that empties
 /// the list takes a trailing comma too, and a call without parentheses its
 /// space -- or, without a receiver, becomes `foo()`, since a bare `foo` may read
-/// as a local variable. A comment or heredoc body in the separator refuses the
+/// as a local variable and a bare `super` forwards everything. A comment or heredoc body in the separator refuses the
 /// site.
 fn close_argument_gaps(d: &Diff<'_, '_>, target: &Node<'_>, edits: &mut [Edit]) -> Option<()> {
     let source = d.source;
-    let Some(call) = target.as_call_node() else {
-        return Some(());
-    };
-    let mut items: Vec<Node<'_>> = call
-        .arguments()
+    // The arguments, whether the list is parenthesised, where a paren-less
+    // list's leading space starts, and whether an emptied one needs `()` to
+    // stay this call: a bare `foo` may be a local, and a bare `super` forwards
+    // every argument the method received.
+    let (arguments, block, parenthesised, name_end, needs_parens) =
+        if let Some(call) = target.as_call_node() {
+            (
+                call.arguments(),
+                call.block(),
+                call.opening_loc().is_some(),
+                call.message_loc().map(|m| m.end_offset()),
+                call.receiver().is_none(),
+            )
+        } else if let Some(sup) = target.as_super_node() {
+            (
+                sup.arguments(),
+                sup.block(),
+                sup.lparen_loc().is_some(),
+                Some(sup.keyword_loc().end_offset()),
+                true,
+            )
+        } else {
+            return Some(());
+        };
+    let mut items: Vec<Node<'_>> = arguments
         .map(|a| a.arguments().iter().collect())
         .unwrap_or_default();
-    if let Some(block) = call.block()
+    if let Some(block) = block
         && matches!(block, Node::BlockArgumentNode { .. })
     {
         items.push(block);
@@ -1323,9 +1343,9 @@ fn close_argument_gaps(d: &Diff<'_, '_>, target: &Node<'_>, edits: &mut [Edit]) 
         if let Some(comma) = source[gap.0..gap.1].iter().position(|c| *c == b',') {
             edit.end = gap.0 + comma + 1;
         }
-        if call.opening_loc().is_none() {
-            edit.start = call.message_loc()?.end_offset();
-            if call.receiver().is_none() {
+        if !parenthesised {
+            edit.start = name_end?;
+            if needs_parens {
                 edit.text = "()".to_string();
             }
         }
@@ -1527,7 +1547,12 @@ fn entry_diff(
         }
         // Take the separator before the run, or after it when the run leads.
         // An emptied list leaves its container to the caller and the seam.
-        let (from, to) = if i > 0 {
+        // A run that opens its own line and shares its last line with the next
+        // entry takes the separator after it, so that entry keeps its line.
+        let opens_line = |k: usize| source[end(k - 1)..start(k)].contains(&b'\n');
+        let shares_next =
+            |k: usize| k + 1 < x_kids.len() && !source[end(k)..start(k + 1)].contains(&b'\n');
+        let (from, to) = if i > 0 && !(opens_line(i) && shares_next(j)) {
             (end(i - 1), end(j))
         } else if j + 1 < x_kids.len() {
             (start(i), start(j + 1))
@@ -2586,6 +2611,18 @@ mod tests {
         assert_eq!(out.as_deref(), Ok("foo(\n  body: 'x',\n  headers: h\n)\n"));
     }
 
+    /// A dropped entry that opens its line and shares it with the next entry
+    /// takes the separator after it, so the next entry keeps its line.
+    #[test]
+    fn a_dropped_entry_leaves_its_neighbour_on_its_line() {
+        let out = rewrite(
+            "$S.foo(status: 200, **)",
+            "$S.foo(**)",
+            "x.foo(a: 1,\n  status: 200, b: 2)\n",
+        );
+        assert_eq!(out.as_deref(), Ok("x.foo(a: 1,\n  b: 2)\n"));
+    }
+
     /// Deleting the last entry takes the space after it when that space sits on
     /// the deleted entry's own line; on a shared line it is the author's padding.
     #[test]
@@ -2928,6 +2965,16 @@ mod tests {
                 ("foo($A, a: 1, **)", "foo($A, **)"),
                 "foo(<<~A, a: 1)\n  hi\nA\nbar\n",
                 "foo(<<~A)\n  hi\nA\nbar\n",
+            ),
+            (
+                ("super($A, a: 1, **)", "super($A, **)"),
+                "super(1, a: 1)\n",
+                "super(1)\n",
+            ),
+            (
+                ("super(a: 1, **)", "super(**)"),
+                "super a: 1\n",
+                "super()\n",
             ),
         ];
         for ((pattern, template), source, want) in cases {
