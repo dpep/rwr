@@ -2533,6 +2533,47 @@ mod tests {
         }
     }
 
+    /// Positional parameters are exact, as keywords are: `$A` takes only a
+    /// required parameter, `$A = _` only an optional one, `$A = 1` only that
+    /// default.
+    #[test]
+    fn positional_parameters_match_exactly() {
+        let cases: &[(&str, &str, usize)] = &[
+            ("def fetch($A) = _", "def fetch(a) = 1", 1),
+            ("def fetch($A) = _", "def fetch(a = 1) = 1", 0),
+            ("def fetch($A = _) = _", "def fetch(a = 1) = 1", 1),
+            ("def fetch($A = _) = _", "def fetch(a) = 1", 0),
+            ("def fetch($A = 1) = _", "def fetch(a = 1) = 1", 1),
+            ("def fetch($A = 1) = _", "def fetch(a = 2) = 1", 0),
+            ("def fetch($A = $D) = _", "def fetch(a = b) = 1", 1),
+            ("def fetch($A = $D) = _", "def fetch(a) = 1", 0),
+            ("foo { |$A| _ }", "foo { |a = 1| a }", 0),
+            ("foo { |$A = _| _ }", "foo { |a = 1| a }", 1),
+            ("def fetch($A, *) = _", "def fetch(a = 1, b = 2) = 1", 0),
+            ("def fetch($A, $B = _, *) = _", "def fetch(a, b = 1) = 1", 1),
+            ("def fetch($A, $B = _, *) = _", "def fetch(a, b) = 1", 0),
+            (
+                "def fetch($A, $B = _, *) = _",
+                "def fetch(a, b = 1, *r) = 1",
+                1,
+            ),
+            (
+                "def fetch($A, $B = _) = _",
+                "def fetch(a, b = 1, c = 2) = 1",
+                0,
+            ),
+            ("def fetch(*, $A) = _", "def fetch(a = 1, b) = 1", 1),
+            ("def fetch(*, $A) = _", "def fetch(a, b = 1) = 1", 0),
+        ];
+        for (pattern, source, want) in cases {
+            assert_eq!(
+                matches(pattern, source),
+                *want,
+                "{pattern} against {source}"
+            );
+        }
+    }
+
     /// D118 still holds for one rest: each pair a key metavariable can take is
     /// its own match.
     #[test]
