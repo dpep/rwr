@@ -739,7 +739,19 @@ fn match_children<'pr>(
 
     if let Some(key) = splat_placeholder(head, &prepared.bindings) {
         let name = prepared.bindings.get(key).and_then(|b| b.name.clone());
+        // Keyword arguments go to a later keyword slot when there is one, as in
+        // Ruby; letting the run take them too is a second binding of one call.
+        let keywords_later = rest
+            .iter()
+            .any(|p| matches!(p, Node::KeywordHashNode { .. }));
         for take in 0..=target.len() {
+            if keywords_later
+                && target[..take]
+                    .iter()
+                    .any(|t| matches!(t, Node::KeywordHashNode { .. }))
+            {
+                break;
+            }
             let mut trial = env.clone();
             let absorbed: Vec<Node> = target[..take].iter().map(generated::dup).collect();
             if let Some(name) = &name
@@ -2712,6 +2724,18 @@ mod tests {
                 "{pattern} against {source}"
             );
         }
+    }
+
+    /// Keyword arguments belong to a `**` slot when the pattern has one, so a
+    /// `*` run beside it cannot take them as a second, spurious binding.
+    #[test]
+    fn a_splat_run_leaves_keywords_to_the_hash_rest() {
+        for pattern in ["foo(*, **)", "foo(*$A, **$B)", "foo(*, a: _)"] {
+            assert_eq!(matches(pattern, "foo(1, a: 2)"), 1, "{pattern}");
+            assert_eq!(matches(pattern, "foo(a: 2)"), 1, "{pattern}");
+        }
+        assert_eq!(matches("foo(*, **)", "foo(1)"), 1);
+        assert_eq!(matches("foo(*$A)", "foo(1, a: 2)"), 1);
     }
 
     /// D118 still holds for one rest: each pair a key metavariable can take is

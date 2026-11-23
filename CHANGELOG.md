@@ -56,6 +56,10 @@ becomes `x.to_return`, not `x.to_return()` — unless what follows would then re
 own reason and refused alone, rather than refusing the whole run as a half-applied rename, and the
 rewritten `def` is no longer listed among the occurrences the rule could not account for.
 
+**`foo(*$A, **$B)` matches each call once.** The run could also take the keyword arguments, so `find`
+reported every call with keywords twice and `rewrite` exited 4 asking for a rerun that changed nothing.
+Keywords now go to the `**` slot, as in Ruby.
+
 **`rwr test` names the rule that rewrote a fixture.** A case runs every rule in its file, so a wider
 rule earlier in the file can rewrite a later rule's fixture; that failure now says
 ``rewritten by shadow rule 1 (`$S.to_return(status: 200, **)`)``, and `--json` lists it under

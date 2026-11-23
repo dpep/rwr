@@ -5462,3 +5462,27 @@ fn a_refused_def_rewrite_that_keeps_its_name_is_not_a_rename() {
     assert!(!err.contains("rename"), "{err}");
     assert!(err.contains("rwr: refused "), "{err}");
 }
+
+/// `foo(*, **)` is one match per call, so a rewrite through it finishes in one
+/// run instead of asking for a rerun that changes nothing.
+#[test]
+fn a_splat_beside_a_hash_rest_matches_each_call_once() {
+    let dir = fixture("foo(1, a: 2)\nfoo(a: 1)\n");
+    let file = dir.path().join("fixture.rb");
+    let out = rwr(&["find", "foo(*, **)", file.to_str().expect("utf8")]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 2);
+
+    let out = rwr(&[
+        "rewrite",
+        "foo(*, **)",
+        "-r",
+        "bar(*, **)",
+        file.to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read back"),
+        "bar(1, a: 2)\nbar(a: 1)\n"
+    );
+}
