@@ -85,6 +85,10 @@ pub(crate) enum Refusal {
     /// A deletion shares lines with a heredoc whose body sits elsewhere, and no
     /// single edit removes the one without the other.
     HeredocBeside { at: Position },
+    /// The template's `_` would have to be written out, and it names nothing
+    /// to write: it keeps what it matched only where the pattern has `_` in the
+    /// same place.
+    AnonymousRendered,
 }
 
 /// Where a refusal points, as the one-based line and column a reader looks up.
@@ -170,6 +174,12 @@ impl std::fmt::Display for Refusal {
                 "the code to delete at {at} shares its lines with a heredoc whose body sits \
                  further down, and no single edit removes one without the other -- edit this \
                  site by hand"
+            ),
+            Refusal::AnonymousRendered => write!(
+                f,
+                "the template's `_` would have to be written out here, and `_` names nothing \
+                 to write -- it keeps what it matched only where the pattern has `_` in the \
+                 same place; name it (`$B`) on both sides instead"
             ),
             Refusal::Malformed { edit } => write!(
                 f,
@@ -514,6 +524,7 @@ pub(crate) fn render(
                 }
                 String::new()
             }
+            None if var.name.is_none() => return Err(Refusal::AnonymousRendered),
             None => String::new(),
         };
 
@@ -1201,6 +1212,18 @@ fn structural_diff(
         generated::children(target),
     );
 
+    if let (Some(pd), Some(td), Some(_)) = (
+        pattern.as_def_node(),
+        template.as_def_node(),
+        target.as_def_node(),
+    ) && pd.parameters().is_some()
+        && td.parameters().is_none()
+        && pd.receiver().is_none()
+        && td.receiver().is_none()
+    {
+        return parameters_dropped(d, pattern, template, target);
+    }
+
     // Shapes differ. Before giving up, check whether the template corresponds to
     // a *subtree* of the pattern -- which is what a rewrite that unwraps looks
     // like. `$R.select { .. }.first -> $R.detect { .. }` drops an enclosing
@@ -1262,6 +1285,89 @@ fn structural_diff(
     }
     close_argument_gaps(d, target, &mut edits)?;
     drop_emptied_parentheses(target, source, &mut edits);
+    Some(edits)
+}
+
+/// A definition whose template drops every parameter: delete the target's
+/// parameter list -- with its parentheses unless the template writes `()` --
+/// rename if asked, and diff the bodies, so the body keeps its bytes and the
+/// definition its form. Pairing children by position cannot see this: the
+/// pattern has a parameters child the template lacks.
+fn parameters_dropped(
+    d: &Diff<'_, '_>,
+    pattern: &Node<'_>,
+    template: &Node<'_>,
+    target: &Node<'_>,
+) -> Option<Vec<Edit>> {
+    let Diff {
+        prepared,
+        t_prepared,
+        template_src,
+        source,
+        ..
+    } = *d;
+    let (pd, td, xd) = (
+        pattern.as_def_node()?,
+        template.as_def_node()?,
+        target.as_def_node()?,
+    );
+    let mut edits = Vec::new();
+    if !atoms_correspond(pattern, template, prepared, t_prepared) {
+        let (from, to) = (name_span(target)?, name_text(template, template_src)?);
+        edits.push(Edit {
+            start: from.0,
+            end: from.1,
+            text: to,
+        });
+    }
+
+    let keep_parens = td.lparen_loc().is_some();
+    let deletion = match (xd.lparen_loc(), xd.rparen_loc(), xd.parameters()) {
+        (Some(open), Some(close), _) if keep_parens => (open.end_offset() < close.start_offset())
+            .then(|| (open.end_offset(), close.start_offset(), String::new())),
+        (Some(open), Some(close), _) => {
+            Some((open.start_offset(), close.end_offset(), String::new()))
+        }
+        (None, None, Some(params)) => Some((
+            xd.name_loc().end_offset(),
+            effective_range(&params.as_node()).1,
+            if keep_parens { "()" } else { "" }.to_string(),
+        )),
+        (None, None, None) if keep_parens => {
+            let at = xd.name_loc().end_offset();
+            Some((at, at, "()".to_string()))
+        }
+        (None, None, None) => None,
+        _ => return None,
+    };
+    if let Some((start, end, text)) = deletion {
+        if let Some(at) = d.comment_within(start, end) {
+            d.refuse(Refusal::Commented {
+                at: Position::of(source, at),
+            });
+            return None;
+        }
+        if heredoc_opens_within(target, start, end) {
+            d.refuse(Refusal::HeredocBeside {
+                at: Position::of(source, start),
+            });
+            return None;
+        }
+        edits.push(Edit { start, end, text });
+    }
+
+    match (pd.body(), td.body(), xd.body()) {
+        // The same `_` or `$B` body on both sides keeps the target's, or its
+        // absence.
+        (Some(pb), Some(tb), _)
+            if (matcher::is_anonymous_body(&pb, prepared)
+                && matcher::is_anonymous_body(&tb, t_prepared))
+                || lone_placeholder(&pb, prepared)
+                    .is_some_and(|p| lone_placeholder(&tb, t_prepared) == Some(p)) => {}
+        (Some(pb), Some(tb), Some(xb)) => edits.extend(diff_child(d, &pb, &tb, &xb)?),
+        (None, None, None) => {}
+        _ => return None,
+    }
     Some(edits)
 }
 
@@ -2644,6 +2750,78 @@ mod tests {
         let src = "foo(\n  body: 'x',\n  status: 200,\n  headers: h\n)\n";
         let out = rewrite("foo(**$A, status: 200, **$B)", "foo(**$A, **$B)", src);
         assert_eq!(out.as_deref(), Ok("foo(\n  body: 'x',\n  headers: h\n)\n"));
+    }
+
+    /// A template that drops the parameters deletes them and keeps the rest of
+    /// the definition's bytes -- its body, its form, its comments -- and `_` in
+    /// the body on both sides keeps what it matched (D129).
+    #[test]
+    fn dropping_every_parameter_keeps_the_definition() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "def fetch($A) = _",
+                "def fetch = _",
+                "def fetch(a)\n  1\nend\n",
+                "def fetch\n  1\nend\n",
+            ),
+            (
+                "def fetch(legacy: _) = _",
+                "def fetch = _",
+                "def fetch(legacy: nil)\n  1\nend\n",
+                "def fetch\n  1\nend\n",
+            ),
+            (
+                "def fetch(*) = _",
+                "def fetch = _",
+                "def fetch(a, b) = a\n",
+                "def fetch = a\n",
+            ),
+            (
+                "def fetch(*) = _",
+                "def fetch = _",
+                "def fetch\n  1\nend\n",
+                "def fetch\n  1\nend\n",
+            ),
+            (
+                "def fetch($A) = _",
+                "def fetch() = _",
+                "def fetch(a)\n  1\nend\n",
+                "def fetch()\n  1\nend\n",
+            ),
+            (
+                "def fetch($A) = _",
+                "def load = _",
+                "def fetch a\n  1\nend\n",
+                "def load\n  1\nend\n",
+            ),
+            (
+                "def fetch($A) = $B",
+                "def fetch = $B",
+                "def fetch(a)\n  1 # x\nend\n",
+                "def fetch\n  1 # x\nend\n",
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            assert_eq!(
+                rewrite(pattern, template, source).as_deref(),
+                Ok(*want),
+                "{pattern} -> {template} on {source:?}"
+            );
+        }
+        let got = rewrite(
+            "def fetch($A) = _",
+            "def fetch = _",
+            "def fetch(a # why\n)\n  1\nend\n",
+        );
+        assert!(matches!(got, Err(Refusal::Commented { .. })), "{got:?}");
+    }
+
+    /// A template `_` rwr would have to write out names nothing to write, so it
+    /// is refused rather than rendered as nothing.
+    #[test]
+    fn a_template_underscore_is_never_rendered_as_nothing() {
+        let got = rewrite("foo($A)", "bar(_)", "foo(1)\n");
+        assert!(matches!(got, Err(Refusal::AnonymousRendered)), "{got:?}");
     }
 
     /// A refusal names what it refused and where, as a reader would look it up.
