@@ -824,6 +824,12 @@ pattern means. There is no parse error to react to. The matcher must therefore t
 placeholder as a wildcard by name rather than trusting the node type it landed on - pinned by
 `scope_resolution_parses_under_either_casing`.
 
+**A failed repair reports the attempt that got furthest**, the first on a tie, as D129's wrapper
+does. A flip that fails sooner is a casing artefact: `def fetch($A)` fails for want of a body, and
+reporting the last attempt told the author `$A` was a constant parameter. A `def` pattern that
+parses once `= _` is appended also says so, since a bodiless `def` is the natural way to write a
+signature and Ruby has no such thing.
+
 ## D37 - Comparator implementation: visitor for children, explicit arms for atoms
 **Decided.** Implements D36, deviating from its "generate everything from config.json"
 recommendation for a reason found while building.
@@ -3922,10 +3928,13 @@ promise to agree with the outer one.
 
 **Parameters.** In a parameter list `*` is a run of positional parameters, `**` of keyword ones,
 `&` the block parameter or its absence. Keywords match by name in any order, as Ruby binds them,
-and exactly: `legacy:` only a required keyword, `legacy: _` only an optional one. Without `&` the
+and exactly: `legacy:` only a required keyword, `legacy: _` only an optional one. Positional
+parameters are as exact: `$A` only a required one, `$A = _` only an optional one, `$A = 1` only that
+default -- what each spells in Ruby. Without `&` the
 target has no block parameter; alone, `*` is any parameter list, as `*$P` already was. A rewrite
 diffs parameters by name like a hash, so `def fetch(*, legacy:, **) = _` -> `def fetch(*, **) = _`
-deletes `legacy:` with its separator and keeps every other byte; an emptied list takes its
+deletes `legacy:` with its separator and keeps every other byte, as `def fetch($A, $B = _, *) = _`
+-> `def fetch($A, *) = _` deletes the optional one; an emptied list takes its
 parentheses. `_` in the same place on both sides keeps what it matched, and a lone `_` body takes an
 empty one as `$B` does (D121).
 

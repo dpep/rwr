@@ -8,7 +8,14 @@ Ruby's own anonymous forwarding, with no name to invent. In a parameter list `*`
 positional and keyword parameters and `&` the block parameter, so `def fetch(*, legacy:, **) = _` ->
 `def fetch(*, **) = _` removes one parameter and leaves the rest and the body alone. A pattern holds
 one of each; a second, or one in `rewrite:` that `match:` lacks, is an error. A pattern that already
-spelled an anonymous `*`, `**` or `&` parameter now reads it as a wildcard (D129).
+spelled an anonymous `*`, `**` or `&` parameter now reads it as a wildcard (D129). Positional
+parameters match as exactly as keywords: `$A` only a required one, `$A = _` only an optional one, so
+`def fetch($A, $B = _, *) = _` -> `def fetch($A, *) = _` drops the optional parameter in place. No
+existing pattern changes meaning.
+
+**A `def` pattern with no body says so.** `def fetch($A)` was reported as "formal argument cannot be a
+constant", an artefact of rwr's own placeholder repair; it now reports Ruby's error for the pattern as
+written and suggests adding `= _`.
 
 **Hash entries and keyword arguments match in any order.** `to_return(status: 200, **$REST)` now
 finds `to_return(body: b, status: 200)` too, and `**$REST` takes every entry the pattern did not name.

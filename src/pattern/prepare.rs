@@ -97,6 +97,26 @@ pub(crate) fn prepare(pattern: &str) -> Result<Prepared, PrepareError> {
 /// question, so the declaration seeds the substitution rather than a second
 /// mechanism being invented for it.
 pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepared, PrepareError> {
+    let message = match substitute(pattern, constants) {
+        Err(PrepareError::Unparseable { message }) => message,
+        other => return other,
+    };
+    // `def fetch($A)` is a signature, not a method: Ruby has no bodiless def.
+    let message = if pattern.trim_start().starts_with("def ")
+        && substitute(&format!("{} = _", pattern.trim_end()), constants).is_ok()
+    {
+        format!(
+            "{message}\n  a def pattern needs a body: add `= _`, as in `{} = _`",
+            pattern.trim()
+        )
+    } else {
+        message
+    };
+    Err(PrepareError::Unparseable { message })
+}
+
+/// One attempt at [`prepare_with`], without its hints.
+fn substitute(pattern: &str, constants: &[String]) -> Result<Prepared, PrepareError> {
     let vars = metavar::scan(pattern);
     for sigil in metavar::BARE {
         if vars
@@ -127,7 +147,9 @@ pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepar
     // One flip per placeholder is enough to reach any reachable assignment,
     // plus a final attempt to observe the result.
     let attempts = vars.len() + 1;
-    let mut last_message = String::from("no metavariables and the source does not parse");
+    // The error of the attempt that got furthest into the pattern, the first on
+    // a tie: a flip that fails sooner is a casing artefact, not the mistake.
+    let mut best: Option<(usize, String)> = None;
 
     for _ in 0..attempts {
         let (source, spans) = render(pattern, &vars, &cases);
@@ -164,7 +186,22 @@ pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepar
             });
         };
 
-        last_message = message;
+        // Offsets shift with the casing of the placeholders before `at`;
+        // normalise to uppercase so attempts compare.
+        let longer = Case::Lower.placeholder(0).len() - Case::Upper.placeholder(0).len();
+        let reached = at
+            - longer
+                * spans
+                    .iter()
+                    .zip(&cases)
+                    .filter(|((_, end), case)| *end <= at && **case == Case::Lower)
+                    .count();
+        if best
+            .as_ref()
+            .is_none_or(|(furthest, _)| reached > *furthest)
+        {
+            best = Some((reached, message));
+        }
         // A bare wildcard's placeholder is lowercase wherever it can stand.
         let flippable: Vec<Option<(usize, usize)>> = spans
             .iter()
@@ -182,10 +219,13 @@ pub(crate) fn prepare_with(pattern: &str, constants: &[String]) -> Result<Prepar
     }
 
     // `$$$A` is another tool's spelling for "any argument list", and Prism's
-    // report of it ("unexpected constant") describes the symptom without naming
-    // the cause. rwr spells a run of nodes `*$A`, which is real Ruby -- the
+    // report of it describes the symptom without naming the cause. rwr spells a run of nodes `*$A`, which is real Ruby -- the
     // point of the metavariable syntax -- so say so rather than leaving the
     // caller to guess from a parser error.
+    let last_message = best.map_or_else(
+        || String::from("no metavariables and the source does not parse"),
+        |(_, message)| message,
+    );
     let message = if pattern.contains("$$") {
         format!(
             "{last_message}\n  `$$` is not rwr syntax. A run of nodes is `*$NAME` -- `foo(*$A)` matches any argument list, and `**$NAME` does the same inside a hash."
@@ -523,6 +563,24 @@ mod tests {
         let err = prepare("class Foo; bar(*); end").unwrap_err().to_string();
         assert!(!err.contains("method body"), "{err}");
         assert!(err.contains("anonymous"), "{err}");
+    }
+
+    /// A casing flip that gets less far than the pattern as written must not
+    /// replace its error: `def fetch($A)` fails for want of a body, and the
+    /// flipped `$A` -- a constant parameter -- is a mistake nobody made.
+    #[test]
+    fn a_def_without_a_body_is_reported_as_one() {
+        for pattern in ["def fetch($A)", "def fetch($A, legacy: _)", "def fetch(*)"] {
+            let err = prepare(pattern).unwrap_err().to_string();
+            assert!(!err.contains("constant"), "{pattern}: {err}");
+            assert!(
+                err.contains("a def pattern needs a body: add `= _`"),
+                "{pattern}: {err}"
+            );
+        }
+        // Broken in a way a body does not fix: no hint.
+        let err = prepare("def fetch($A").unwrap_err().to_string();
+        assert!(!err.contains("needs a body"), "{err}");
     }
 
     /// Genuinely broken Ruby must be reported, not silently repaired forever.

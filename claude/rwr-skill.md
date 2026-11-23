@@ -98,7 +98,8 @@ with `rewrite: '$S.to_return(**)'` drops one key and keeps the rest in place.
 One of each per pattern (name the others), and one in `rewrite:` needs its
 counterpart in `match:` (exit 3 otherwise). In parameters, `*` is any positional
 run, `**` any keyword run, `&` the block parameter or none; keywords match by
-name, `legacy:` only required, `legacy: _` only optional. A `def` pattern needs a
+name, `legacy:` only required, `legacy: _` only optional; likewise `$A` is only a
+required positional parameter and `$A = _` only an optional one. A `def` pattern needs a
 body: `def fetch(*, legacy:, **) = _` matches any body, endless or not, and
 rewriting it to `def fetch(*, **) = _` deletes just that parameter.
 
