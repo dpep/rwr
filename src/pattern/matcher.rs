@@ -917,6 +917,9 @@ pub(crate) enum ConstraintMiss {
     Is {
         wanted: NodeKind,
     },
+    Value {
+        allowed: Vec<String>,
+    },
     Contains {
         pattern: String,
     },
@@ -1066,6 +1069,21 @@ pub(crate) fn verdict(
                 capture: short,
                 miss: ConstraintMiss::Is { wanted },
             };
+        }
+
+        if let Some(allowed) = &constraint.value {
+            let hit = match bound {
+                Bound::One(node) => allowed.iter().any(|v| literal_matches(v, node)),
+                _ => false,
+            };
+            if !hit {
+                return Verdict::BadBinding {
+                    capture: short,
+                    miss: ConstraintMiss::Value {
+                        allowed: allowed.clone(),
+                    },
+                };
+            }
         }
 
         if constraint.contains.is_some() {
@@ -1275,6 +1293,56 @@ fn is_kind(bound: &Bound<'_>, wanted: NodeKind) -> bool {
         NodeKind::Array => matches!(node, Node::ArrayNode { .. }),
         NodeKind::Hash => matches!(node, Node::HashNode { .. }),
     }
+}
+
+/// Whether `source` is exactly one scalar Ruby literal, for `value:` (D131).
+pub(crate) fn is_literal_source(source: &str) -> bool {
+    let parsed = ruby_prism::parse(source.as_bytes());
+    if parsed.errors().count() > 0 {
+        return false;
+    }
+    pattern_root(&parsed.node()).is_some_and(|node| {
+        matches!(
+            node,
+            Node::IntegerNode { .. }
+                | Node::FloatNode { .. }
+                | Node::RationalNode { .. }
+                | Node::ImaginaryNode { .. }
+                | Node::StringNode { .. }
+                | Node::SymbolNode { .. }
+                | Node::NilNode { .. }
+                | Node::TrueNode { .. }
+                | Node::FalseNode { .. }
+        )
+    })
+}
+
+/// Whether a literal written as Ruby source equals `node` by `match:`'s own
+/// equality.
+fn literal_matches(source: &str, node: &Node<'_>) -> bool {
+    let parsed = ruby_prism::parse(source.as_bytes());
+    pattern_root(&parsed.node()).is_some_and(|lit| compare::node_eq(&lit, node))
+}
+
+/// Whether two literals written as Ruby source are the same value.
+pub(crate) fn same_literal(a: &str, b: &str) -> bool {
+    let parsed = ruby_prism::parse(b.as_bytes());
+    pattern_root(&parsed.node()).is_some_and(|node| literal_matches(a, &node))
+}
+
+/// Whether metavariable `name` appears anywhere in the pattern as a node,
+/// rather than only as a name atom (`$M` in `$R.$M`), which binds no node.
+pub(crate) fn binds_a_node(prepared: &Prepared, name: &str) -> bool {
+    fn walk(node: &Node<'_>, prepared: &Prepared, name: &str) -> bool {
+        placeholder(node, &prepared.bindings)
+            .and_then(|key| prepared.bindings.get(key))
+            .is_some_and(|b| b.name.as_deref() == Some(name))
+            || generated::children(node)
+                .iter()
+                .any(|c| walk(c, prepared, name))
+    }
+    let parsed = ruby_prism::parse(prepared.source.as_bytes());
+    walk(&parsed.node(), prepared, name)
 }
 
 /// The text a literal carries, for the bindings where that question has an
@@ -1941,6 +2009,7 @@ impl Verdict {
                 ConstraintMiss::Type { .. } => "type",
                 ConstraintMiss::TypeNot { .. } => "type_not",
                 ConstraintMiss::Is { .. } => "is",
+                ConstraintMiss::Value { .. } => "value",
                 ConstraintMiss::Contains { .. } => "contains",
                 ConstraintMiss::Length { .. } => "length",
                 ConstraintMiss::SameNameAs { .. } => "same_name_as",
@@ -2037,6 +2106,9 @@ impl Verdict {
                     excluded.join(", ")
                 ),
                 ConstraintMiss::Is { wanted } => format!("not {wanted:?}"),
+                ConstraintMiss::Value { allowed } => {
+                    format!("not one of `value: [{}]`", allowed.join(", "))
+                }
                 ConstraintMiss::Contains { pattern } => {
                     format!("does not contain `{pattern}`")
                 }
@@ -2372,6 +2444,27 @@ mod tests {
         let t_result = ruby_prism::parse(source.as_bytes());
         assert_eq!(t_result.errors().count(), 0, "target does not parse");
         search(&p_root, &t_result.node(), &prepared, &Criteria::none()).len()
+    }
+
+    /// D131. `value:` lists what may stand in the capture's place, compared the
+    /// way `match:` compares a literal written there: by value, not spelling.
+    #[test]
+    fn a_value_constraint_matches_listed_literals() {
+        let rule = "match: '$S.$M(status: $V, **)'\nwhere:\n  $V: { value: [200, '\"200\"'] }\n";
+        for (source, want) in [
+            ("stub.to_return(status: 200)", 1),
+            ("stub.to_return(status: \"200\", body: '')", 1),
+            ("stub.to_return(status: '200')", 1),
+            // Same integer, as `match: foo(200)` would also say.
+            ("stub.to_return(status: 0xC8)", 1),
+            ("stub.to_return(status: 200.0)", 0),
+            ("stub.to_return(status: :\"200\")", 0),
+            ("stub.to_return(status: 201)", 0),
+            ("stub.to_return(status: \"#{code}\")", 0),
+            ("stub.to_return(status: code)", 0),
+        ] {
+            assert_eq!(applied(rule, source), want, "{source}");
+        }
     }
 
     /// D127. Hash entries and keyword arguments match by key, in any order;

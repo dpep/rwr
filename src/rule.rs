@@ -270,6 +270,15 @@ pub(crate) struct Constraint {
     #[serde(default)]
     pub length: Option<usize>,
 
+    /// The capture must be one of these literals, each written as Ruby (D131).
+    ///
+    /// Compared the way `match:` compares a literal written in the capture's
+    /// place, so `value: [A, B]` means exactly the two rules with `A` and `B`
+    /// spelled out. YAML removes its own quotes first: the Ruby string `"200"`
+    /// is `'"200"'`, and a bare `"200"` is the integer.
+    #[serde(default)]
+    pub value: Option<Vec<String>>,
+
     /// The capture's subtree must contain a match of this pattern.
     ///
     /// A pattern matches a *shape*, and until now there was no way to say "and
@@ -356,6 +365,69 @@ impl Constraint {
     /// the length of one test run.
     pub(crate) fn narrows_by_receiver(&self) -> bool {
         self.receiver_type.is_some() || self.type_not.is_some()
+    }
+
+    /// Why a `value:` list cannot mean "one of these literals here", if it
+    /// cannot.
+    fn check_values(
+        &self,
+        key: &str,
+        values: &[String],
+        prepared: &crate::pattern::prepare::Prepared,
+    ) -> Result<(), String> {
+        use crate::pattern::matcher;
+        // Every other predicate asks something a listed literal already answers.
+        let others = self.name.is_some()
+            || self.name_not.is_some()
+            || self.receiver_type.is_some()
+            || self.type_not.is_some()
+            || self.kind.is_some()
+            || self.subclasses.is_some()
+            || self.is.is_some()
+            || self.length.is_some()
+            || self.contains.is_some()
+            || self.same_name_as.is_some();
+        if others {
+            return Err(
+                "stands alone: the listed literals already say what this capture is".into(),
+            );
+        }
+        if values.is_empty() {
+            return Err("is empty, so the rule could never match".into());
+        }
+        let short = key.trim_start_matches('$');
+        let many = prepared.bindings.values().any(|b| {
+            b.name.as_deref() == Some(short) && b.arity == crate::pattern::metavar::Arity::Many
+        });
+        if many {
+            return Err(format!("needs one node, and *{key} binds a run of them"));
+        }
+        if !matcher::binds_a_node(prepared, short) {
+            return Err(format!(
+                "needs a value position, and {key} only ever binds a name (a method, parameter or variable)"
+            ));
+        }
+        for (i, value) in values.iter().enumerate() {
+            if !matcher::is_literal_source(value) {
+                return Err(format!(
+                    "entry `{value}` is not one Ruby literal (integer, float, string, symbol, nil, true or false)"
+                ));
+            }
+            if let Some(earlier) = values[..i].iter().find(|e| matcher::same_literal(e, value)) {
+                // The likely cause: YAML ate the quotes meant for Ruby.
+                let hint = if value.starts_with(['"', '\'']) {
+                    String::new()
+                } else {
+                    format!(
+                        ". YAML removes its own quotes, so the Ruby string is written '\"{value}\"'"
+                    )
+                };
+                return Err(format!(
+                    "lists `{earlier}` and `{value}`, which are the same Ruby value{hint}"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Class names whose descendants this constraint needs to know about.
@@ -1070,6 +1142,11 @@ impl Rule {
                     "{key} has both `name:` and `name_not:` -- an allowlist already says which"
                 )));
             }
+            if let Some(values) = &constraint.value {
+                constraint
+                    .check_values(key, values, prepared)
+                    .map_err(|why| complain(format!("{key} `value:` {why}")))?;
+            }
             // `type:` takes a class name and will accept any string, so a value
             // that cannot be a Ruby constant resolves to nothing and the rule
             // matches nothing, silently. `is:` has a closed set and says so
@@ -1468,6 +1545,56 @@ mod tests {
             refuse("match: $R.foo\nwhere:\n  $R: { type: ActiveRecord::Base }\n").is_none(),
             "a constant path is a class name too"
         );
+    }
+
+    /// D131. Each `value:` entry is Ruby source for one literal. Anything that
+    /// would leave the constraint meaning something other than "one of these
+    /// literals, in this node position" is refused at load.
+    #[test]
+    fn a_value_constraint_refuses_what_it_cannot_mean() {
+        let refuse = |yaml: &str| {
+            let rules = parse(yaml, "t", "t").expect("parses as YAML");
+            let prepared = crate::pattern::prepare::prepare(&rules[0].pattern).expect("prepares");
+            rules[0].validate(&prepared).err().map(|e| e.to_string())
+        };
+        let with = |values: &str| {
+            refuse(&format!(
+                "match: foo($V)\nwhere:\n  $V: {{ value: {values} }}\n"
+            ))
+        };
+
+        // Literals of every scalar kind, quoting style included.
+        assert_eq!(
+            with(r#"[200, '"200"', ":ok", "nil", "true", "1.5", "-1"]"#),
+            None
+        );
+
+        // Not literals: a call, an interpolated string, a metavariable, a constant.
+        for bad in [
+            "['foo(1)']",
+            r##"['"#{x}"']"##,
+            "['$X']",
+            "[Foo]",
+            "['1 +']",
+            "['1; 2']",
+        ] {
+            let err = with(bad).unwrap_or_else(|| panic!("{bad} should refuse"));
+            assert!(err.contains("literal"), "{bad}: {err}");
+        }
+
+        // YAML strips its own quotes, so `"200"` is the integer again -- and the
+        // duplicate is the only trace of that, so it refuses with the fix.
+        let twice = with(r#"[200, "200"]"#).expect("a duplicate refuses");
+        assert!(twice.contains(r#"'"200"'"#), "{twice}");
+
+        assert!(with("[]").is_some(), "an empty list matches nothing");
+
+        // A capture that cannot bind a literal: a method name, a run of nodes.
+        assert!(refuse("match: $R.$M\nwhere:\n  $M: { value: ['1'] }\n").is_some());
+        assert!(refuse("match: foo(*$A)\nwhere:\n  $A: { value: ['1'] }\n").is_some());
+
+        // Another predicate beside `value:` can only repeat or contradict it.
+        assert!(refuse("match: foo($V)\nwhere:\n  $V: { value: ['1'], is: integer }\n").is_some());
     }
 
     /// D129. A bare sigil in `rewrite:` forwards the one `match:` wrote, so

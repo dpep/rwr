@@ -3965,3 +3965,36 @@ attributed: findings carry the rule's id, which list-file rules share.
 
 *Reverses if:* authors keep hitting shadowing that a passing fixture hides -- that would call for a
 static overlap check, not for running a case against its own rule alone.
+
+## D131 - `value:` lists literals written as Ruby, compared as `match:` compares them
+
+**Decided.** `where: { $V: { value: [200, '"200"'] } }` admits a capture equal to one of the listed
+literals. Each entry is Ruby source for one scalar literal -- integer, float, rational, imaginary,
+string, symbol, `nil`, `true`, `false` -- and equality is D36's `node_eq`, the comparison `match:`
+already applies to a literal written in the capture's place. So `value: [A, B]` means exactly the
+two rules with `A` and `B` spelled into the pattern, and nothing a rule author has to learn
+separately: `200` matches `0xC8` and `1_000` matches `1000` because `match: foo(200)` does; `"x"`
+matches `'x'` for the same reason; `200` never matches `200.0` or `"200"`.
+
+**Why Ruby source, not YAML values.** YAML has its own scalar types, and they are not Ruby's: no
+symbols, `yes`/`on` booleans in 1.1, floats that print `1.0` as `1`, and one spelling for a string
+whether or not it is quoted. Mapping those onto Ruby would be a second literal grammar to explain.
+Patterns are Ruby; so are values.
+
+**The trap, and how it surfaces.** YAML strips its own quotes before rwr sees the text, so `"200"`
+in a rule file is Ruby's integer `200`. The Ruby string is `'"200"'`. Nothing at load time can see
+which quote style YAML consumed, so the trap cannot be refused outright -- but the realistic slip
+is listing both, `[200, "200"]`, and a list naming one value twice is refused with the quoting fix.
+The docs lead with the quoted form.
+
+**Refused at load.** An entry that is not one literal (a call, an interpolated string, a constant,
+`$X`, two statements, a syntax error); an empty list; `value:` beside any other predicate, which
+could only repeat or contradict it (as `name:` with `name_not:` is); and a
+capture that cannot bind a value -- one that binds only a name, as `$M` in `$R.$M`, or a run, as
+`*$A`. Each would otherwise be a rule that loads and silently never matches.
+
+**A list only**, like `name:` and `type_not:`; one form to remember. Arrays and hashes are out:
+nothing has asked for them, and `match:` already spells a whole literal structure.
+
+*Reverses if:* rules need a value spelled differently from how `match:` compares it -- `0xC8` but
+not `200` -- which would be a spelling predicate, not a change to this one.

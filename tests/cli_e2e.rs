@@ -5382,3 +5382,41 @@ fn a_bare_double_splat_forwards_the_entries_it_matched() {
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     assert!(stderr(&out).contains("bare `**`"), "{}", stderr(&out));
 }
+
+/// D131. One rule covers a status written as an integer or a string, which
+/// took two rules that differed only in that literal.
+#[test]
+fn a_value_list_collapses_rules_that_differ_by_a_literal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let rule = rule_with(
+        dir.path(),
+        "status.yml",
+        r#"id: t/status-200
+match: '$S.$M(status: $V, **)'
+where:
+  $M: { name: [to_return, to_return_json] }
+  $V: { value: [200, '"200"'] }
+rewrite: '$S.$M(**)'
+tests:
+  - input: "stub.to_return(status: 200, body: 'ok')\n"
+    output: "stub.to_return(body: 'ok')\n"
+  - input: "stub.to_return_json(status: \"200\", body: {})\n"
+    output: "stub.to_return_json(body: {})\n"
+  - input: "stub.to_return(status: 404, body: '')\n"
+    unchanged: true
+"#,
+    );
+    let out = test_run(dir.path(), &rule);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    // A capture that binds a method name has no literal to compare.
+    let bad = rule_with(
+        dir.path(),
+        "bad.yml",
+        "id: t/bad\nmatch: $R.$M\nwhere:\n  $M: { value: ['1'] }\n\
+         tests:\n  - input: \"a.b\\n\"\n    finds: 0\n",
+    );
+    let out = test_run(dir.path(), &bad);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(stderr(&out).contains("`value:`"), "{}", stderr(&out));
+}

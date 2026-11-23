@@ -290,6 +290,7 @@ rewrite: $R.detect { |$P| $B }
 | `same_name_as: $V` | two captures name the same identifier, across node kinds |
 | `is: constant\|symbol\|string\|integer\|array\|hash` | the capture's node kind |
 | `length: N` | a string/symbol literal's content, in characters |
+| `value: [200, '"200"']` | the capture is one of these literals, each written as Ruby |
 
 `type:` resolves a receiver from a constructor (`Widget.new.foo`), a local or
 ivar assigned from one, a constant, `self`, and — where the repo has Sorbet

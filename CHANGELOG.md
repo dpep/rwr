@@ -12,6 +12,11 @@ you already have change meaning in four ways:
 - A rewrite keeps the source's spelling of every entry it keeps: `:body => b` stays `:body => b`
   rather than becoming `body: b`. Update any `output:` that expected the old re-render.
 
+**`where:` takes `value:`, a list of literals a capture may be.** `$V: { value: [200, '"200"'] }`
+lets one rule cover `status: 200` and `status: "200"`. Each entry is written as Ruby and compares as
+it would in `match:`. YAML strips its own quotes, so the Ruby string `"200"` is written `'"200"'`
+(D131).
+
 **A bare `*`, `**` or `&` is a wildcard a template can forward.** `match: '$S.to_return(status: 200, **)'`
 with `rewrite: '$S.to_return(**)'` drops `status: 200` and keeps every other entry where it was --
 Ruby's own anonymous forwarding, with no name to invent. In a parameter list `*` and `**` are runs of
