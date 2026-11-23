@@ -17,6 +17,7 @@ use crate::pattern::matcher::{self, Bound, Env, Match};
 use crate::pattern::metavar::{self, Arity};
 use crate::pattern::prepare::{self, Prepared};
 use ruby_prism::Node;
+use std::cell::RefCell;
 
 /// One replacement of a source span.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +79,12 @@ pub(crate) enum Refusal {
     /// rwr computed an edit that does not describe a span of the source. A bug
     /// in rwr, refused rather than applied or allowed to abort the run.
     Malformed { edit: Edit },
+    /// A deletion would take or strand a comment, which may describe the
+    /// deleted code or its neighbour -- no placement of it is safe to guess.
+    Commented { at: usize },
+    /// A deletion shares lines with a heredoc whose body sits elsewhere, and no
+    /// single edit removes the one without the other.
+    HeredocBeside { at: usize },
 }
 
 /// A refusal is a *product*, not a diagnostic: refusing rather than guessing is
@@ -131,6 +138,18 @@ impl std::fmt::Display for Refusal {
                 "the hash at byte {at} lists its entries in another order than the pattern, and \
                  the template cannot be applied without moving them -- write the template's \
                  entries in the pattern's order so each is edited where it stands"
+            ),
+            Refusal::Commented { at } => write!(
+                f,
+                "a comment at byte {at} sits beside code this rewrite would delete, and may \
+                 describe it or its neighbour -- rwr will not delete or move it; edit this site \
+                 by hand"
+            ),
+            Refusal::HeredocBeside { at } => write!(
+                f,
+                "the code to delete at byte {at} shares its lines with a heredoc whose body sits \
+                 further down, and no single edit removes one without the other -- edit this \
+                 site by hand"
             ),
             Refusal::Malformed { edit } => write!(
                 f,
@@ -333,32 +352,18 @@ fn atoms_correspond(
 /// requires matching shape and corresponding metavariables, so an accidental
 /// match is unlikely. Failing returns `None` and the caller replaces the whole
 /// span -- correct, merely non-minimal.
-#[allow(clippy::too_many_arguments)]
 fn unwrap_to_subtree(
+    d: &Diff<'_, '_>,
     p_kids: &[Node<'_>],
     template: &Node<'_>,
     x_kids: &[Node<'_>],
     target: &Node<'_>,
-    prepared: &Prepared,
-    t_prepared: &Prepared,
-    template_src: &[u8],
-    env: &Env<'_>,
-    source: &[u8],
 ) -> Option<Vec<Edit>> {
     if p_kids.len() != x_kids.len() {
         return None;
     }
     for (p_child, x_child) in p_kids.iter().zip(x_kids) {
-        let Some(mut edits) = structural_diff(
-            p_child,
-            template,
-            x_child,
-            prepared,
-            t_prepared,
-            template_src,
-            env,
-            source,
-        ) else {
+        let Some(mut edits) = structural_diff(d, p_child, template, x_child) else {
             continue;
         };
         // What surrounds the subtree is measured by the nodes' *own* spans, not
@@ -526,20 +531,27 @@ pub(crate) fn plan(
     // Each edit remembers which match produced it: a shape-changing rewrite
     // emits several edits for one site, so edits cannot stand in for sites.
     let mut edits: Vec<(usize, Edit)> = Vec::new();
+    let comments = Comments::default();
     for (index, m) in matches.iter().enumerate() {
         // Minimal first: where pattern and template agree in shape, edit only
         // what differs and leave every untouched subtree's bytes alone.
         let minimal = match (&t_root, &t_prepared) {
-            (Some(root), Some(tp)) => structural_diff(
-                pattern_root,
-                root,
-                &m.node,
-                pattern_prepared,
-                tp,
-                tp.source.as_bytes(),
-                &m.env,
-                source,
-            ),
+            (Some(root), Some(tp)) => {
+                let d = Diff {
+                    prepared: pattern_prepared,
+                    t_prepared: tp,
+                    template_src: tp.source.as_bytes(),
+                    env: &m.env,
+                    source,
+                    refusal: RefCell::new(None),
+                    comments: &comments,
+                };
+                let found = structural_diff(&d, pattern_root, root, &m.node);
+                if let Some(refusal) = d.refusal.into_inner() {
+                    return Err(refusal);
+                }
+                found
+            }
             _ => None,
         };
 
@@ -645,6 +657,18 @@ pub(crate) fn plan(
         .collect();
     for ((_, edit), (floor, ceil)) in kept.iter_mut().zip(bounds) {
         *edit = seam::tidy(source, edit, floor, ceil);
+    }
+
+    // Whatever path produced an edit, a comment it covers must come out in its
+    // text: a re-rendered span keeps only the comments inside its captures. An
+    // empty template deletes a unit, doc comment and all (D66).
+    for (_, edit) in kept.iter().filter(|_| !template.trim().is_empty()) {
+        if let Some(at) = comments
+            .all_within(source, edit.start, edit.end)
+            .find(|&at| !edit.text.contains(comment_text(source, at)))
+        {
+            return Err(Refusal::Commented { at });
+        }
     }
 
     // A site counts once however many edits it took, and only if one survived.
@@ -981,6 +1005,82 @@ fn node_at<'pr>(tree: &Node<'pr>, from: usize, to: usize) -> Option<Node<'pr>> {
     None
 }
 
+/// The source's comment spans, parsed only once a `#` makes them worth asking.
+#[derive(Default)]
+struct Comments(std::cell::OnceCell<Vec<(usize, usize)>>);
+
+impl Comments {
+    /// The start of the first comment overlapping `[from, to)`.
+    fn within(&self, source: &[u8], from: usize, to: usize) -> Option<usize> {
+        self.all_within(source, from, to).next()
+    }
+
+    /// The start of each comment overlapping `[from, to)`.
+    fn all_within<'s>(
+        &'s self,
+        source: &[u8],
+        from: usize,
+        to: usize,
+    ) -> impl Iterator<Item = usize> + 's {
+        let worth_asking = from < to
+            && source
+                .get(from..to)
+                .is_some_and(|text| text.contains(&b'#'));
+        let spans: &[(usize, usize)] = if worth_asking {
+            self.0.get_or_init(|| {
+                ruby_prism::parse(source)
+                    .comments()
+                    .map(|c| (c.location().start_offset(), c.location().end_offset()))
+                    .collect()
+            })
+        } else {
+            &[]
+        };
+        spans
+            .iter()
+            .filter(move |&&(s, e)| s < to && from < e)
+            .map(|&(s, _)| s)
+    }
+}
+
+/// The comment starting at `at`, to the end of its line.
+fn comment_text(source: &[u8], at: usize) -> &str {
+    let len = source[at..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .unwrap_or(source.len() - at);
+    std::str::from_utf8(&source[at..at + len])
+        .unwrap_or_default()
+        .trim_end()
+}
+
+/// What a structural diff reads, and the refusal it may record.
+struct Diff<'a, 'pr> {
+    prepared: &'a Prepared,
+    t_prepared: &'a Prepared,
+    template_src: &'a [u8],
+    env: &'a Env<'pr>,
+    source: &'a [u8],
+    /// Why the site must not be edited at all, once some part of the diff has
+    /// found a reason -- a comment or heredoc a deletion would take. Recorded
+    /// rather than returned as `None`, which would let a coarser path re-render
+    /// over the very thing that declined.
+    refusal: RefCell<Option<Refusal>>,
+    comments: &'a Comments,
+}
+
+impl Diff<'_, '_> {
+    /// Whether a comment overlaps `[from, to)`.
+    fn comment_within(&self, from: usize, to: usize) -> bool {
+        self.comments.within(self.source, from, to).is_some()
+    }
+
+    /// Record why this site is refused, keeping the first reason found.
+    fn refuse(&self, refusal: Refusal) {
+        self.refusal.borrow_mut().get_or_insert(refusal);
+    }
+}
+
 /// Structural-diff editing: emit edits only where pattern and template differ.
 ///
 /// Rendering a whole template re-imposes its layout on everything it covers,
@@ -1014,17 +1114,20 @@ fn lone_placeholder(node: &Node<'_>, prepared: &Prepared) -> Option<String> {
     matcher::placeholder_name(only, prepared)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn structural_diff(
+    d: &Diff<'_, '_>,
     pattern: &Node<'_>,
     template: &Node<'_>,
     target: &Node<'_>,
-    prepared: &Prepared,
-    t_prepared: &Prepared,
-    template_src: &[u8],
-    env: &Env<'_>,
-    source: &[u8],
 ) -> Option<Vec<Edit>> {
+    let Diff {
+        prepared,
+        t_prepared,
+        template_src,
+        env,
+        source,
+        ..
+    } = *d;
     // Each side resolves placeholders through its *own* mapping: the pattern
     // and template are prepared separately, so `rwr_mv_1` may be `$SEL` in one
     // and `$P` in the other. Sharing one mapping silently misaligned them.
@@ -1056,28 +1159,10 @@ fn structural_diff(
     // Parameters likewise: keywords match by name, and `*`/`**` runs may sit
     // anywhere, so pairing by position would misalign them (D129).
     if matches!(pattern, Node::ParametersNode { .. }) {
-        return entry_diff(
-            pattern,
-            template,
-            target,
-            prepared,
-            t_prepared,
-            template_src,
-            env,
-            source,
-        );
+        return entry_diff(d, pattern, template, target);
     }
     if matcher::is_hash(pattern) {
-        let by_key = entry_diff(
-            pattern,
-            template,
-            target,
-            prepared,
-            t_prepared,
-            template_src,
-            env,
-            source,
-        );
+        let by_key = entry_diff(d, pattern, template, target);
         if by_key.is_some() || !matcher::matches_in_order(pattern, target, prepared, env) {
             return by_key;
         }
@@ -1098,17 +1183,7 @@ fn structural_diff(
         || p_kids.len() != t_kids.len()
         || name_slot(pattern) != name_slot(template)
     {
-        return unwrap_to_subtree(
-            &p_kids,
-            template,
-            &x_kids,
-            target,
-            prepared,
-            t_prepared,
-            template_src,
-            env,
-            source,
-        );
+        return unwrap_to_subtree(d, &p_kids, template, &x_kids, target);
     }
 
     // A body that is the same lone metavariable on both sides is carried across
@@ -1156,16 +1231,7 @@ fn structural_diff(
     }
 
     for (p, t, x) in aligned {
-        edits.extend(diff_child(
-            p,
-            t,
-            x,
-            prepared,
-            t_prepared,
-            template_src,
-            env,
-            source,
-        )?);
+        edits.extend(diff_child(d, p, t, x)?);
     }
     drop_emptied_parentheses(target, source, &mut edits);
     Some(edits)
@@ -1245,20 +1311,22 @@ fn ends_an_argumentless_call(rest: &[u8]) -> bool {
 /// deleted with its separator, so the source's order and layout survive (D127).
 ///
 /// `None` -- and so a re-render, which the caller refuses for an out-of-order
-/// match -- when the template adds an entry, lists its entries in another order
-/// than the pattern's, or would delete them all, or when a deletion would take
-/// a comment or a heredoc body with it.
-#[allow(clippy::too_many_arguments)]
+/// match -- when the template adds an entry or lists its entries in another
+/// order than the pattern's. A deletion that would take or strand a comment or
+/// a heredoc body refuses the site outright, so no coarser path re-renders it.
 fn entry_diff(
+    d: &Diff<'_, '_>,
     pattern: &Node<'_>,
     template: &Node<'_>,
     target: &Node<'_>,
-    prepared: &Prepared,
-    t_prepared: &Prepared,
-    template_src: &[u8],
-    env: &Env<'_>,
-    source: &[u8],
 ) -> Option<Vec<Edit>> {
+    let Diff {
+        prepared,
+        t_prepared,
+        env,
+        source,
+        ..
+    } = *d;
     if std::mem::discriminant(pattern) != std::mem::discriminant(template) {
         return None;
     }
@@ -1331,40 +1399,15 @@ fn entry_diff(
             continue;
         }
         let xi = owner.iter().position(|o| *o == Some(pi))?;
-        edits.extend(diff_child(
-            &p_kids[pi],
-            &t_kids[ti],
-            &x_kids[xi],
-            prepared,
-            t_prepared,
-            template_src,
-            env,
-            source,
-        )?);
+        edits.extend(diff_child(d, &p_kids[pi], &t_kids[ti], &x_kids[xi])?);
     }
 
     let dropped: Vec<bool> = owner
         .iter()
         .map(|o| !kept.iter().any(|&(pi, _)| *o == Some(pi)))
         .collect();
-    if dropped.iter().all(|d| *d) {
-        // An emptied hash would change what the call receives; an emptied
-        // parameter list is a method taking none, and its parentheses go too.
-        if !matches!(target, Node::ParametersNode { .. }) || x_kids.is_empty() {
-            return None;
-        }
-        let (from, to) = (
-            own_range(&x_kids[0]).0,
-            effective_range(&x_kids[x_kids.len() - 1]).1,
-        );
-        if source[from..to].contains(&b'#') || heredoc_opens_within(target, from, to) {
-            return None;
-        }
-        return Some(vec![Edit {
-            start: from,
-            end: to,
-            text: String::new(),
-        }]);
+    if x_kids.is_empty() {
+        return Some(edits);
     }
     let start = |i: usize| own_range(&x_kids[i]).0;
     // Where an entry's text ends before the next one: past its heredoc body,
@@ -1387,10 +1430,13 @@ fn entry_diff(
             j += 1;
         }
         // Take the separator before the run, or after it when the run leads.
+        // An emptied list leaves its container to the caller and the seam.
         let (from, to) = if i > 0 {
             (end(i - 1), end(j))
-        } else {
+        } else if j + 1 < x_kids.len() {
             (start(i), start(j + 1))
+        } else {
+            (start(i), end(j))
         };
         // A comment beside a dropped entry may describe it or its neighbour.
         // A trailing run's comment may sit past the hash, before the closer; one
@@ -1404,14 +1450,28 @@ fn entry_diff(
                     .map_or(source.len(), |n| end(j) + n)
             }),
         };
+        // A leading run's comment may sit on the lines above it.
+        let before = (i == 0).then(|| (lead_in(source, start(0)), start(0)));
         let commented = (i.max(1)..=j)
             .map(|k| (end(k - 1), start(k)))
             .chain(std::iter::once((end(j), after)))
-            .any(|(a, b)| a < b && source[a..b].contains(&b'#'));
-        if commented
-            || heredoc_opens_within(target, from, to)
-            || heredoc_body_within(target, source, from, to)
+            .chain(before)
+            .find(|&(a, b)| d.comment_within(a, b));
+        if let Some((at, _)) = commented {
+            d.refuse(Refusal::Commented { at });
+            return None;
+        }
+        // The separator before a run starts at the kept entry's own end, so a
+        // heredoc body between it and the run sits inside what must go.
+        let separator_from = if i > 0 {
+            own_range(&x_kids[i - 1]).1
+        } else {
+            from
+        };
+        if heredoc_opens_within(target, from, to)
+            || heredoc_body_within(target, source, separator_from, to)
         {
+            d.refuse(Refusal::HeredocBeside { at: start(i) });
             return None;
         }
         edits.push(Edit {
@@ -1422,6 +1482,24 @@ fn entry_diff(
         i = j + 1;
     }
     Some(edits)
+}
+
+/// Where the text leading up to `at` begins: the line before when `at` opens
+/// its own line, since a comment there describes what follows it; otherwise
+/// the start of `at`'s line.
+fn lead_in(source: &[u8], at: usize) -> usize {
+    let line_start = |to: usize| {
+        source[..to]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |n| n + 1)
+    };
+    let own = line_start(at);
+    if own > 0 && source[own..at].iter().all(|b| matches!(b, b' ' | b'\t')) {
+        line_start(own - 1)
+    } else {
+        own
+    }
 }
 
 /// Where a closing delimiter starts, if only spaces and a trailing comma lie
@@ -1466,18 +1544,9 @@ fn entries_correspond(
 }
 
 /// One corresponding child's edits.
-#[allow(clippy::too_many_arguments)]
-fn diff_child(
-    p: &Node<'_>,
-    t: &Node<'_>,
-    x: &Node<'_>,
-    prepared: &Prepared,
-    t_prepared: &Prepared,
-    template_src: &[u8],
-    env: &Env<'_>,
-    source: &[u8],
-) -> Option<Vec<Edit>> {
-    if let Some(found) = structural_diff(p, t, x, prepared, t_prepared, template_src, env, source) {
+fn diff_child(d: &Diff<'_, '_>, p: &Node<'_>, t: &Node<'_>, x: &Node<'_>) -> Option<Vec<Edit>> {
+    let Diff { prepared, env, .. } = *d;
+    if let Some(found) = structural_diff(d, p, t, x) {
         return Some(found);
     }
     // This child diverges. Replacing *it* is still minimal -- every sibling
@@ -1487,14 +1556,7 @@ fn diff_child(
     if !matcher::matches_in_order(p, x, prepared, env) {
         return None;
     }
-    Some(vec![localized(
-        t,
-        x,
-        t_prepared,
-        template_src,
-        env,
-        source,
-    )?])
+    Some(vec![localized(d, t, x)?])
 }
 
 /// Pair pattern children with template and target children, one triple per
@@ -1620,14 +1682,14 @@ fn diverges(p: &Node<'_>, t: &Node<'_>, prepared: &Prepared, t_prepared: &Prepar
 /// The template is held in *prepared* form -- metavariables already substituted
 /// for placeholder identifiers -- so it is restored to `$NAME` spelling before
 /// rendering, which is what [`render`] understands.
-fn localized(
-    template: &Node<'_>,
-    target: &Node<'_>,
-    t_prepared: &Prepared,
-    template_src: &[u8],
-    env: &Env<'_>,
-    source: &[u8],
-) -> Option<Edit> {
+fn localized(d: &Diff<'_, '_>, template: &Node<'_>, target: &Node<'_>) -> Option<Edit> {
+    let Diff {
+        t_prepared,
+        template_src,
+        env,
+        source,
+        ..
+    } = *d;
     // The value half of `{foo:}` is an ImplicitNode, which borrows the *key's*
     // location rather than having one of its own -- so it has no text to
     // localize to, and rendering its span writes the key over the value. The
@@ -2386,19 +2448,6 @@ mod tests {
     #[test]
     fn an_out_of_order_match_keeps_the_source_order() {
         let cases: &[(&str, &str, &str, Option<&str>)] = &[
-            // A comment beside a dropped entry may describe either neighbour.
-            (
-                "foo(status: 200, **$R)",
-                "foo(**$R)",
-                "foo(\n  body: 'x', # why\n  status: 200\n)\n",
-                None,
-            ),
-            (
-                "foo(status: 200, **$R)",
-                "foo(**$R)",
-                "foo(body: 'x',\n    status: 200 # why\n)\n",
-                None,
-            ),
             // The template reorders, adds an entry, or reshapes the call: there
             // is no place to edit through, and either order would be a guess.
             (
@@ -2650,13 +2699,78 @@ mod tests {
                 "x.to_return(body: <<~B,\n  hi\nB\n  status: 200)\n",
                 None,
             ),
+            (
+                "$S.to_return(body: $B, **)",
+                "$S.to_return(**)",
+                "x.to_return(status: 200, body: <<~B)\n  hi\nB\n",
+                None,
+            ),
         ];
         for (pattern, template, source, want) in cases {
             let got = rewrite(pattern, template, source);
             match want {
                 Some(out) => assert_eq!(got.as_deref(), Ok(*out), "{source:?}"),
-                None => assert!(got.is_err(), "{source:?} should refuse, got {got:?}"),
+                None => assert!(
+                    matches!(got, Err(Refusal::HeredocBeside { .. })),
+                    "{source:?} should refuse for its heredoc, got {got:?}"
+                ),
             }
         }
+    }
+
+    /// A comment beside a dropped entry may describe it or its neighbour, so
+    /// the site is refused -- in either order, on every path, parameters too.
+    #[test]
+    fn a_comment_beside_a_deletion_refuses_the_site() {
+        let to_return = ("$S.to_return(status: 200, **)", "$S.to_return(**)");
+        let cases: &[((&str, &str), &str)] = &[
+            (
+                to_return,
+                "x.to_return(\n  status: 200,\n  # the body\n  body: \"a\"\n)\n",
+            ),
+            (to_return, "x.to_return(status: 200, # ok\n  body: \"a\")\n"),
+            (
+                to_return,
+                "x.to_return(\n  # default status\n  status: 200,\n  body: \"a\"\n)\n",
+            ),
+            (to_return, "x.to_return(\n  status: 200 # ok\n)\n"),
+            (
+                to_return,
+                "x.to_return(\n  body: \"a\",\n  # default\n  status: 200\n)\n",
+            ),
+            (
+                to_return,
+                "x.to_return(\n  body: 'x', # why\n  status: 200\n)\n",
+            ),
+            (
+                to_return,
+                "x.to_return(body: 'x',\n    status: 200 # why\n)\n",
+            ),
+            (
+                ("def fetch(*, legacy: _, **) = _", "def fetch(*, **) = _"),
+                "def fetch(\n  a,\n  legacy: nil, # old\n  mode: 1\n)\nend\n",
+            ),
+            (
+                ("foo($A, status: 200, **)", "foo($A, **)"),
+                "foo(1, # why\n    status: 200)\n",
+            ),
+        ];
+        for ((pattern, template), source) in cases {
+            let got = rewrite(pattern, template, source);
+            assert!(
+                matches!(got, Err(Refusal::Commented { .. })),
+                "{source:?} should refuse for its comment, got {got:?}"
+            );
+        }
+        // A comment past the closer describes the whole call, and stays.
+        assert_eq!(
+            rewrite(
+                to_return.0,
+                to_return.1,
+                "x.to_return(body: 1, status: 200) # stub\n"
+            )
+            .as_deref(),
+            Ok("x.to_return(body: 1) # stub\n")
+        );
     }
 }
