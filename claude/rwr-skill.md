@@ -89,8 +89,18 @@ Patterns are Ruby source with metavariables:
 | `*$NAME` | capture a run of nodes (`foo($A, *$REST)`); `**$NAME` inside a hash |
 | `_` | match one node, don't capture |
 | `*_` | match a run, don't capture |
+| bare `*`, `**`, `&` | a run, the other hash entries, a block-pass argument; `rewrite:` forwards what each matched |
 
-All four are valid Ruby, so a pattern stays copy-pasteable from real code.
+All are valid Ruby, so a pattern stays copy-pasteable from real code.
+
+A bare sigil is Ruby's anonymous forwarding: `match: '$S.to_return(status: 200, **)'`
+with `rewrite: '$S.to_return(**)'` drops one key and keeps the rest in place.
+One of each per pattern (name the others), and one in `rewrite:` needs its
+counterpart in `match:` (exit 3 otherwise). In parameters, `*` is any positional
+run, `**` any keyword run, `&` the block parameter or none; keywords match by
+name, `legacy:` only required, `legacy: _` only optional. A `def` pattern needs a
+body: `def fetch(*, legacy:, **) = _` matches any body, endless or not, and
+rewriting it to `def fetch(*, **) = _` deletes just that parameter.
 
 Hash entries and keyword arguments match by key in any order; `**$REST` takes
 whatever else is there. Order still counts for positional arguments, arrays, a

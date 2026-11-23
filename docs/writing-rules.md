@@ -102,6 +102,42 @@ has no place to edit through, so on such a site rwr refuses the file rather than
 pick an order. Against a source already in the pattern's order, the template's
 order applies as written.
 
+## Bare `*`, `**` and `&`
+
+A bare `*`, `**` or `&` is Ruby's anonymous forwarding, and in a pattern it is a
+wildcard: `*` a run of arguments, `**` the entries nothing else matched, `&` a
+block-pass argument. In `rewrite:` it forwards exactly what the same sigil
+matched, as `def m(*) = foo(*)` does in Ruby:
+
+```yaml
+match:   '$S.to_return(status: 200, **)'
+rewrite: '$S.to_return(**)'
+tests:
+  - input:  "s.to_return(body: 'x', status: 200, headers: h)\n"
+    output: "s.to_return(body: 'x', headers: h)\n"
+```
+
+`**` matches what `**$REST` does; it just needs no name. A pattern holds one of
+each, as a method declares one of each -- name any others (`*$REST`). A bare
+sigil in `rewrite:` that `match:` lacks has nothing to forward and is an error.
+
+In a parameter list, `*` is any run of positional parameters, `**` any run of
+keyword ones, and `&` the block parameter or none. Keywords match by name in any
+order: `legacy:` only a required keyword, `legacy: _` only an optional one. A
+definition needs a body to be Ruby, and `= _` matches any body, endless or not:
+
+```yaml
+match:   'def fetch(*, legacy:, **) = _'
+rewrite: 'def fetch(*, **) = _'
+tests:
+  - input:  "def fetch(url, legacy:, timeout: 5)\n  get(url)\nend\n"
+    output: "def fetch(url, timeout: 5)\n  get(url)\nend\n"
+  - input:  "def fetch(url, legacy:, &blk) = get(url, &blk)\n"
+    unchanged: true    # no `&` in the pattern, so no block parameter
+```
+
+Alone, `def fetch(*) = _` is any parameter list.
+
 ## `where:` predicates
 
 | Key | Constrains |

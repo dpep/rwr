@@ -3893,3 +3893,45 @@ No toggle until a concrete case shows the tidy is wrong.
 
 *Reverses if:* a seam rule is found rewriting whitespace a reader would call style rather than
 damage -- at which point that rule narrows, not the whole stance.
+
+## D129 - A bare `*`, `**` or `&` is a wildcard a template can forward
+
+**Decided.** A bare `*`, `**` or `&` in a pattern is Ruby's anonymous forwarding read as a wildcard:
+`*` a run of arguments, `**` the hash entries nothing else matched, `&` a block-pass argument. In a
+template it forwards exactly what the pattern's same sigil matched -- what `def m(*) = foo(*)` means
+in Ruby. So `$S.to_return(status: 200, **)` -> `$S.to_return(**)` drops one key, and D127's in-place
+edit and D128's seam tidy keep the rest where they stood.
+
+**Why not just `**$REST`.** It is the same match, one name shorter and one concept fewer: a rule
+that drops a key had to invent a name whose only job was to be written twice. The bare sigil
+already means "whatever else was passed" to a rubyist, so the pattern reads as the Ruby it is.
+
+**Still valid Ruby.** Ruby accepts anonymous forwarding only inside a method declaring it, so a
+pattern that does not parse alone is parsed inside `def _(*, **, &)`. Prism, not the scanner,
+decides: the scanner proposes each sigil that stands alone before `,` `)` `]` `}` `|` or the end,
+and the parse must agree it is an anonymous argument or parameter. One inside a string, or one
+writing the rest of a multiple assignment, is not forwarding and is refused or left literal. A
+failure is reported from whichever parse got further, so a pattern the wrapper cannot hold -- a
+`class` -- is described in terms of the pattern, not of a method nobody wrote.
+
+**One of each.** A bare sigil binds under its own spelling, which no `$NAME` can collide with, so a
+second of the same spelling would have to match the same nodes again or make the template's
+forward ambiguous. Refused; name the others. A template sigil the pattern lacks has nothing to
+forward and is a load error. In a `contains:` sub-pattern it is that pattern's own wildcard, not a
+promise to agree with the outer one.
+
+**Parameters.** In a parameter list `*` is a run of positional parameters, `**` of keyword ones,
+`&` the block parameter or its absence. Keywords match by name in any order, as Ruby binds them,
+and exactly: `legacy:` only a required keyword, `legacy: _` only an optional one. Without `&` the
+target has no block parameter; alone, `*` is any parameter list, as `*$P` already was. A rewrite
+diffs parameters by name like a hash, so `def fetch(*, legacy:, **) = _` -> `def fetch(*, **) = _`
+deletes `legacy:` with its separator and keeps every other byte; an emptied list takes its
+parentheses. `_` in the same place on both sides keeps what it matched, and a lone `_` body takes an
+empty one as `$B` does (D121).
+
+**Out of scope.** `...` cannot sit beside `*`/`**` in a `def`, so it is not a wildcard. A literal
+anonymous forwarding call `foo(*)` cannot be matched as itself; it never could be written as a
+pattern, so nothing regresses.
+
+*Reverses if:* a real rule needs a bare sigil to mean the literal anonymous forwarding it spells --
+which would call for an escape rather than giving up the wildcard.

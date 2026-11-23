@@ -1096,14 +1096,28 @@ impl Rule {
         // A metavariable the template introduces has nothing to be replaced
         // with, and renders as empty rather than announcing itself.
         if let Some(template) = &self.rewrite {
-            for var in crate::pattern::metavar::scan(template) {
-                if let Some(name) = &var.name
-                    && !known(name)
-                {
-                    return Err(complain(format!(
-                        "`rewrite:` uses ${name}, which `match:` never captures"
-                    )));
+            let vars = crate::pattern::metavar::scan(template);
+            for var in &vars {
+                let Some(name) = &var.name else { continue };
+                if known(name) {
+                    continue;
                 }
+                return Err(complain(if crate::pattern::metavar::is_bare(name) {
+                    format!("`rewrite:` forwards a bare `{name}`, but `match:` has none to forward")
+                } else {
+                    format!("`rewrite:` uses ${name}, which `match:` never captures")
+                }));
+            }
+            // What a bare sigil forwards is only certain once Prism agrees it is
+            // one; `prepare` is what asks.
+            if vars.iter().any(|v| {
+                v.name
+                    .as_deref()
+                    .is_some_and(crate::pattern::metavar::is_bare)
+            }) && let Err(e) =
+                crate::pattern::prepare::prepare_with(template, &self.constant_captures())
+            {
+                return Err(complain(format!("`rewrite:` {e}")));
             }
         }
 
@@ -1454,6 +1468,24 @@ mod tests {
             refuse("match: $R.foo\nwhere:\n  $R: { type: ActiveRecord::Base }\n").is_none(),
             "a constant path is a class name too"
         );
+    }
+
+    /// D129. A bare sigil in `rewrite:` forwards the one `match:` wrote, so
+    /// one with no counterpart has nothing to forward, and a second of one
+    /// spelling cannot say which run it means.
+    #[test]
+    fn a_forwarded_bare_sigil_needs_one_counterpart() {
+        let refuse = |yaml: &str| {
+            let rules = parse(yaml, "t", "t").expect("parses as YAML");
+            let prepared = crate::pattern::prepare::prepare(&rules[0].pattern).expect("prepares");
+            rules[0].validate(&prepared).err().map(|e| e.to_string())
+        };
+        let missing = refuse("match: foo(1, *)\nrewrite: foo(**)\n").expect("no `**` refuses");
+        assert!(missing.contains("bare `**`"), "{missing}");
+        assert!(refuse("match: foo(1, *)\nrewrite: bar(*, *)\n").is_some());
+        assert!(refuse("match: \"foo(1, *)\"\nrewrite: \"bar('(*)', *)\"\n").is_some());
+        assert!(refuse("match: foo(1, *)\nrewrite: bar(*)\n").is_none());
+        assert!(refuse("match: foo(*$A)\nrewrite: bar(*$A)\n").is_none());
     }
 
     /// Both the signature index and the hierarchy are built lazily, gated on

@@ -5313,3 +5313,33 @@ fn a_hand_written_writer_is_left_alone() {
         stderr(&out)
     );
 }
+
+/// D129. A bare `**` forwards on disk what the pattern's `**` matched, in
+/// source order, and a template sigil `match:` lacks is a rule error (exit 3).
+#[test]
+fn a_bare_double_splat_forwards_the_entries_it_matched() {
+    let dir = fixture("s.to_return(body: 'x', status: 200, headers: h)\n");
+    let file = dir.path().join("fixture.rb");
+    let out = rwr(&[
+        "rewrite",
+        "$S.to_return(status: 200, **)",
+        "-r",
+        "$S.to_return(**)",
+        file.to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read back"),
+        "s.to_return(body: 'x', headers: h)\n"
+    );
+
+    let out = rwr(&[
+        "check",
+        "$S.to_return(status: 200)",
+        "-r",
+        "$S.to_return(**)",
+        file.to_str().expect("utf8"),
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(stderr(&out).contains("bare `**`"), "{}", stderr(&out));
+}
