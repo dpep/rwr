@@ -75,6 +75,9 @@ pub(crate) enum Refusal {
     /// evaluates first and the order the hash iterates in -- so it is refused
     /// rather than guessed (D127).
     Reordered { at: usize },
+    /// rwr computed an edit that does not describe a span of the source. A bug
+    /// in rwr, refused rather than applied or allowed to abort the run.
+    Malformed { edit: Edit },
 }
 
 /// A refusal is a *product*, not a diagnostic: refusing rather than guessing is
@@ -128,6 +131,12 @@ impl std::fmt::Display for Refusal {
                 "the hash at byte {at} lists its entries in another order than the pattern, and \
                  the template cannot be applied without moving them -- write the template's \
                  entries in the pattern's order so each is edited where it stands"
+            ),
+            Refusal::Malformed { edit } => write!(
+                f,
+                "rwr computed an edit it cannot apply (bytes {}..{}) -- a bug in rwr; the \
+                 file is left as it was",
+                edit.start, edit.end
             ),
         }
     }
@@ -215,6 +224,29 @@ fn heredoc_opens_within(node: &Node<'_>, start: usize, end: usize) -> bool {
         let at = current.location().start_offset();
         if (start..end).contains(&at) && heredoc_closing(&current).is_some() {
             return true;
+        }
+        stack.extend(generated::children(&current));
+    }
+    false
+}
+
+/// Whether a heredoc body or terminator lies anywhere in `[start, end)`.
+///
+/// A heredoc opened before the range keeps its body after its opening line, so
+/// a deletion from that line reaching a later one would take the body with it.
+fn heredoc_body_within(node: &Node<'_>, source: &[u8], start: usize, end: usize) -> bool {
+    let mut stack = vec![generated::dup(node)];
+    while let Some(current) = stack.pop() {
+        if heredoc_closing(&current).is_some() {
+            let (_, body_end) = effective_range(&current);
+            let opened = current.location().end_offset();
+            let body_start = source[opened..]
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(source.len(), |n| opened + n + 1);
+            if body_start < end && start < body_end {
+                return true;
+            }
         }
         stack.extend(generated::children(&current));
     }
@@ -568,6 +600,13 @@ pub(crate) fn plan(
                 ));
             }
         }
+    }
+
+    if let Some((_, edit)) = edits
+        .iter()
+        .find(|(_, e)| e.start > e.end || e.end > source.len())
+    {
+        return Err(Refusal::Malformed { edit: edit.clone() });
     }
 
     // Outermost first: a wider edit that contains a narrower one wins, and the
@@ -1319,8 +1358,16 @@ fn entry_diff(
             text: String::new(),
         }]);
     }
-    let end = |i: usize| effective_range(&x_kids[i]).1;
     let start = |i: usize| own_range(&x_kids[i]).0;
+    // Where an entry's text ends before the next one: past its heredoc body,
+    // unless the next entry shares the heredoc's opening line and so precedes it.
+    let end = |i: usize| {
+        let effective = effective_range(&x_kids[i]).1;
+        match x_kids.get(i + 1) {
+            Some(next) if effective > own_range(next).0 => own_range(&x_kids[i]).1,
+            _ => effective,
+        }
+    };
     let mut i = 0;
     while i < x_kids.len() {
         if !dropped[i] {
@@ -1353,7 +1400,10 @@ fn entry_diff(
             .map(|k| (end(k - 1), start(k)))
             .chain(std::iter::once((end(j), after)))
             .any(|(a, b)| a < b && source[a..b].contains(&b'#'));
-        if commented || heredoc_opens_within(target, from, to) {
+        if commented
+            || heredoc_opens_within(target, from, to)
+            || heredoc_body_within(target, source, from, to)
+        {
             return None;
         }
         edits.push(Edit {
@@ -2532,5 +2582,53 @@ mod tests {
         }
         let out = rewrite("foo(**$R)", "bar(**$R)", "foo(**opts)\n");
         assert_eq!(out.as_deref(), Ok("bar(**opts)\n"));
+    }
+
+    /// An entry dropped from the line a heredoc opens on sits before the
+    /// heredoc's body, so its separator is measured from the kept entry's own
+    /// end, not from past the body.
+    #[test]
+    fn an_entry_beside_a_heredoc_is_dropped_on_its_own_line() {
+        let cases: &[(&str, &str, &str, Option<&str>)] = &[
+            (
+                "$S.to_return(status: 200, **)",
+                "$S.to_return(**)",
+                "x.to_return(body: <<~B, status: 200)\n  hi\nB\n",
+                Some("x.to_return(body: <<~B)\n  hi\nB\n"),
+            ),
+            (
+                "$S.to_return(status: 200, **)",
+                "$S.to_return(**)",
+                "x.to_return(body: f(<<~B), status: 200)\n  hi\nB\n",
+                Some("x.to_return(body: f(<<~B))\n  hi\nB\n"),
+            ),
+            (
+                "$S.to_return(**, status: 200)",
+                "$S.to_return(**)",
+                "x.to_return(body: <<~B, status: 200, headers: <<~C)\n  hi\nB\n  c\nC\n",
+                Some("x.to_return(body: <<~B, headers: <<~C)\n  hi\nB\n  c\nC\n"),
+            ),
+            (
+                "$S.to_return(headers: {}, **)",
+                "$S.to_return(**)",
+                "x.to_return(status: 200, body: <<~HTML, headers: {})\n  hi\nHTML\n",
+                Some("x.to_return(status: 200, body: <<~HTML)\n  hi\nHTML\n"),
+            ),
+            // An entry after the body: deleting from the kept entry's own end
+            // would take the body with it.
+            (
+                "$S.to_return(status: 200, **)",
+                "$S.to_return(**)",
+                "x.to_return(body: <<~B,\n  hi\nB\n  status: 200)\n",
+                None,
+            ),
+        ];
+        for (pattern, template, source, want) in cases {
+            let got = rewrite(pattern, template, source);
+            match want {
+                Some(out) => assert_eq!(got.as_deref(), Ok(*out), "{source:?}"),
+                None => assert!(got.is_err(), "{source:?} should refuse, got {got:?}"),
+            }
+        }
     }
 }
