@@ -1194,7 +1194,15 @@ fn drop_emptied_parentheses(target: &Node<'_>, source: &[u8], edits: &mut [Edit]
         else {
             return;
         };
-        if !ends_an_argumentless_call(&source[close.end_offset()..]) {
+        // Only after `.` or `&.` does a bare name stay a call: `X::Foo` is a
+        // constant, and `x.()` has no name to leave behind.
+        let dotted = call
+            .call_operator_loc()
+            .is_some_and(|op| matches!(op.as_slice(), b"." | b"&."));
+        if !dotted
+            || call.message_loc().is_none()
+            || !ends_an_argumentless_call(&source[close.end_offset()..])
+        {
             return;
         }
         (open, close)
@@ -2537,6 +2545,26 @@ mod tests {
                 "foo(**$R)",
                 "foo(status: 200)\n",
                 "foo()\n",
+            ),
+            // Only after `.` or `&.` is a bare name still a call: `X::Foo` is a
+            // constant lookup, and `x.()` has no name to stand alone.
+            (
+                "$S.$M(status: 200, **)",
+                "$S.$M(**)",
+                "X::Foo(status: 200)\n",
+                "X::Foo()\n",
+            ),
+            (
+                "$S.$M(status: 200, **)",
+                "$S.$M(**)",
+                "x&.foo(status: 200)\n",
+                "x&.foo\n",
+            ),
+            (
+                "$S.call(status: 200, **)",
+                "$S.call(**)",
+                "x.(status: 200)\n",
+                "x.()\n",
             ),
             (
                 "foo(status: 200, **$R)",
