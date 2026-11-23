@@ -1233,8 +1233,104 @@ fn structural_diff(
     for (p, t, x) in aligned {
         edits.extend(diff_child(d, p, t, x)?);
     }
+    close_argument_gaps(d, target, &mut edits)?;
     drop_emptied_parentheses(target, source, &mut edits);
     Some(edits)
+}
+
+/// Widen each deletion of whole arguments over the separator they leave, so
+/// `foo 1, status: 200` loses `, status: 200` and not just the entry -- a
+/// stranded comma there makes the next line an argument. The separator is the
+/// comma before the run, or after it when the run leads; a run that empties
+/// the list takes a trailing comma too, and a call without parentheses its
+/// space -- or, without a receiver, becomes `foo()`, since a bare `foo` may read
+/// as a local variable. A comment or heredoc body in the separator refuses the
+/// site.
+fn close_argument_gaps(d: &Diff<'_, '_>, target: &Node<'_>, edits: &mut [Edit]) -> Option<()> {
+    let source = d.source;
+    let Some(call) = target.as_call_node() else {
+        return Some(());
+    };
+    let mut items: Vec<Node<'_>> = call
+        .arguments()
+        .map(|a| a.arguments().iter().collect())
+        .unwrap_or_default();
+    if let Some(block) = call.block()
+        && matches!(block, Node::BlockArgumentNode { .. })
+    {
+        items.push(block);
+    }
+    let n = items.len();
+    let start = |i: usize| own_range(&items[i]).0;
+    let end = |i: usize| {
+        let effective = effective_range(&items[i]).1;
+        match items.get(i + 1) {
+            Some(next) if effective > own_range(next).0 => own_range(&items[i]).1,
+            _ => effective,
+        }
+    };
+    let blank = |a: usize, b: usize| a <= b && source[a..b].iter().all(u8::is_ascii_whitespace);
+    // Whitespace and exactly one comma.
+    let separator = |a: usize, b: usize| {
+        a <= b
+            && source[a..b].iter().filter(|c| **c == b',').count() == 1
+            && source[a..b]
+                .iter()
+                .all(|c| c.is_ascii_whitespace() || *c == b',')
+    };
+    for edit in edits.iter_mut().filter(|e| e.text.is_empty()) {
+        let Some(i) = (0..n).find(|&i| start(i) >= edit.start) else {
+            continue;
+        };
+        let Some(j) = (0..n).rev().find(|&j| end(j) <= edit.end) else {
+            continue;
+        };
+        if i > j || !blank(edit.start, start(i)) || !blank(end(j), edit.end) {
+            continue;
+        }
+        let gap = if i > 0 {
+            (end(i - 1), edit.start)
+        } else if j + 1 < n {
+            (edit.end, start(j + 1))
+        } else {
+            // A trailing comma, up to the closer or the end of the line.
+            let to = closer_on_line(source, edit.end).unwrap_or_else(|| {
+                let skip = source[edit.end..]
+                    .iter()
+                    .position(|b| !b.is_ascii_whitespace() && *b != b',')
+                    .unwrap_or(source.len() - edit.end);
+                edit.end + skip
+            });
+            (edit.end, to)
+        };
+        if d.comment_within(gap.0, gap.1) {
+            d.refuse(Refusal::Commented { at: gap.0 });
+            return None;
+        }
+        if heredoc_body_within(target, source, gap.0, gap.1) {
+            d.refuse(Refusal::HeredocBeside { at: edit.start });
+            return None;
+        }
+        if i > 0 || j + 1 < n {
+            if !separator(gap.0, gap.1) {
+                return None;
+            }
+            edit.start = edit.start.min(gap.0);
+            edit.end = edit.end.max(gap.1);
+            continue;
+        }
+        // The list empties: a trailing comma goes with it.
+        if let Some(comma) = source[gap.0..gap.1].iter().position(|c| *c == b',') {
+            edit.end = gap.0 + comma + 1;
+        }
+        if call.opening_loc().is_none() {
+            edit.start = call.message_loc()?.end_offset();
+            if call.receiver().is_none() {
+                edit.text = "()".to_string();
+            }
+        }
+    }
+    Some(())
 }
 
 /// Widen an edit that empties an explicit receiver's argument list over its
@@ -2772,5 +2868,74 @@ mod tests {
             .as_deref(),
             Ok("x.to_return(body: 1) # stub\n")
         );
+    }
+
+    /// Deleting whole arguments takes their separator: a stranded comma on a
+    /// call without parentheses makes the next line an argument, and one
+    /// before `)` or `&blk` does not parse.
+    #[test]
+    fn dropped_arguments_take_their_separator() {
+        let to_return = ("$S.to_return(status: 200, **)", "$S.to_return(**)");
+        let cases: &[((&str, &str), &str, &str)] = &[
+            (
+                ("foo($A, status: 200, **)", "foo($A, **)"),
+                "foo 1, status: 200\nbar\n",
+                "foo 1\nbar\n",
+            ),
+            (
+                ("link_to(*, method: :post, **)", "link_to(*, **)"),
+                "link_to \"y\", u, method: :post\nbar\n",
+                "link_to \"y\", u\nbar\n",
+            ),
+            (
+                ("foo($A, status: 200, **)", "foo($A, **)"),
+                "foo(1, status: 200)\n",
+                "foo(1)\n",
+            ),
+            (
+                to_return,
+                "x.to_return(\n  status: 200,\n)\n",
+                "x.to_return\n",
+            ),
+            (to_return, "x.to_return(status: 200,)\n", "x.to_return\n"),
+            (
+                to_return,
+                "x.to_return status: 200\nbar\n",
+                "x.to_return\nbar\n",
+            ),
+            (
+                ("foo(a: 1, **)", "foo(**)"),
+                "foo(\n  a: 1,\n)\n",
+                "foo()\n",
+            ),
+            (
+                ("foo(a: 1, **)", "foo(**)"),
+                "foo a: 1\nbar\n",
+                "foo()\nbar\n",
+            ),
+            (("foo(1, *)", "foo(*)"), "foo(\n  1,\n)\n", "foo()\n"),
+            (
+                ("foo(a: 1, **, &)", "foo(**, &)"),
+                "foo(a: 1, &b)\n",
+                "foo(&b)\n",
+            ),
+            (
+                ("foo($A, a: 1, **, &)", "foo($A, **, &)"),
+                "foo(1, a: 1, &b)\n",
+                "foo(1, &b)\n",
+            ),
+            (
+                ("foo($A, a: 1, **)", "foo($A, **)"),
+                "foo(<<~A, a: 1)\n  hi\nA\nbar\n",
+                "foo(<<~A)\n  hi\nA\nbar\n",
+            ),
+        ];
+        for ((pattern, template), source, want) in cases {
+            assert_eq!(
+                rewrite(pattern, template, source).as_deref(),
+                Ok(*want),
+                "{pattern} -> {template} on {source:?}"
+            );
+        }
     }
 }
