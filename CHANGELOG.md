@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+**Existing rules can match more, and keep more of the source -- re-run your rule fixtures.** Patterns
+you already have change meaning in four ways:
+
+- A hash or keyword-argument pattern matches its entries in any order (D127).
+- A `def` pattern's keywords match in any order, and a `*$P` beside other parameters is a run of them,
+  so `def put($A, *$P) = _` now matches `def put(a, *rest, b)`.
+- An anonymous `*`, `**` or `&` parameter in a pattern is a wildcard, not that literal parameter (D129).
+- A rewrite keeps the source's spelling of every entry it keeps: `:body => b` stays `:body => b`
+  rather than becoming `body: b`. Update any `output:` that expected the old re-render.
+
 **A bare `*`, `**` or `&` is a wildcard a template can forward.** `match: '$S.to_return(status: 200, **)'`
 with `rewrite: '$S.to_return(**)'` drops `status: 200` and keeps every other entry where it was --
 Ruby's own anonymous forwarding, with no name to invent. In a parameter list `*` and `**` are runs of
@@ -10,8 +20,7 @@ positional and keyword parameters and `&` the block parameter, so `def fetch(*, 
 one of each; a second, or one in `rewrite:` that `match:` lacks, is an error. A pattern that already
 spelled an anonymous `*`, `**` or `&` parameter now reads it as a wildcard (D129). Positional
 parameters match as exactly as keywords: `$A` only a required one, `$A = _` only an optional one, so
-`def fetch($A, $B = _, *) = _` -> `def fetch($A, *) = _` drops the optional parameter in place. No
-existing pattern changes meaning.
+`def fetch($A, $B = _, *) = _` -> `def fetch($A, *) = _` drops the optional parameter in place.
 
 **A `def` pattern with no body says so.** `def fetch($A)` was reported as "formal argument cannot be a
 constant", an artefact of rwr's own placeholder repair; it now reports Ruby's error for the pattern as
