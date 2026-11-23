@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-11-22
 
 **Existing rules can match more, and keep more of the source -- re-run your rule fixtures.** Patterns
 you already have change meaning in four ways:
